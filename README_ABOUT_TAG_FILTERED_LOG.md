@@ -39,7 +39,7 @@ log4j.appender.stdout.filter.tagFilter.tags={tags}
 In this example, we added logs with tag in acceptor cycle to test and made only logs with the tags tag1, tag2 be displayed.
 ```properties
 # @log4j.properties
-log4j.appender.stdout.filter.tagFilter.tags=tag1,tag2,tag3
+log4j.appender.stdout.filter.tagFilter.tags=tag1,tag2
 ```
 ```scala
 // @SocketServer.scala > Acceptor > run()
