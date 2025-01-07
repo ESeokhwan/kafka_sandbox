@@ -29,17 +29,41 @@ The following APIs are provided for logging at various levels with support for t
  ```
 ### Configuration ###
 #### Setting Tags Filter in log4j.properties
-To specify which tags should be logged, update the following configuration in the log4j.properties file.
+To specify which tags should be logged, update the following configuration in the right position of log4j2.yaml file.
 ```properties
-log4j.appender.stdout.filter.tagFilter.tags={tags}
+  Filters:
+    MarkerFilter:
+      - marker: {1st tag}
+        onMatch: ACCEPT
+        onMismatch: NEUTRAL
+      - marker: {2nd tag}
+        onMatch: ACCEPT
+        onMismatch: NEUTRAL
+      ...
+      - marker: {last tag}
+        onMatch: ACCEPT
+        onMismatch: DENY
 ```
-- Replace {tags} with a comma-separated list of tags that you want to enable for logging.
+- Replace {OO tag} with a tag that you want to enable for logging. Important thing is you should only set onMismatch to DENY on last tag.
+- For more information, check it out on [the Log4j 2 Configuration Syntax](https://logging.apache.org/log4j/2.x/manual/configuration.html#configuration-syntax)
 
 ### Example ###
 In this example, we added logs with tag in acceptor cycle to test and made only logs with the tags tag1, tag2 be displayed.
 ```properties
 # @log4j.properties
-log4j.appender.stdout.filter.tagFilter.tags=tag1,tag2
+  Appenders:
+    Console:
+      name: STDOUT
+      PatternLayout:
+        pattern: "${logPattern}"
+      Filters:
+        MarkerFilter:
+          - marker: tag1
+            onMatch: ACCEPT
+            onMismatch: NEUTRAL
+          - marker: tag2
+            onMatch: ACCEPT
+            onMismatch: DENY
 ```
 ```scala
 // @SocketServer.scala > Acceptor > run()
@@ -70,5 +94,5 @@ override def run(): Unit = {
 ```
 
 Below is an example of running the application with the above configuration and edited code.
-![tagged-log-api-use-case](docs/images/tagged-loggin-api.png)
+![tagged-log-api-use-case](docs/images/tagged-logging-api.png)
 
