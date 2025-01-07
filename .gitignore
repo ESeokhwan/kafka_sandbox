@@ -63,6 +63,7 @@ docker/test/report_*.html
 kafka.Kafka
 __pycache__
 
+# custom gitignore
 **/bin/**/*.json
 **/bin/**/*.properties
 **/bin/**/*.scala
@@ -70,5 +71,8 @@ __pycache__
 **/bin/**/version
 
 **/bin/**/META-INF/
+
+custom-bin/
+custom-config/
 
 
