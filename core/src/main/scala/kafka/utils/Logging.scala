@@ -81,23 +81,23 @@ trait Logging {
   def fatal(msg: => String, e: => Throwable): Unit =
     logger.error(Logging.FatalMarker, msgWithLogIdent(msg), e)
 
-  def traceWithTag(tag: => String, msg: => String): Unit = logger.trace(DynamicTagsFilter.tagPrefix(tag) + msg)
+  def traceWithTag(tag: => String, msg: => String): Unit = logger.trace(MarkerFactory.getMarker(tag), msg)
 
-  def traceWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.trace(DynamicTagsFilter.tagPrefix(tag) + msgWithLogIdent(msg))
+  def traceWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.trace(MarkerFactory.getMarker(tag), msgWithLogIdent(msg), e)
 
-  def debugWithTag(tag: => String, msg: => String): Unit = logger.debug(DynamicTagsFilter.tagPrefix(tag) + msg)
+  def debugWithTag(tag: => String, msg: => String): Unit = logger.debug(MarkerFactory.getMarker(tag), msg)
 
-  def debugWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.debug(DynamicTagsFilter.tagPrefix(tag) + msgWithLogIdent(msg))
+  def debugWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.debug(MarkerFactory.getMarker(tag), msgWithLogIdent(msg))
 
-  def infoWithTag(tag: => String, msg: => String): Unit = logger.info(DynamicTagsFilter.tagPrefix(tag) + msg)
+  def infoWithTag(tag: => String, msg: => String): Unit = logger.info(MarkerFactory.getMarker(tag), msg)
 
-  def infoWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.info(DynamicTagsFilter.tagPrefix(tag) + msgWithLogIdent(msg))
+  def infoWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.info(MarkerFactory.getMarker(tag), msgWithLogIdent(msg))
 
-  def warnWithTag(tag: => String, msg: => String): Unit = logger.warn(DynamicTagsFilter.tagPrefix(tag) + msg)
+  def warnWithTag(tag: => String, msg: => String): Unit = logger.warn(MarkerFactory.getMarker(tag), msg)
 
-  def warnWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.warn(DynamicTagsFilter.tagPrefix(tag) + msgWithLogIdent(msg))
+  def warnWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.warn(MarkerFactory.getMarker(tag), msgWithLogIdent(msg))
 
-  def errorWithTag(tag: => String, msg: => String): Unit = logger.error(DynamicTagsFilter.tagPrefix(tag) + msg)
+  def errorWithTag(tag: => String, msg: => String): Unit = logger.error(MarkerFactory.getMarker(tag), msg)
 
-  def errorWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.error(DynamicTagsFilter.tagPrefix(tag) + msgWithLogIdent(msg))
+  def errorWithTag(tag: => String, msg: => String, e: => Throwable): Unit = logger.error(MarkerFactory.getMarker(tag), msgWithLogIdent(msg))
 }
