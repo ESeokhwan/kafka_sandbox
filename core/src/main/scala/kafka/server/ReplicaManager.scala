@@ -1797,6 +1797,10 @@ class ReplicaManager(val config: KafkaConfig,
         // progress in such cases and don't need to report a `RecordTooLargeException`
         new FetchDataInfo(givenFetchedDataInfo.fetchOffsetMetadata, MemoryRecords.EMPTY)
       } else {
+        if (readInfo.activeSegmentBaseOffset == readInfo.fetchedData.fetchOffsetMetadata.messageOffset) {
+          infoWithTag("active_segment", "activeSegmentBaseOffset : " + readInfo.activeSegmentBaseOffset + ", current Segment offset : " + givenFetchedDataInfo.fetchOffsetMetadata.segmentBaseOffset);
+        }
+
         // For active segment we assume that it is hot enough to still have all data in page cache.
         // Most of fetch requests are fetching from the tail of the log, so this optimization should save
         // call of additional sendfile(2) targeting /dev/null for populating page cache significantly.
