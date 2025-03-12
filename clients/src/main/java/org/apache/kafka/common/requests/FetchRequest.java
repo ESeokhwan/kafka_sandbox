@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.clients.FetchSessionHandler;
 import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
@@ -28,6 +29,7 @@ import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.utils.LogContext;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -39,6 +41,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+
 public class FetchRequest extends AbstractRequest {
     public static final int CONSUMER_REPLICA_ID = -1;
 
@@ -49,6 +53,10 @@ public class FetchRequest extends AbstractRequest {
     public static final int ORDINARY_CONSUMER_ID = -1;
     public static final int DEBUGGING_CONSUMER_ID = -2;
     public static final int FUTURE_LOCAL_REPLICA_ID = -3;
+
+    private static final LogContext logContext = new LogContext("[ReplicaFetcher replicaId=${brokerConfig.brokerId}, leaderId=${sourceBroker.id}, " +
+            "fetcherId=$fetcherId] ");
+    private static final Logger log = logContext.logger(FetchRequest.class);
 
     private final FetchRequestData data;
 
@@ -403,6 +411,7 @@ public class FetchRequest extends AbstractRequest {
             } else {
                 name = topicNames.get(fetchTopic.topicId());
             }
+            log.info("topic name: " + name);
             fetchTopic.partitions().forEach(fetchPartition ->
                 // Topic name may be null here if the topic name was unable to be resolved using the topicNames map.
                 fetchData.put(new TopicIdPartition(fetchTopic.topicId(), new TopicPartition(name, fetchPartition.partition())),

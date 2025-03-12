@@ -770,6 +770,10 @@ class KafkaApis(val requestChannel: RequestChannel,
         metadataCache.topicIdsToNames()
       else
         Collections.emptyMap[Uuid, String]()
+    infoWithTag("multi-topic-consumer", "====================== new Request ======================")
+    infoWithTag("multi-topic-consumer", "topic in metadata: " + topicNames)
+    infoWithTag("multi-topic-consumer", "fetch request: " + fetchRequest)
+    infoWithTag("multi-topic-consumer", "fetch request meta data: " + fetchRequest.metadata())
 
     val fetchData = fetchRequest.fetchData(topicNames)
     val forgottenTopics = fetchRequest.forgottenTopics(topicNames)
@@ -804,6 +808,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       // Regular Kafka consumers need READ permission on each partition they are fetching.
       val partitionDatas = new mutable.ArrayBuffer[(TopicIdPartition, FetchRequest.PartitionData)]
       fetchContext.foreachPartition { (topicIdPartition, partitionData) =>
+        infoWithTag("multi-topic-consumer", "topic in fetchContext.foreachPartition: " + topicIdPartition.topic())
         if (topicIdPartition.topic == null)
           erroneous += topicIdPartition -> FetchResponse.partitionResponse(topicIdPartition, Errors.UNKNOWN_TOPIC_ID)
         else

@@ -18,6 +18,7 @@
 package kafka.server
 
 import com.typesafe.scalalogging.Logger
+import kafka.Kafka.infoWithTag
 import kafka.utils.Logging
 import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.common.message.FetchResponseData
@@ -275,18 +276,22 @@ class FetchSession(val id: Int,
     val added = new TL
     val updated = new TL
     val removed = new TL
+    infoWithTag("multi-topic-consumer", "update session")
     fetchData.forEach { (topicPart, reqData) =>
       val cachedPartitionKey = new CachedPartition(topicPart, reqData)
       val cachedPart = partitionMap.find(cachedPartitionKey)
       if (cachedPart == null) {
+        infoWithTag("multi-topic-consumer", "update session - add: " + topicPart)
         partitionMap.mustAdd(cachedPartitionKey)
         added.add(topicPart)
       } else {
+        infoWithTag("multi-topic-consumer", "update session - update: " + topicPart + " / " + reqData)
         cachedPart.updateRequestParams(reqData)
         updated.add(topicPart)
       }
     }
     toForget.forEach { p =>
+      infoWithTag("multi-topic-consumer", "update session - remove: " + p)
       if (partitionMap.remove(new CachedPartition(p))) {
         removed.add(p)
       }
@@ -375,6 +380,7 @@ class SessionlessFetchContext(val fetchData: util.Map[TopicIdPartition, FetchReq
     Option(fetchData.get(part)).map(_.fetchOffset)
 
   override def foreachPartition(fun: (TopicIdPartition, FetchRequest.PartitionData) => Unit): Unit = {
+    infoWithTag("multi-topic-consumer", "fetchSession: SessionlessFetchContext")
     fetchData.forEach((tp, data) => fun(tp, data))
   }
 
@@ -423,6 +429,7 @@ class FullFetchContext(private val time: Time,
     Option(fetchData.get(part)).map(_.fetchOffset)
 
   override def foreachPartition(fun: (TopicIdPartition, FetchRequest.PartitionData) => Unit): Unit = {
+    infoWithTag("multi-topic-consumer", "fetchSession: FullFetchContext")
     fetchData.forEach((tp, data) => fun(tp, data))
   }
 
@@ -470,6 +477,7 @@ class IncrementalFetchContext(private val time: Time,
   override def getFetchOffset(tp: TopicIdPartition): Option[Long] = session.getFetchOffset(tp)
 
   override def foreachPartition(fun: (TopicIdPartition, FetchRequest.PartitionData) => Unit): Unit = {
+    infoWithTag("multi-topic-consumer", "fetchSession: IncrementalFetchContext")
     // Take the session lock and iterate over all the cached partitions.
     session.synchronized {
       session.partitionMap.forEach { part =>
@@ -499,6 +507,7 @@ class IncrementalFetchContext(private val time: Time,
         if (mustRespond) {
           nextElement = element
           if (updateFetchContextAndRemoveUnselected && FetchResponse.recordsSize(respData) > 0) {
+            infoWithTag("multi-topic-consumer", "update session - remove and add @ PartitionIterator: " + topicPart)
             session.partitionMap.remove(cachedPart)
             session.partitionMap.mustAdd(cachedPart)
           }

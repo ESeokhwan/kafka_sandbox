@@ -1907,12 +1907,14 @@ class ReplicaManager(val config: KafkaConfig,
     val result = new mutable.ArrayBuffer[(TopicIdPartition, LogReadResult)]
     var minOneMessage = !params.hardMaxBytesLimit
     readPartitionInfo.foreach { case (tp, fetchInfo) =>
+      infoWithTag("multi-topic-consumer", "topic: " + tp.topic() + ", partition: " + tp.partition() + ", remained limitBytes: " + limitBytes)
       val readResult = read(tp, fetchInfo, limitBytes, minOneMessage)
       val recordBatchSize = readResult.info.records.sizeInBytes
       // Once we read from a non-empty partition, we stop ignoring request and partition level size limits
       if (recordBatchSize > 0)
         minOneMessage = false
       limitBytes = math.max(0, limitBytes - recordBatchSize)
+      infoWithTag("multi-topic-consumer", "cur limitBytes: " + limitBytes)
       result += (tp -> readResult)
     }
     result
