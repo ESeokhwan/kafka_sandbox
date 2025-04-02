@@ -17,7 +17,10 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
       onRequestQueueCounter.increaseCounter(1)
       onRequestQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
         val messageRate = (curCount - lastCommitCount).toDouble / (curTime - lastCommitTime).toDouble
-        infoWithTag("produce-rate-check", "Entered Produce Request Rate: " + messageRate + "(req/ms)")
+        infoWithTag(
+          "produce-rate-check",
+          f"Entered Produce Request Rate: ${messageRate}%.2f req/ms (last: $lastCommitCount, current: $curCount)"
+        )
       })
     }
   }
@@ -29,7 +32,10 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
       onResponseQueueCounter.increaseCounter(1)
       onResponseQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
         val messageRate = (curCount - lastCommitCount).toDouble / (curTime - lastCommitTime).toDouble
-        infoWithTag("produce-rate-check", "Commited Produce Request Rate: " + messageRate + "(req/ms)")
+        infoWithTag(
+          "produce-rate-check",
+          f"Committed Produce Request Rate: ${messageRate}%.2f req/ms (last: $lastCommitCount, current: $curCount)"
+        )
       })
     }
   }
