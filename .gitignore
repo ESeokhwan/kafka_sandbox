@@ -72,7 +72,7 @@ __pycache__
 
 **/bin/**/META-INF/
 
-custom-bin/
-custom-config/
+custom-bin**/
+custom-config**/
 
 
