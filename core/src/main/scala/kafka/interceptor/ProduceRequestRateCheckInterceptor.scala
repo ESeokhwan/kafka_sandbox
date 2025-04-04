@@ -16,10 +16,10 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
     if (request.header.apiKey() == ApiKeys.PRODUCE) {
       onRequestQueueCounter.increaseCounter(1)
       onRequestQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
-        val messageRate = (curCount - lastCommitCount).toDouble / (curTime - lastCommitTime).toDouble
+        val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
         infoWithTag(
           "produce-rate-check",
-          f"Entered Produce Request Rate: ${messageRate}%.2f req/ms (last: $lastCommitCount, current: $curCount)"
+          f"Entered Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
         )
       })
     }
@@ -31,10 +31,10 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
     if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
       onResponseQueueCounter.increaseCounter(1)
       onResponseQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
-        val messageRate = (curCount - lastCommitCount).toDouble / (curTime - lastCommitTime).toDouble
+        val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
         infoWithTag(
           "produce-rate-check",
-          f"Committed Produce Request Rate: ${messageRate}%.2f req/ms (last: $lastCommitCount, current: $curCount)"
+          f"Committed Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
         )
       })
     }
