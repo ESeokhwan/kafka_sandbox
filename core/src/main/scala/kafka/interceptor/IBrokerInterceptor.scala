@@ -3,6 +3,8 @@ package kafka.interceptor
 import kafka.network.RequestChannel
 
 trait IBrokerInterceptor {
+  def init(): Unit
+
   def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit
 
   def afterUnmuteChannel(response: RequestChannel.Response, connectionId: String): Unit
@@ -12,4 +14,6 @@ trait IBrokerInterceptor {
   def beforeProcessResponse(response: RequestChannel.Response, connectionId: String): Unit
 
   def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit
+
+  def shutdown(): Unit
 }
