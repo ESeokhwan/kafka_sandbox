@@ -5,7 +5,7 @@ import kafka.monitor.MonitorQueue;
 // TODO: 일정 시간동안 monitorQueue에 있는 데이터가 flush안되면 자동으로 flush해주는 기능 추가하기
 public class MonitorLogWriter implements Runnable {
 
-  private final MonitorQueue monitorQueue = MonitorQueue.getInstance();
+  private final MonitorQueue monitorQueue;
   
   private final IMonitorLogWriteStrategy writeStrategy;
   
@@ -15,7 +15,8 @@ public class MonitorLogWriter implements Runnable {
 
   private int curWrittenCnt = 0;
 
-  public MonitorLogWriter(IMonitorLogWriteStrategy writeStrategy, int batchSize) {
+  public MonitorLogWriter(MonitorQueue monitorQueue, IMonitorLogWriteStrategy writeStrategy, int batchSize) {
+    this.monitorQueue = monitorQueue;
     this.writeStrategy = writeStrategy;
     this.batchSize = batchSize;
   }

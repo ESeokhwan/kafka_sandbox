@@ -5,7 +5,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class MonitorQueue {
-  private static volatile MonitorQueue instance;
 
   private final Queue<MonitorLog> queue;
   
@@ -13,18 +12,6 @@ public class MonitorQueue {
 
   private MonitorQueue() {
     this.queue = new ConcurrentLinkedQueue<MonitorLog>();
-  }
-
-  public static MonitorQueue getInstance() {
-    if (instance == null) {
-      synchronized (MonitorQueue.class) {
-        if (instance == null) {
-          instance = new MonitorQueue();
-        }
-      }
-    }
-
-    return instance;
   }
 
   public boolean enqueue(MonitorLog log) {
