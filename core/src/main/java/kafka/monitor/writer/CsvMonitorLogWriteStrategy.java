@@ -28,9 +28,9 @@ public class CsvMonitorLogWriteStrategy implements IMonitorLogWriteStrategy {
     }
     
     try {
-      writer.append(log.getType().name())
+      writer.append(log.getType())
           .append(",")
-          .append(log.getMessageId())
+              .append(log.getId())
           .append(",")
           .append(String.valueOf(log.getTimestamp()))
           .append(",")

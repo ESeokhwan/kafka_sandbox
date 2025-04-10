@@ -40,12 +40,12 @@ public class MonitorLogReadStrategy implements IMonitorLogReadStrategy {
     }
 
     try {
-      MonitorLog.RequestType type = MonitorLog.RequestType.valueOf(splittedStr[0]);
+      String type = splittedStr[0];
       String messageId = splittedStr[1];
       long timestamp = Long.parseLong(splittedStr[2]);
       long timestampNano = Long.parseLong(splittedStr[3]);
       String state = splittedStr[4];
-      return new MonitorLog(type, messageId, timestamp, timestampNano, state);
+      return new MonitorLog(type, messageId, state, timestamp, timestampNano);
     } catch (Exception e) {
       return null;
     }

@@ -3,34 +3,35 @@ package kafka.monitor;
 import java.util.Objects;
 
 public class MonitorLog {
-  public enum RequestType {
-    PRODUCE, CONSUME
-  }
 
-  private final RequestType type;
+  private final String type;
 
-  private final String messageId;
+  private final String id;
+
+  private final String state;
 
   private final long timestamp;
 
   private final long timestampNano;
-  
-  private final String state;
-  
-  public MonitorLog(RequestType type, String messageId, long timestamp, long timestampNano, String state) {
+
+  public MonitorLog(String type, String id, String state, long timestamp, long timestampNano) {
     this.type = type;
-    this.messageId = messageId;
+    this.id = id;
+    this.state = state;
     this.timestamp = timestamp;
     this.timestampNano = timestampNano;
-    this.state = state;
   }
 
-  public RequestType getType() {
+  public String getType() {
     return type;
   }
-  
-  public String getMessageId() {
-    return messageId;
+
+  public String getId() {
+    return id;
+  }
+
+  public String getState() {
+    return state;
   }
 
   public long getTimestamp() {
@@ -41,17 +42,9 @@ public class MonitorLog {
     return timestampNano;
   }
 
-  public String getState() {
-    return state;
-  }
-
-  public MonitorLog withMessageId(String messageId) {
-    return new MonitorLog(type, messageId, timestamp, timestampNano, state);
-  }
-
   @Override
   public int hashCode() {
-    return Objects.hash(type, messageId, state);
+    return Objects.hash(type, id, state);
   }
 
   @Override
@@ -61,13 +54,7 @@ public class MonitorLog {
     
     MonitorLog converted = (MonitorLog) oth;
     return Objects.equals(this.type, converted.type)
-        && Objects.equals(this.messageId, converted.messageId)
+            && Objects.equals(this.id, converted.id)
         && Objects.equals(this.state, converted.state);
   }
-
-  public final static String REQUESTED = "REQUESTED";
-  public final static String BROKER_RECEIVED = "BROKER_RECEIVED";
-  public final static String ENQUEUED_REQUEST_QUEUE = "ENQUEUED_REQUEST_QUEUE";
-  public final static String COMMITED = "COMMITED";
-  public final static String RESPONDED = "RESPONDED";
 }
