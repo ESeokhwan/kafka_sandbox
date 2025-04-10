@@ -57,4 +57,14 @@ public class MonitorLog {
             && Objects.equals(this.id, converted.id)
         && Objects.equals(this.state, converted.state);
   }
+
+  public String toString() {
+    return "MonitorLog{" +
+            "type='" + type + '\'' +
+            ", id='" + id + '\'' +
+            ", state='" + state + '\'' +
+            ", timestamp=" + timestamp +
+            ", timestampNano=" + timestampNano +
+            '}';
+  }
 }
