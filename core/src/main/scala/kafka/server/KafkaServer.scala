@@ -22,7 +22,7 @@ import kafka.common.GenerateBrokerIdException
 import kafka.controller.KafkaController
 import kafka.coordinator.group.GroupCoordinatorAdapter
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
-import kafka.interceptor.{BrokerInterceptor, IBrokerInterceptor}
+import kafka.interceptor.BrokerInterceptors
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.metrics.KafkaMetricsReporter
@@ -129,7 +129,7 @@ class KafkaServer(
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
   private var controlPlaneRequestProcessor: KafkaApis = _
 
-  var brokerInterceptor: IBrokerInterceptor = _
+  var brokerInterceptors: BrokerInterceptors = _
 
   var authorizer: Option[Authorizer] = None
   @volatile var socketServer: SocketServer = _
@@ -373,8 +373,8 @@ class KafkaServer(
           None
         )
 
-        brokerInterceptor = new BrokerInterceptor()
-        brokerInterceptor.init()
+        brokerInterceptors = new BrokerInterceptors(Vector.empty)
+        brokerInterceptors.init()
 
         // Create and start the socket server acceptor threads so that the bound port is known.
         // Delay starting processors until the end of the initialization sequence to ensure
@@ -382,7 +382,7 @@ class KafkaServer(
         //
         // Note that we allow the use of KRaft mode controller APIs when forwarding is enabled
         // so that the Envelope request is exposed. This is only used in testing currently.
-        socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, brokerInterceptor)
+        socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, brokerInterceptors)
 
         // Start alter partition manager based on the IBP version
         alterPartitionManager = if (config.interBrokerProtocolVersion.isAlterPartitionSupported) {
@@ -1074,8 +1074,8 @@ class KafkaServer(
         if (brokerTopicStats != null)
           CoreUtils.swallow(brokerTopicStats.close(), this)
 
-        if (brokerInterceptor != null)
-          CoreUtils.swallow(brokerInterceptor.shutdown(), this)
+        if (brokerInterceptors != null)
+          CoreUtils.swallow(brokerInterceptors.shutdown(), this)
 
         // Clear all reconfigurable instances stored in DynamicBrokerConfig
         config.dynamicConfig.clear()

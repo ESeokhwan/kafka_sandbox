@@ -17,20 +17,16 @@
 
 package kafka.network
 
-import java.nio.ByteBuffer
-import java.util.concurrent._
 import com.fasterxml.jackson.databind.JsonNode
 import com.typesafe.scalalogging.Logger
 import com.yammer.metrics.core.{Histogram, Meter}
-import kafka.interceptor.{BrokerInterceptor, IBrokerInterceptor}
+import kafka.interceptor.BrokerInterceptors
 import kafka.network
 import kafka.server.{KafkaConfig, RequestLocal}
-import kafka.utils.{Logging, Pool}
 import kafka.utils.Implicits._
+import kafka.utils.{Logging, Pool}
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.memory.MemoryPool
-import org.apache.kafka.common.message.ApiMessageType.ListenerType
-import org.apache.kafka.common.message.EnvelopeResponseData
 import org.apache.kafka.common.network.{ClientInformation, Send}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.requests._
@@ -38,7 +34,9 @@ import org.apache.kafka.common.utils.Time
 import org.apache.kafka.network.Session
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 
+import java.nio.ByteBuffer
 import java.util
+import java.util.concurrent._
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
@@ -360,7 +358,7 @@ class RequestChannel(val queueSize: Int,
                      val metricNamePrefix: String,
                      time: Time,
                      val metrics: RequestChannel.Metrics,
-                     val brokerInterceptor: IBrokerInterceptor = new BrokerInterceptor()) {
+                     val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)) {
   import RequestChannel._
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -435,7 +433,7 @@ class RequestChannel(val queueSize: Int,
 
   /** Send a response back to the socket server to be sent over the network */
   private[network] def sendResponse(response: RequestChannel.Response): Unit = {
-    brokerInterceptor.beforeSendResponseToQueue(response)
+    brokerInterceptors.beforeSendResponseToQueue(response)
     if (isTraceEnabled) {
       val requestHeader = response.request.headerForLoggingOrThrottling()
       val message = response match {

@@ -20,7 +20,7 @@ package kafka.server
 import kafka.cluster.EndPoint
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
-import kafka.interceptor.{BrokerInterceptor, IBrokerInterceptor}
+import kafka.interceptor.BrokerInterceptors
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.network.{DataPlaneAcceptor, SocketServer}
@@ -95,7 +95,7 @@ class BrokerServer(
 
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
 
-  var brokerInterceptor: IBrokerInterceptor = _
+  var brokerInterceptors: BrokerInterceptors = _
 
   var authorizer: Option[Authorizer] = None
   @volatile var socketServer: SocketServer = _
@@ -248,13 +248,13 @@ class BrokerServer(
         Some(clientMetricsManager)
       )
 
-      brokerInterceptor = new BrokerInterceptor()
-      brokerInterceptor.init()
+      brokerInterceptors = new BrokerInterceptors(Vector.empty)
+      brokerInterceptors.init()
 
       // Create and start the socket server acceptor threads so that the bound port is known.
       // Delay starting processors until the end of the initialization sequence to ensure
       // that credentials have been loaded before processing authentications.
-      socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, brokerInterceptor)
+      socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, brokerInterceptors)
 
       clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
 
@@ -716,8 +716,8 @@ class BrokerServer(
       if (clientMetricsManager != null)
         CoreUtils.swallow(clientMetricsManager.close(), this)
 
-      if (brokerInterceptor != null)
-        CoreUtils.swallow(brokerInterceptor.shutdown(), this)
+      if (brokerInterceptors != null)
+        CoreUtils.swallow(brokerInterceptors.shutdown(), this)
 
       sharedServer.stopForBroker()
       info("shut down completed")
