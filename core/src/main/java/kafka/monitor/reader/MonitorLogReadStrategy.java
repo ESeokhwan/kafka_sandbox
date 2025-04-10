@@ -1,4 +1,6 @@
-package kafka.monitor;
+package kafka.monitor.reader;
+
+import kafka.monitor.MonitorLog;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
