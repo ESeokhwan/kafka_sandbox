@@ -1,7 +1,7 @@
 package kafka.interceptor
 
-import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
+import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.record.MemoryRecords
@@ -10,10 +10,10 @@ import org.apache.kafka.common.utils.LogContext
 
 class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
-  private var monitorLogThread: Thread = _
   private val monitorQueue = new MonitorQueue()
   private val monitorLogWriter = new MonitorLogWriter(
     monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1000)
+  private var monitorLogThread: Thread = _
 
   override def init(): Unit = {
     monitorLogThread = new Thread(monitorLogWriter)
