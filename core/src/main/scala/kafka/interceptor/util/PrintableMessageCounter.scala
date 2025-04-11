@@ -15,20 +15,17 @@ class PrintableMessageCounter(val commitTerm: Long) {
   }
 
   def tryCommit(f: (Long, Long, Long, Long) => Unit): Unit = {
-    if (lastCommitTime == 0L) {
-      if (isCommitting.compareAndSet(false, true)) {
+    if (isCommitting.compareAndSet(false, true)) {
+      if (lastCommitTime == 0L) {
         lastCommitTime = System.currentTimeMillis()
-        isCommitting.set(false)
-      }
-    } else if (System.currentTimeMillis() > lastCommitTime + commitTerm) {
-      if (isCommitting.compareAndSet(false, true)) {
+      } else if (System.currentTimeMillis() > lastCommitTime + commitTerm) {
         val curCount = counter.get()
         val curTimeMilli = System.currentTimeMillis()
         f(lastCommitTime, lastCommitCount, curTimeMilli, curCount)
         lastCommitTime = curTimeMilli
         lastCommitCount = curCount
-        isCommitting.set(false)
       }
+      isCommitting.set(false)
     }
   }
 
