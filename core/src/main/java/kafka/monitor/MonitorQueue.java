@@ -10,7 +10,7 @@ public class MonitorQueue {
   
   private final AtomicInteger size = new AtomicInteger(0);
 
-  private MonitorQueue() {
+  public MonitorQueue() {
     this.queue = new ConcurrentLinkedQueue<MonitorLog>();
   }
 
