@@ -23,7 +23,7 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
       onRequestQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
         val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
         infoWithTag(
-          "produce-rate-check",
+          "produce-rate-check-enqueue",
           f"Entered Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
         )
       })
