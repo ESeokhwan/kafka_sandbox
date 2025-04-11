@@ -20,7 +20,7 @@ package kafka.server
 import kafka.cluster.EndPoint
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
-import kafka.interceptor.BrokerInterceptors
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.network.{DataPlaneAcceptor, SocketServer}
@@ -36,7 +36,7 @@ import org.apache.kafka.common.security.token.delegation.internals.DelegationTok
 import org.apache.kafka.common.utils.{LogContext, Time}
 import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
-import org.apache.kafka.coordinator.group.{CoordinatorRecord, GroupCoordinator, GroupCoordinatorService, CoordinatorRecordSerde}
+import org.apache.kafka.coordinator.group.{CoordinatorRecord, CoordinatorRecordSerde, GroupCoordinator, GroupCoordinatorService}
 import org.apache.kafka.image.publisher.{BrokerRegistrationTracker, MetadataPublisher}
 import org.apache.kafka.metadata.{BrokerState, ListenerInfo}
 import org.apache.kafka.security.CredentialProvider
@@ -56,7 +56,7 @@ import java.util
 import java.util.Optional
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.{Condition, ReentrantLock}
-import java.util.concurrent.{CompletableFuture, ExecutionException, TimeoutException, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ExecutionException, TimeUnit, TimeoutException}
 import scala.collection.Map
 import scala.compat.java8.OptionConverters.RichOptionForJava8
 import scala.jdk.CollectionConverters._
@@ -96,6 +96,7 @@ class BrokerServer(
 
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
 
+  var unusedBrokerInterceptors: BrokerInterceptors = _
   var brokerInterceptors: BrokerInterceptors = _
 
   var authorizer: Option[Authorizer] = None
@@ -248,6 +249,12 @@ class BrokerServer(
         metadataCache,
         Some(clientMetricsManager)
       )
+
+      // For testing purposes, backdoor for unused imports
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext)
+      ))
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
 
       brokerInterceptors = new BrokerInterceptors(Vector.empty)
       brokerInterceptors.init()

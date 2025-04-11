@@ -10,12 +10,14 @@ import org.apache.kafka.common.utils.LogContext
 
 class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
-  private val monitorQueue = new MonitorQueue()
-  private val monitorLogWriter = new MonitorLogWriter(
-    monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1000)
+  private var monitorQueue: MonitorQueue = _
+  private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
 
   override def init(): Unit = {
+    monitorQueue = new MonitorQueue()
+    monitorLogWriter = new MonitorLogWriter(
+      monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1000)
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
   }

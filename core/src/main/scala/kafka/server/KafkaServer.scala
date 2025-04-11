@@ -22,7 +22,7 @@ import kafka.common.GenerateBrokerIdException
 import kafka.controller.KafkaController
 import kafka.coordinator.group.GroupCoordinatorAdapter
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
-import kafka.interceptor.BrokerInterceptors
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.metrics.KafkaMetricsReporter
@@ -133,6 +133,7 @@ class KafkaServer(
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
   private var controlPlaneRequestProcessor: KafkaApis = _
 
+  var unusedBrokerInterceptors: BrokerInterceptors = _
   var brokerInterceptors: BrokerInterceptors = _
 
   var authorizer: Option[Authorizer] = None
@@ -376,6 +377,12 @@ class KafkaServer(
           metadataCache,
           None
         )
+
+        // For testing purposes, backdoor for unused imports
+        unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+          new MonitorLoggingBrokerInterceptor(logContext)
+        ))
+        unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
 
         brokerInterceptors = new BrokerInterceptors(Vector.empty)
         brokerInterceptors.init()
