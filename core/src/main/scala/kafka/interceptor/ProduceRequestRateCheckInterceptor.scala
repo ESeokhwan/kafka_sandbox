@@ -9,8 +9,13 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
 
   private val commitTerm = 1000
 
-  val onRequestQueueCounter: PrintableMessageCounter = new PrintableMessageCounter(commitTerm)
-  val onResponseQueueCounter: PrintableMessageCounter = new PrintableMessageCounter(commitTerm)
+  var onRequestQueueCounter: PrintableMessageCounter = _
+  var onResponseQueueCounter: PrintableMessageCounter = _
+
+  override def init(): Unit = {
+    onRequestQueueCounter = new PrintableMessageCounter(commitTerm)
+    onResponseQueueCounter = new PrintableMessageCounter(commitTerm)
+  }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
     if (request.header.apiKey() == ApiKeys.PRODUCE) {
@@ -43,4 +48,6 @@ class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging
   override def beforeProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
+
+  override def shutdown(): Unit = {}
 }
