@@ -1060,7 +1060,6 @@ private[kafka] class Processor(
     var currentResponse: RequestChannel.Response = null
     while ({currentResponse = dequeueResponse(); currentResponse != null}) {
       val channelId = currentResponse.request.context.connectionId
-      brokerInterceptors.beforeProcessResponse(currentResponse, channelId)
       try {
         currentResponse match {
           case response: NoOpResponse =>
@@ -1094,7 +1093,6 @@ private[kafka] class Processor(
         case e: Throwable =>
           processChannelException(channelId, s"Exception while processing response for $channelId", e)
       }
-      brokerInterceptors.afterProcessResponse(currentResponse, channelId)
     }
   }
 
@@ -1209,7 +1207,7 @@ private[kafka] class Processor(
         // delay has already passed by now.
         handleChannelMuteEvent(send.destinationId, ChannelMuteEvent.RESPONSE_SENT)
         tryUnmuteChannel(send.destinationId)
-        brokerInterceptors.afterUnmuteChannel(response, send.destinationId())
+        brokerInterceptors.afterProcessResponse(response, send.destinationId())
       } catch {
         case e: Throwable => processChannelException(send.destinationId,
           s"Exception while processing completed send to ${send.destinationId}", e)

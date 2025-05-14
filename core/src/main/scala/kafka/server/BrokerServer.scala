@@ -434,7 +434,10 @@ class BrokerServer(
       dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
         config.numIoThreads, s"${DataPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent",
-        DataPlaneAcceptor.ThreadPrefix)
+        DataPlaneAcceptor.ThreadPrefix,
+        "broker",
+        brokerInterceptors
+      )
 
       // Start RemoteLogManager before initializing broker metadata publishers.
       remoteLogManagerOpt.foreach { rlm =>
