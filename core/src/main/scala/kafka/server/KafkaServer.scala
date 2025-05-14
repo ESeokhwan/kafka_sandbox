@@ -22,7 +22,7 @@ import kafka.common.GenerateBrokerIdException
 import kafka.controller.KafkaController
 import kafka.coordinator.group.GroupCoordinatorAdapter
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
-import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
+import kafka.interceptor.{BrokerInterceptors, MetadataRequestMonitorBrokerInterceptor, MonitorLoggingBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.metrics.KafkaMetricsReporter
@@ -380,9 +380,11 @@ class KafkaServer(
 
         // For testing purposes, backdoor for unused imports
         unusedBrokerInterceptors = new BrokerInterceptors(Vector(
-          new MonitorLoggingBrokerInterceptor(logContext)
+          new MonitorLoggingBrokerInterceptor(logContext),
+          new MetadataRequestMonitorBrokerInterceptor(logContext)
         ))
         brokerInterceptors = new BrokerInterceptors(Vector(
+          new MetadataRequestMonitorBrokerInterceptor(logContext)
         ))
         brokerInterceptors.init()
 
