@@ -16,7 +16,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
     monitorLogWriter = new MonitorLogWriter(
-      monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1000)
+      monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1)
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
   }
