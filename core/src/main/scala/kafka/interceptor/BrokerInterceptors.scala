@@ -13,6 +13,10 @@ class BrokerInterceptors(val interceptors: Vector[IBrokerInterceptor]) {
     interceptors.foreach(_.beforeSendRequestToQueue(request, connectionId))
   }
 
+  def beforeHandleRequest(request: RequestChannel.Request): Unit = {
+    interceptors.foreach(_.beforeHandleRequest(request))
+  }
+
   def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     interceptors.foreach(_.beforeSendResponseToQueue(response))
   }

@@ -24,7 +24,7 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
 
-  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
+  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
 
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     val currentTime = System.currentTimeMillis()
@@ -49,6 +49,8 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
       monitorLogWriter.notifyIfNeeded()
     }
   }
+
+  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
   override def shutdown(): Unit = {
     if (monitorLogWriter == null || monitorLogThread == null) {
