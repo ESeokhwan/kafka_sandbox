@@ -4,7 +4,7 @@ import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.{ApiKeys, MessageUtil}
-import org.apache.kafka.common.requests.MetadataRequest
+import org.apache.kafka.common.requests.{MetadataRequest, ProduceRequest}
 import org.apache.kafka.common.utils.LogContext
 
 class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
