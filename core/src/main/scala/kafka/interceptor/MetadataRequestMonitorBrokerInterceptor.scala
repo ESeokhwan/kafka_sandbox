@@ -53,35 +53,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
     }
   }
 
-  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
-    val currentTime = System.currentTimeMillis()
-    val currentTimeNano = System.nanoTime()
-    if (response.request.header.apiKey == ApiKeys.METADATA) {
-      val metadataRequest = response.request.body[MetadataRequest]
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "METADATA",
-          extractTopicNames(metadataRequest),
-          "BEFORE_SEND_RESPONSE_TO_QUEUE",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    } else if (response.request.header.apiKey == ApiKeys.PRODUCE) {
-      val produceRequest = response.request.body[ProduceRequest]
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "PRODUCE",
-          produceRequest.data().toString,
-          "BEFORE_SEND_RESPONSE_TO_QUEUE",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    }
-  }
+  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {}
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {
     val currentTime = System.currentTimeMillis()
