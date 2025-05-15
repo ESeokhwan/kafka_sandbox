@@ -38,6 +38,18 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         )
       )
       monitorLogWriter.notifyIfNeeded()
+    } else if (request.header.apiKey == ApiKeys.PRODUCE) {
+      val produceRequest = request.body[ProduceRequest]
+      monitorQueue.enqueue(
+        new MonitorLog(
+          "PRODUCE",
+          produceRequest.data().toString,
+          "REQUESTED",
+          currentTime,
+          currentTimeNano
+        )
+      )
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
@@ -52,6 +64,18 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         new MonitorLog(
           "METADATA",
           extractTopicNames(metadataRequest),
+          "COMPLETED",
+          currentTime,
+          currentTimeNano
+        )
+      )
+      monitorLogWriter.notifyIfNeeded()
+    } else if (response.request.header.apiKey == ApiKeys.PRODUCE) {
+      val produceRequest = response.request.body[ProduceRequest]
+      monitorQueue.enqueue(
+        new MonitorLog(
+          "PRODUCE",
+          produceRequest.data().toString,
           "COMPLETED",
           currentTime,
           currentTimeNano
