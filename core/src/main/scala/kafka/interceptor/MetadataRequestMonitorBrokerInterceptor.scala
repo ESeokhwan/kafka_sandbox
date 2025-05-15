@@ -3,8 +3,8 @@ package kafka.interceptor
 import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
-import org.apache.kafka.common.protocol.ApiKeys
-import org.apache.kafka.common.requests.MetadataRequest
+import org.apache.kafka.common.protocol.{ApiKeys, MessageUtil}
+import org.apache.kafka.common.requests.{MetadataRequest, ProduceRequest}
 import org.apache.kafka.common.utils.LogContext
 
 class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
@@ -31,7 +31,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
       monitorQueue.enqueue(
         new MonitorLog(
           "METADATA",
-          metadataRequest.data().toString,
+          extractTopicNames(metadataRequest),
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -49,7 +49,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
       monitorQueue.enqueue(
         new MonitorLog(
           "METADATA",
-          metadataRequest.data().toString,
+          extractTopicNames(metadataRequest),
           "BEFORE_SEND_RESPONSE_TO_QUEUE",
           currentTime,
           currentTimeNano
@@ -67,7 +67,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
       monitorQueue.enqueue(
         new MonitorLog(
           "METADATA",
-          metadataRequest.data().toString,
+          extractTopicNames(metadataRequest),
           "COMPLETED",
           currentTime,
           currentTimeNano
@@ -92,5 +92,11 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         Thread.currentThread().interrupt()
         throw new RuntimeException("MonitorLoggingBrokerInterceptor shutdown interrupted", e)
     }
+  }
+
+  private def extractTopicNames(metadataRequest: MetadataRequest): String = {
+    MessageUtil.deepToString(metadataRequest.data().topics().stream().map(e => {
+      e.name()
+    }).iterator())
   }
 }
