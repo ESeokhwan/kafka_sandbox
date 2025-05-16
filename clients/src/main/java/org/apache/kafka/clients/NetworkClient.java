@@ -479,8 +479,14 @@ public class NetworkClient implements KafkaClient {
      * @param now the current timestamp
      */
     private boolean canSendRequest(String node, long now) {
-        return connectionStates.isReady(node, now) && selector.isChannelReady(node) &&
-            inFlightRequests.canSendMore(node);
+        boolean connectionIsReady = connectionStates.isReady(node, now);
+        boolean channelIsReady = selector.isChannelReady(node);
+        boolean canSendMore = inFlightRequests.canSendMore(node);
+        log.info("Checking connection state: {}", connectionIsReady);
+        log.info("Checking channel state: {}", channelIsReady);
+        log.info("Checking in-flight requests: {}", canSendMore);
+        return connectionStates.isReady(node, now) && channelIsReady &&
+                canSendMore;
     }
 
     /**
