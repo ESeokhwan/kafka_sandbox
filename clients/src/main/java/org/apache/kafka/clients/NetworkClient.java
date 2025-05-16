@@ -1138,7 +1138,9 @@ public class NetworkClient implements KafkaClient {
         public long maybeUpdate(long now) {
             // should we update our metadata?
             long timeToNextMetadataUpdate = metadata.timeToNextUpdate(now);
+            log.info("Time to next metadata update is {} ms", timeToNextMetadataUpdate);
             long waitForMetadataFetch = hasFetchInProgress() ? defaultRequestTimeoutMs : 0;
+            log.info("Wait for metadata fetch is {} ms", waitForMetadataFetch);
 
             long metadataTimeout = Math.max(timeToNextMetadataUpdate, waitForMetadataFetch);
             if (metadataTimeout > 0) {
@@ -1245,6 +1247,7 @@ public class NetworkClient implements KafkaClient {
                 Metadata.MetadataRequestAndVersion requestAndVersion = metadata.newMetadataRequestAndVersion(now);
                 MetadataRequest.Builder metadataRequest = requestAndVersion.requestBuilder;
                 log.debug("Sending metadata request {} to node {}", metadataRequest, node);
+                log.info("Sending metadata request {} to node {} ({})", metadataRequest, node, System.currentTimeMillis());
                 sendInternalMetadataRequest(metadataRequest, nodeConnectionId, now);
                 inProgress = new InProgressData(requestAndVersion.requestVersion, requestAndVersion.isPartialUpdate);
                 return defaultRequestTimeoutMs;
