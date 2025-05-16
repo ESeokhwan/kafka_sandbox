@@ -1172,6 +1172,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 log.trace("Requesting metadata update for topic {}.", topic);
             }
             metadata.add(topic, nowMs + elapsed);
+            log.info("########### Requesting metadata update for topic {}.", topic);
             int version = metadata.requestUpdateForTopic(topic);
             sender.wakeup();
             try {
