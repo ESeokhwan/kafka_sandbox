@@ -1094,6 +1094,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
 
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), appendCallbacks.getPartition());
+                log.info("########### Waking up the sender for send produce request {}", System.currentTimeMillis());
                 this.sender.wakeup();
             }
             return result.future;
@@ -1172,11 +1173,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 log.trace("Requesting metadata update for topic {}.", topic);
             }
             metadata.add(topic, nowMs + elapsed);
-            log.info("########### Requesting metadata update for topic {} (timestamp: {}).", topic, System.currentTimeMillis());
             int version = metadata.requestUpdateForTopic(topic);
+            log.info("########### Requesting metadata update for topic {} (timestamp: {}).", topic, System.currentTimeMillis());
             sender.wakeup();
             try {
                 metadata.awaitUpdate(version, remainingWaitMs);
+                log.info("########### Receive metadata response for topic {} (timestamp: {}).", topic, System.currentTimeMillis());
             } catch (TimeoutException ex) {
                 // Rethrow with original maxWaitMs to prevent logging exception with remainingWaitMs
                 final String errorMessage = getErrorMessage(partitionsCount, topic, partition, maxWaitMs);
