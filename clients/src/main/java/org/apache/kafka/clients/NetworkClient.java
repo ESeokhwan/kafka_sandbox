@@ -1149,6 +1149,9 @@ public class NetworkClient implements KafkaClient {
             // Beware that the behavior of this method and the computation of timeouts for poll() are
             // highly dependent on the behavior of leastLoadedNode.
             LeastLoadedNode leastLoadedNode = leastLoadedNode(now);
+            log.info("Least loaded node is {}", leastLoadedNode.node());
+            log.info("Least loaded node has node available or connection ready {}", leastLoadedNode.hasNodeAvailableOrConnectionReady());
+            log.info("metadata recovery strategy is {}", metadataRecoveryStrategy);
 
             // Rebootstrap if needed and configured.
             if (metadataRecoveryStrategy == MetadataRecoveryStrategy.REBOOTSTRAP
