@@ -906,6 +906,7 @@ public class NetworkClient implements KafkaClient {
      * @param now The current time
      */
     private void handleCompletedSends(List<ClientResponse> responses, long now) {
+        log.info("Handling completed sends {}", System.currentTimeMillis());
         // if no response is expected then when the send is completed, return it
         for (NetworkSend send : this.selector.completedSends()) {
             InFlightRequest request = this.inFlightRequests.lastSent(send.destinationId());
