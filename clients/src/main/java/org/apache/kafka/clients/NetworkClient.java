@@ -469,6 +469,7 @@ public class NetworkClient implements KafkaClient {
     public boolean isReady(Node node, long now) {
         // if we need to update our metadata now declare all requests unready to make metadata requests first
         // priority
+        log.info("doSend(nodeId: {}, now: {})", node.idString(), now);
         return !metadataUpdater.isUpdateDue(now) && canSendRequest(node.idString(), now);
     }
 
@@ -515,6 +516,7 @@ public class NetworkClient implements KafkaClient {
             // will be slightly different for some internal requests (for
             // example, ApiVersionsRequests can be sent prior to being in
             // READY state.)
+            log.info("doSend(nodeId: {}, now: {})", nodeId, now);
             if (!canSendRequest(nodeId, now))
                 throw new IllegalStateException("Attempt to send a request to node " + nodeId + " which is not ready.");
         }
@@ -735,6 +737,7 @@ public class NetworkClient implements KafkaClient {
                 atLeastOneConnectionReady = true;
             }
 
+            log.info("leastLoadedNode(nodeId: {}, now: {})", node.idString(), now);
             if (canSendRequest(node.idString(), now)) {
                 int currInflight = this.inFlightRequests.count(node.idString());
                 if (currInflight == 0) {
@@ -1251,6 +1254,7 @@ public class NetworkClient implements KafkaClient {
         private long maybeUpdate(long now, Node node) {
             String nodeConnectionId = node.idString();
 
+            log.info("maybeUpdate(nodeId: {}, now: {})", nodeConnectionId, now);
             if (canSendRequest(nodeConnectionId, now)) {
                 Metadata.MetadataRequestAndVersion requestAndVersion = metadata.newMetadataRequestAndVersion(now);
                 MetadataRequest.Builder metadataRequest = requestAndVersion.requestBuilder;
@@ -1324,6 +1328,7 @@ public class NetworkClient implements KafkaClient {
         private long maybeUpdate(long now, Node node) {
             String nodeConnectionId = node.idString();
 
+            log.info("TelemtrySender.maybeUpdate(nodeId: {}, now: {})", nodeConnectionId, now);
             if (canSendRequest(nodeConnectionId, now)) {
                 Optional<AbstractRequest.Builder<?>> requestOpt = clientTelemetrySender.createRequest();
 
