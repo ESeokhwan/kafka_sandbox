@@ -163,7 +163,7 @@ public class Metadata implements Closeable {
         // Calculate the backoff for equivalent responses which acts when metadata responses are not making progress
         long backoffForEquivalentResponseCount = Math.max(this.lastRefreshMs +
                 (this.equivalentResponseCount > 0 ? this.refreshBackoff.backoff(this.equivalentResponseCount - 1) : 0) - nowMs, 0);
-
+        log.info("Backoff for attempts {} and backoff for equivalent response count {}",backoffForAttempts, backoffForEquivalentResponseCount);
         return Math.max(backoffForAttempts, backoffForEquivalentResponseCount);
     }
 
@@ -177,6 +177,7 @@ public class Metadata implements Closeable {
      */
     public synchronized long timeToNextUpdate(long nowMs) {
         long timeToExpire = updateRequested() ? 0 : Math.max(this.lastSuccessfulRefreshMs + this.metadataExpireMs - nowMs, 0);
+        log.info("Time to expire {}", timeToExpire);
         return Math.max(timeToExpire, timeToAllowUpdate(nowMs));
     }
 
