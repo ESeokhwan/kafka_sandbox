@@ -714,6 +714,8 @@ public class NetworkClient implements KafkaClient {
     @Override
     public LeastLoadedNode leastLoadedNode(long now) {
         List<Node> nodes = this.metadataUpdater.fetchNodes();
+        log.info("Least loaded node selection from {} nodes", nodes.size());
+        log.info("Nodes: {}", nodes.stream().map(Node::toString).collect(Collectors.joining(", ")));
         if (nodes.isEmpty())
             throw new IllegalStateException("There are no nodes in the Kafka cluster");
         int inflight = Integer.MAX_VALUE;
