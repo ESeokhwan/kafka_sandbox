@@ -101,6 +101,9 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
   }
 
   private def extractTopicNames(metadataRequest: MetadataRequest): String = {
+    if (metadataRequest.data().topics() == null) {
+      return ""
+    }
     MessageUtil.deepToString(metadataRequest.data().topics().stream().map(e => {
       e.name()
     }).iterator())
