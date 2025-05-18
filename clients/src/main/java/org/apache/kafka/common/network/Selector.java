@@ -993,6 +993,7 @@ public class Selector implements Selectable, AutoCloseable {
     @Override
     public boolean isChannelReady(String id) {
         KafkaChannel channel = this.channels.get(id);
+        log.info("isChannelReady: channelId = {}, channel = {}", id, channel);
         return channel != null && channel.ready();
     }
 

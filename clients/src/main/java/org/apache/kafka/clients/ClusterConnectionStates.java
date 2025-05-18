@@ -284,11 +284,11 @@ final class ClusterConnectionStates {
      * @param now the current time in ms
      */
     public boolean isReady(String id, long now) {
+        log.info("id: {}, state: {}", id, nodeState.get(id));
         return isReady(nodeState.get(id), now);
     }
 
     private boolean isReady(NodeConnectionState state, long now) {
-        log.info("state: {}", state);
         return state != null && state.state == ConnectionState.READY && state.throttleUntilTimeMs <= now;
     }
 
