@@ -129,6 +129,7 @@ public class SslTransportLayer implements TransportLayer {
 
     @Override
     public boolean ready() {
+        log.info("state: {}, handshakeStatus: {}", state, handshakeStatus);
         return state == State.POST_HANDSHAKE || state == State.READY;
     }
 

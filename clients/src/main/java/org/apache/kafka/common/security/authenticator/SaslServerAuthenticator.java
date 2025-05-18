@@ -327,6 +327,7 @@ public class SaslServerAuthenticator implements Authenticator {
 
     @Override
     public boolean complete() {
+        LOG.info("SaslServerAuthenticator saslState: {}", saslState);
         return saslState == SaslState.COMPLETE;
     }
 

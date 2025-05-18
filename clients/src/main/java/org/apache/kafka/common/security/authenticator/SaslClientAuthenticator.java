@@ -495,6 +495,7 @@ public class SaslClientAuthenticator implements Authenticator {
     }
 
     public boolean complete() {
+        log.info("SaslClientAuthenticator saslState: {}", saslState);
         return saslState == SaslState.COMPLETE;
     }
 

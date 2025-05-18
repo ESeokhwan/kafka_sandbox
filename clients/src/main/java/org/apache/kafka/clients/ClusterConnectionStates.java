@@ -288,6 +288,7 @@ final class ClusterConnectionStates {
     }
 
     private boolean isReady(NodeConnectionState state, long now) {
+        log.info("state: {}", state);
         return state != null && state.state == ConnectionState.READY && state.throttleUntilTimeMs <= now;
     }
 
