@@ -4,7 +4,7 @@ import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.{ApiKeys, MessageUtil}
-import org.apache.kafka.common.requests.{CreateTopicsRequest, MetadataRequest}
+import org.apache.kafka.common.requests.{CreateTopicsRequest, EnvelopeRequest, MetadataRequest}
 import org.apache.kafka.common.utils.LogContext
 
 class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
@@ -55,6 +55,17 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         new MonitorLog(
           "CREATE_TOPIC",
           createTopicsRequest.data().topics().toString,
+          "REQUESTED",
+          currentTime,
+          currentTimeNano
+        )
+      )
+    } else if (request.header.apiKey() == ApiKeys.ENVELOPE) {
+      val envelopeRequest = request.body[EnvelopeRequest]
+      monitorQueue.enqueue(
+        new MonitorLog(
+          "ENVELOPE",
+          envelopeRequest.data().toString,
           "REQUESTED",
           currentTime,
           currentTimeNano
