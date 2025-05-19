@@ -112,8 +112,34 @@ class KafkaApis(val requestChannel: RequestChannel,
                 val tokenManager: DelegationTokenManager,
                 val apiVersionManager: ApiVersionManager,
                 val clientMetricsManager: Option[ClientMetricsManager],
-                val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
+                val brokerInterceptors: BrokerInterceptors
 ) extends ApiRequestHandler with Logging {
+
+  def this(requestChannel: RequestChannel,
+           metadataSupport: MetadataSupport,
+           replicaManager: ReplicaManager,
+           groupCoordinator: GroupCoordinator,
+           txnCoordinator: TransactionCoordinator,
+           autoTopicCreationManager: AutoTopicCreationManager,
+           brokerId: Int,
+           config: KafkaConfig,
+           configRepository: ConfigRepository,
+           metadataCache: MetadataCache,
+           metrics: Metrics,
+           authorizer: Option[Authorizer],
+           quotas: QuotaManagers,
+           fetchManager: FetchManager,
+           brokerTopicStats: BrokerTopicStats,
+           clusterId: String,
+           time: Time,
+           tokenManager: DelegationTokenManager,
+           apiVersionManager: ApiVersionManager,
+           clientMetricsManager: Option[ClientMetricsManager]
+  ) = this(requestChannel, metadataSupport, replicaManager, groupCoordinator,
+    txnCoordinator, autoTopicCreationManager, brokerId, config, configRepository,
+    metadataCache, metrics, authorizer, quotas, fetchManager, brokerTopicStats,
+    clusterId, time, tokenManager, apiVersionManager, clientMetricsManager,
+    new BrokerInterceptors(Vector.empty))
 
   type FetchResponseStats = Map[TopicPartition, RecordValidationStats]
   this.logIdent = "[KafkaApi-%d] ".format(brokerId)
