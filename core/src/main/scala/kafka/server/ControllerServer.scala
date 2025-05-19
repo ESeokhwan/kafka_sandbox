@@ -341,7 +341,8 @@ class ControllerServer(
         clusterId,
         registrationsPublisher,
         apiVersionManager,
-        metadataCache)
+        metadataCache,
+        brokerInterceptors)
       controllerApisHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel,
         controllerApis,

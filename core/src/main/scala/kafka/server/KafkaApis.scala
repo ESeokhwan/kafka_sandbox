@@ -20,6 +20,7 @@ package kafka.server
 import kafka.api.ElectLeadersRequestOps
 import kafka.controller.ReplicaAssignment
 import kafka.coordinator.transaction.{InitProducerIdResult, TransactionCoordinator}
+import kafka.interceptor.BrokerInterceptors
 import kafka.network.RequestChannel
 import kafka.server.QuotaFactory.{QuotaManagers, UnboundedQuota}
 import kafka.server.handlers.DescribeTopicPartitionsRequestHandler
@@ -70,7 +71,7 @@ import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.coordinator.group.{Group, GroupCoordinator}
 import org.apache.kafka.server.ClientMetricsManager
 import org.apache.kafka.server.authorizer._
-import org.apache.kafka.server.common.{MetadataVersion}
+import org.apache.kafka.server.common.MetadataVersion
 import org.apache.kafka.server.common.MetadataVersion.{IBP_0_11_0_IV0, IBP_2_3_IV0}
 import org.apache.kafka.server.record.BrokerCompressionType
 import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchIsolation, FetchParams, FetchPartitionData}
@@ -110,7 +111,8 @@ class KafkaApis(val requestChannel: RequestChannel,
                 time: Time,
                 val tokenManager: DelegationTokenManager,
                 val apiVersionManager: ApiVersionManager,
-                val clientMetricsManager: Option[ClientMetricsManager]
+                val clientMetricsManager: Option[ClientMetricsManager],
+                val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
 ) extends ApiRequestHandler with Logging {
 
   type FetchResponseStats = Map[TopicPartition, RecordValidationStats]
@@ -185,6 +187,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         throw new IllegalStateException(s"API ${request.header.apiKey} with version ${request.header.apiVersion} is not enabled")
       }
 
+      brokerInterceptors.beforeHandleRequest(request)
       request.header.apiKey match {
         case ApiKeys.PRODUCE => handleProduceRequest(request, requestLocal)
         case ApiKeys.FETCH => handleFetchRequest(request)

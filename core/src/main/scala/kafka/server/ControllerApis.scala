@@ -17,6 +17,8 @@
 
 package kafka.server
 
+import kafka.interceptor.BrokerInterceptors
+
 import java.{lang, util}
 import java.nio.ByteBuffer
 import java.util.{Collections, OptionalLong}
@@ -76,7 +78,8 @@ class ControllerApis(
   val clusterId: String,
   val registrationsPublisher: ControllerRegistrationsPublisher,
   val apiVersionManager: ApiVersionManager,
-  val metadataCache: KRaftMetadataCache
+  val metadataCache: KRaftMetadataCache,
+  val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
 ) extends ApiRequestHandler with Logging {
 
   this.logIdent = s"[ControllerApis nodeId=${config.nodeId}] "
@@ -92,6 +95,7 @@ class ControllerApis(
 
   override def handle(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
     try {
+      brokerInterceptors.beforeHandleRequest(request)
       val handlerFuture: CompletableFuture[Unit] = request.header.apiKey match {
         case ApiKeys.FETCH => handleFetch(request)
         case ApiKeys.FETCH_SNAPSHOT => handleFetchSnapshot(request)

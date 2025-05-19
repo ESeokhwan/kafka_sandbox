@@ -158,7 +158,7 @@ class KafkaRequestHandler(
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
             threadCurrentRequest.set(request)
-            brokerInterceptors.beforeHandleRequest(request)
+//            brokerInterceptors.beforeHandleRequest(request)
             apis.handle(request, requestLocal)
           } catch {
             case e: FatalExitError =>
