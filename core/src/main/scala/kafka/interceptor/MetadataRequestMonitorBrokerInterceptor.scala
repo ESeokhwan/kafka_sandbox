@@ -60,6 +60,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
           currentTimeNano
         )
       )
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
@@ -102,6 +103,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
           currentTimeNano
         )
       )
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
