@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
+import kafka.interceptor.{BrokerInterceptors, MetadataRequestMonitorBrokerInterceptor, MonitorLoggingBrokerInterceptor}
 import kafka.migration.MigrationPropagator
 import kafka.network.{DataPlaneAcceptor, SocketServer}
 import kafka.raft.KafkaRaftManager
@@ -185,9 +185,11 @@ class ControllerServer(
 
       // For testing purposes, backdoor for unused imports
       unusedBrokerInterceptors = new BrokerInterceptors(Vector(
-        new MonitorLoggingBrokerInterceptor(logContext)
+        new MonitorLoggingBrokerInterceptor(logContext),
+        new MetadataRequestMonitorBrokerInterceptor(logContext)
       ))
       brokerInterceptors = new BrokerInterceptors(Vector(
+        new MetadataRequestMonitorBrokerInterceptor(logContext)
       ))
       brokerInterceptors.init()
 
