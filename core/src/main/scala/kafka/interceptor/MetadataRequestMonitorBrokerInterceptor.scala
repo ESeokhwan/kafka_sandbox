@@ -21,7 +21,23 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
+    val currentTime = System.currentTimeMillis()
+    val currentTimeNano = System.nanoTime()
+    if (request.header.apiKey== ApiKeys.CREATE_TOPICS) {
+      val createTopicsRequest = request.body[CreateTopicsRequest]
+      monitorQueue.enqueue(
+        new MonitorLog(
+          "CREATE_TOPIC",
+          createTopicsRequest.data().topics().iterator().next().name(),
+          "REQUESTED",
+          currentTime,
+          currentTimeNano
+        )
+      )
+      monitorLogWriter.notifyIfNeeded()
+    }
+  }
 
   override def beforeHandleRequest(request: RequestChannel.Request): Unit = {
     val currentTime = System.currentTimeMillis()
@@ -43,18 +59,6 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         new MonitorLog(
           "PRODUCE",
           "",
-          "REQUESTED",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    } else if (request.header.apiKey() == ApiKeys.CREATE_TOPICS) {
-      val createTopicsRequest = request.body[CreateTopicsRequest]
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "CREATE_TOPIC",
-          createTopicsRequest.data().topics().toString,
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -97,7 +101,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
       monitorQueue.enqueue(
         new MonitorLog(
           "CREATE_TOPIC",
-          createTopicsRequest.data().topics().toString,
+          createTopicsRequest.data().topics().iterator().next().name(),
           "COMPLETED",
           currentTime,
           currentTimeNano
