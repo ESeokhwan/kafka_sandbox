@@ -8,7 +8,9 @@ import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.ProduceRequest
 import org.apache.kafka.common.utils.LogContext
 
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import scala.jdk.CollectionConverters.ConcurrentMapHasAsScala
 
 class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
@@ -23,7 +25,7 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
   private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
 
-  private val requestMap: scala.collection.mutable.Map[RequestChannel.Request, Timestamps] = scala.collection.mutable.Map.empty
+  private val requestMap = new ConcurrentHashMap[RequestChannel.Request, Timestamps]().asScala
   private val counter: AtomicLong = new AtomicLong(0)
 
   override def init(): Unit = {
@@ -71,6 +73,9 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
           ts.completedTime,
           ts.completedTimeNano
         ))
+        monitorLogWriter.notifyIfNeeded()
+//        println(s"Request $api-$curNum latencyNano: ${ts.completedTimeNano - ts.requestedTimeNano} ms")
+      case None =>
     }
 
     if (response.request.header.apiKey == ApiKeys.PRODUCE) {
