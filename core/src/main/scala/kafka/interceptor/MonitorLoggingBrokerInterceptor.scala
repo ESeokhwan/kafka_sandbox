@@ -8,11 +8,23 @@ import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.ProduceRequest
 import org.apache.kafka.common.utils.LogContext
 
+import java.util.concurrent.atomic.AtomicLong
+
 class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
+
+  class Timestamps {
+    var requestedTime: Long = _
+    var requestedTimeNano: Long = _
+    var completedTime: Long = _
+    var completedTimeNano: Long = _
+  }
 
   private var monitorQueue: MonitorQueue = _
   private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
+
+  private val requestMap: scala.collection.mutable.Map[RequestChannel.Request, Timestamps] = scala.collection.mutable.Map.empty
+  private val counter: AtomicLong = new AtomicLong(0)
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
@@ -22,13 +34,45 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
+    val currentTime = System.currentTimeMillis()
+    val currentTimeNano = System.nanoTime()
+    requestMap.put(request, new Timestamps {
+      requestedTime = currentTime
+      requestedTimeNano = currentTimeNano
+    })
+  }
 
   override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
 
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
+
+    val timestamps = requestMap.remove(response.request)
+    timestamps match {
+      case Some(ts) =>
+        ts.completedTime = currentTime
+        ts.completedTimeNano = currentTimeNano
+
+        val curNum = counter.incrementAndGet()
+        val api = response.request.header.apiKey.toString
+        monitorQueue.enqueue(new MonitorLog(
+          api,
+          curNum.toString,
+          "REQUESTED",
+          ts.requestedTime,
+          ts.requestedTimeNano
+        ))
+        monitorQueue.enqueue(new MonitorLog(
+          api,
+          curNum.toString,
+          "COMPLETED",
+          ts.completedTime,
+          ts.completedTimeNano
+        ))
+    }
+
     if (response.request.header.apiKey == ApiKeys.PRODUCE) {
       val produceRequest = response.request.body[ProduceRequest]
       produceRequest.data().topicData().forEach(topic => topic.partitionData.forEach { partition =>
