@@ -4,7 +4,7 @@ import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.{ApiKeys, MessageUtil}
-import org.apache.kafka.common.requests.{CreateTopicsRequest, MetadataRequest}
+import org.apache.kafka.common.requests.MetadataRequest
 import org.apache.kafka.common.utils.LogContext
 
 class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
@@ -21,23 +21,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
-    val currentTime = System.currentTimeMillis()
-    val currentTimeNano = System.nanoTime()
-    if (request.header.apiKey== ApiKeys.CREATE_TOPICS) {
-      val createTopicsRequest = request.body[CreateTopicsRequest]
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "CREATE_TOPIC",
-          createTopicsRequest.data().topics().iterator().next().name(),
-          "REQUESTED",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    }
-  }
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
 
   override def beforeHandleRequest(request: RequestChannel.Request): Unit = {
     val currentTime = System.currentTimeMillis()
@@ -48,17 +32,6 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         new MonitorLog(
           "METADATA",
           extractTopicNames(metadataRequest),
-          "REQUESTED",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    } else if (request.header.apiKey == ApiKeys.PRODUCE) {
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "PRODUCE",
-          "",
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -79,29 +52,6 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
         new MonitorLog(
           "METADATA",
           extractTopicNames(metadataRequest),
-          "COMPLETED",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    } else if (response.request.header.apiKey == ApiKeys.PRODUCE) {
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "PRODUCE",
-          "",
-          "COMPLETED",
-          currentTime,
-          currentTimeNano
-        )
-      )
-      monitorLogWriter.notifyIfNeeded()
-    } else if (response.request.header.apiKey == ApiKeys.CREATE_TOPICS) {
-      val createTopicsRequest = response.request.body[CreateTopicsRequest]
-      monitorQueue.enqueue(
-        new MonitorLog(
-          "CREATE_TOPIC",
-          createTopicsRequest.data().topics().iterator().next().name(),
           "COMPLETED",
           currentTime,
           currentTimeNano

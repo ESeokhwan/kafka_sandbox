@@ -21,9 +21,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
-
-  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
     if (request.header.apiKey== ApiKeys.CREATE_TOPICS) {
@@ -40,6 +38,8 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorLogWriter.notifyIfNeeded()
     }
   }
+
+  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
 
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {}
 
