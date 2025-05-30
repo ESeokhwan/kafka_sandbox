@@ -3,11 +3,11 @@ package kafka.interceptor
 import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
-import org.apache.kafka.common.protocol.{ApiKeys, MessageUtil}
-import org.apache.kafka.common.requests.MetadataRequest
+import org.apache.kafka.common.protocol.ApiKeys
+import org.apache.kafka.common.requests.CreateTopicsRequest
 import org.apache.kafka.common.utils.LogContext
 
-class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
+class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
   private var monitorQueue: MonitorQueue = _
   private var monitorLogWriter: MonitorLogWriter = _
@@ -21,17 +21,15 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
-
-  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
-    if (request.header.apiKey == ApiKeys.METADATA) {
-      val metadataRequest = request.body[MetadataRequest]
+    if (request.header.apiKey== ApiKeys.CREATE_TOPICS) {
+      val createTopicsRequest = request.body[CreateTopicsRequest]
       monitorQueue.enqueue(
         new MonitorLog(
-          "METADATA",
-          extractTopicNames(metadataRequest),
+          "CREATE_TOPIC",
+          createTopicsRequest.data().topics().iterator().next().name(),
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -41,17 +39,19 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
     }
   }
 
+  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
+
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {}
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
-    if (response.request.header.apiKey == ApiKeys.METADATA) {
-      val metadataRequest = response.request.body[MetadataRequest]
+    if (response.request.header.apiKey == ApiKeys.CREATE_TOPICS) {
+      val createTopicsRequest = response.request.body[CreateTopicsRequest]
       monitorQueue.enqueue(
         new MonitorLog(
-          "METADATA",
-          extractTopicNames(metadataRequest),
+          "CREATE_TOPIC",
+          createTopicsRequest.data().topics().iterator().next().name(),
           "COMPLETED",
           currentTime,
           currentTimeNano
@@ -74,16 +74,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
     } catch {
       case e: InterruptedException =>
         Thread.currentThread().interrupt()
-        throw new RuntimeException("MonitorLoggingBrokerInterceptor shutdown interrupted", e)
+        throw new RuntimeException("TopicCreateRequestMonitorBrokerInterceptor shutdown interrupted", e)
     }
-  }
-
-  private def extractTopicNames(metadataRequest: MetadataRequest): String = {
-    if (metadataRequest.data().topics() == null) {
-      return ""
-    }
-    MessageUtil.deepToString(metadataRequest.data().topics().stream().map(e => {
-      e.name()
-    }).iterator())
   }
 }

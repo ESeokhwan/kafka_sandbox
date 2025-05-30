@@ -20,7 +20,7 @@ package kafka.server
 import kafka.cluster.EndPoint
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
-import kafka.interceptor.{BrokerInterceptors, MetadataRequestMonitorBrokerInterceptor, MonitorLoggingBrokerInterceptor}
+import kafka.interceptor.{BrokerInterceptors, MetadataRequestMonitorBrokerInterceptor, MonitorLoggingBrokerInterceptor, TopicCreateRequestMonitorBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.network.{DataPlaneAcceptor, SocketServer}
@@ -253,10 +253,13 @@ class BrokerServer(
       // For testing purposes, backdoor for unused imports
       unusedBrokerInterceptors = new BrokerInterceptors(Vector(
         new MonitorLoggingBrokerInterceptor(logContext),
-        new MetadataRequestMonitorBrokerInterceptor(logContext)
+        new MetadataRequestMonitorBrokerInterceptor(logContext),
+        new TopicCreateRequestMonitorBrokerInterceptor(logContext),
       ))
       brokerInterceptors = new BrokerInterceptors(Vector(
-        new MetadataRequestMonitorBrokerInterceptor(logContext)
+//        new MonitorLoggingBrokerInterceptor(logContext),
+//        new MetadataRequestMonitorBrokerInterceptor(logContext),
+        new TopicCreateRequestMonitorBrokerInterceptor(logContext),
       ))
       brokerInterceptors.init()
 
