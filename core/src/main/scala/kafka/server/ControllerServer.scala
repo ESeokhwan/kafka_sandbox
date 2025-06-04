@@ -190,11 +190,11 @@ class ControllerServer(
         new TopicCreateRequestMonitorBrokerInterceptor(logContext),
       ))
       brokerInterceptors = new BrokerInterceptors(Vector(
-        //        new MonitorLoggingBrokerInterceptor(logContext),
-        //        new MetadataRequestMonitorBrokerInterceptor(logContext),
+//                new MonitorLoggingBrokerInterceptor(logContext),
+//                new MetadataRequestMonitorBrokerInterceptor(logContext),
         new TopicCreateRequestMonitorBrokerInterceptor(logContext),
       ))
-      //      brokerInterceptors = new BrokerInterceptors(Vector.empty)
+//            brokerInterceptors = new BrokerInterceptors(Vector.empty)
       brokerInterceptors.init()
 
       tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)
