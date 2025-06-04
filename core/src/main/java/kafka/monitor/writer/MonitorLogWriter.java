@@ -53,8 +53,10 @@ public class MonitorLogWriter implements Runnable {
       if (!terminated && monitorQueue.isEmpty()) {
         syncedWait();
       }
-      writeStrategy.write(monitorQueue.dequeue());
-      curWrittenCnt += 1;
+      if (!monitorQueue.isEmpty()) {
+        writeStrategy.write(monitorQueue.dequeue());
+        curWrittenCnt += 1;
+      }
       tryFlushBatch();
     }
     flushBatch();
