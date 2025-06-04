@@ -21,13 +21,14 @@ public class ConsoleMonitorLogWriteStrategy implements IMonitorLogWriteStrategy 
 
     @Override
     public void write(MonitorLog log) {
+        String id = log.getId().length() > 50 ? log.getId().substring(0, 50) : log.getId();
         if (needNanoTime) {
-            logger.info("MonitorLog: Type: {}, Id: {}, State: {}, Timestamp: {}, TimestampNano: {}",
-                    log.getType(), log.getId(), log.getState(), prettierTimestamp(log.getTimestamp()), prettierTimestampNano(log.getTimestampNano()));
+            logger.info("MonitorLog -- Type: {}, Id: {}, Timestamp: {}, TimestampNano: {}, State: {}",
+                    log.getType(), id, prettierTimestamp(log.getTimestamp()), prettierTimestampNano(log.getTimestampNano()), log.getState());
             return;
         }
-        logger.info("MonitorLog: Type: {}, Id: {}, Timestamp: {}, State: {}",
-                log.getType(), log.getId(), log.getState(), prettierTimestamp(log.getTimestamp()));
+        logger.info("MonitorLog -- Type: {}, Id: {}, Timestamp: {}, State: {}",
+                log.getType(), id, prettierTimestamp(log.getTimestamp()), log.getState());
     }
 
     private String prettierTimestamp(long timestamp) {
