@@ -1,6 +1,6 @@
 package kafka.interceptor
 
-import kafka.monitor.writer.{ConsoleMonitorLogWriteStrategy, MonitorLogWriter}
+import kafka.monitor.writer.{ScrapableConsoleMonitorLogWriteStrategy, MonitorLogWriter}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.{ApiKeys, MessageUtil}
@@ -16,7 +16,7 @@ class MetadataRequestMonitorBrokerInterceptor(val logContext: LogContext) extend
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
     monitorLogWriter = new MonitorLogWriter(
-      monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1)
+      monitorQueue, new ScrapableConsoleMonitorLogWriteStrategy(), 1000)
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
   }
