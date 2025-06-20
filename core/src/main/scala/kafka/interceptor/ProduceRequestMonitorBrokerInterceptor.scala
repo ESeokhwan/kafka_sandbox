@@ -8,6 +8,8 @@ import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.ProduceRequest
 import org.apache.kafka.common.utils.LogContext
 
+import java.nio.charset.StandardCharsets
+
 class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
   private var monitorQueue: MonitorQueue = _
@@ -22,18 +24,23 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
-
-  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
-    if (request.header.apiKey== ApiKeys.PRODUCE) {
+    if (request.header.apiKey == ApiKeys.PRODUCE) {
       val produceRequest = request.body[ProduceRequest]
       produceRequest.data().topicData().forEach(topic => topic.partitionData.forEach { partition =>
         val memoryRecords: MemoryRecords = partition.records.asInstanceOf[MemoryRecords]
         memoryRecords.batches.forEach(batch => {
           batch.forEach(record => {
-            val messageId = record.value().toString
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
             monitorQueue.enqueue(new MonitorLog(
               "PRODUCE",
               messageId,
@@ -48,9 +55,9 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
     }
   }
 
-  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {}
+  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
 
-  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {
+  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
     if (response.request.header.apiKey == ApiKeys.PRODUCE) {
@@ -59,7 +66,14 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
         val memoryRecords: MemoryRecords = partition.records.asInstanceOf[MemoryRecords]
         memoryRecords.batches.forEach(batch => {
           batch.forEach(record => {
-            val messageId = record.value().toString
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
             monitorQueue.enqueue(new MonitorLog(
               "PRODUCE",
               messageId,
@@ -73,6 +87,8 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
       monitorLogWriter.notifyIfNeeded()
     }
   }
+
+  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
   override def shutdown(): Unit = {
     if (monitorLogWriter == null || monitorLogThread == null) {
