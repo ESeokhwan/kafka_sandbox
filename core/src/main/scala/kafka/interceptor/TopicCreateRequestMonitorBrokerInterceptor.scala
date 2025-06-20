@@ -29,7 +29,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorQueue.enqueue(
         new MonitorLog(
           "CREATE_TOPIC",
-          createTopicsRequest.data().topics().iterator().next().name(),
+          String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -49,7 +49,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorQueue.enqueue(
         new MonitorLog(
           "CREATE_TOPIC",
-          createTopicsRequest.data().topics().iterator().next().name(),
+          String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
           "COMPLETED",
           currentTime,
           currentTimeNano
