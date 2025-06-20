@@ -21,9 +21,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
     monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
-
-  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
     if (request.header.apiKey== ApiKeys.CREATE_TOPICS) {
@@ -41,9 +39,9 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
     }
   }
 
-  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {}
+  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
 
-  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {
+  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     val currentTime = System.currentTimeMillis()
     val currentTimeNano = System.nanoTime()
     if (response.request.header.apiKey == ApiKeys.CREATE_TOPICS) {
@@ -60,6 +58,8 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorLogWriter.notifyIfNeeded()
     }
   }
+
+  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
   override def shutdown(): Unit = {
     if (monitorLogWriter == null || monitorLogThread == null) {
