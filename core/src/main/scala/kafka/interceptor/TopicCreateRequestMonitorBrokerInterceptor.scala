@@ -1,10 +1,10 @@
 package kafka.interceptor
 
-import kafka.monitor.writer.{ScrapableConsoleMonitorLogWriteStrategy, MonitorLogWriter}
+import kafka.monitor.writer.{MonitorLogWriter, ScrapableConsoleMonitorLogWriteStrategy}
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.ApiKeys
-import org.apache.kafka.common.requests.CreateTopicsRequest
+import org.apache.kafka.common.requests.{CreateTopicsRequest, DeleteTopicsRequest}
 import org.apache.kafka.common.utils.LogContext
 
 class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
@@ -36,6 +36,18 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
         )
       )
       monitorLogWriter.notifyIfNeeded()
+    } else if (request.header.apiKey == ApiKeys.DELETE_TOPICS) {
+      val deleteTopicsRequest = request.body[DeleteTopicsRequest]
+      monitorQueue.enqueue(
+        new MonitorLog(
+          "DELETE_TOPIC",
+          String.join(",", deleteTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
+          "REQUESTED",
+          currentTime,
+          currentTimeNano
+        )
+      )
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
@@ -50,6 +62,18 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
         new MonitorLog(
           "CREATE_TOPIC",
           String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
+          "COMPLETED",
+          currentTime,
+          currentTimeNano
+        )
+      )
+      monitorLogWriter.notifyIfNeeded()
+    } else if (response.request.header.apiKey == ApiKeys.DELETE_TOPICS) {
+      val deleteTopicsRequest = response.request.body[DeleteTopicsRequest]
+      monitorQueue.enqueue(
+        new MonitorLog(
+          "DELETE_TOPIC",
+          String.join(",", deleteTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
           "COMPLETED",
           currentTime,
           currentTimeNano
