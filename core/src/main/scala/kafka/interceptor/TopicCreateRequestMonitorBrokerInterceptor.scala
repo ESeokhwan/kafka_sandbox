@@ -6,6 +6,7 @@ import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.requests.{CreateTopicsRequest, DeleteTopicsRequest}
 import org.apache.kafka.common.utils.LogContext
+import java.util.stream.Collectors
 
 class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
@@ -29,7 +30,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorQueue.enqueue(
         new MonitorLog(
           "CREATE_TOPIC",
-          String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
+          String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).collect(Collectors.toList())),
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -41,7 +42,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorQueue.enqueue(
         new MonitorLog(
           "DELETE_TOPIC",
-          String.join(",", deleteTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
+          String.join(",", deleteTopicsRequest.data().topics().stream().map(_.name()).collect(Collectors.toList())),
           "REQUESTED",
           currentTime,
           currentTimeNano
@@ -61,7 +62,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorQueue.enqueue(
         new MonitorLog(
           "CREATE_TOPIC",
-          String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
+          String.join(",", createTopicsRequest.data().topics().stream().map(_.name()).collect(Collectors.toList())),
           "COMPLETED",
           currentTime,
           currentTimeNano
@@ -73,7 +74,7 @@ class TopicCreateRequestMonitorBrokerInterceptor(val logContext: LogContext) ext
       monitorQueue.enqueue(
         new MonitorLog(
           "DELETE_TOPIC",
-          String.join(",", deleteTopicsRequest.data().topics().stream().map(_.name()).toList[String]),
+          String.join(",", deleteTopicsRequest.data().topics().stream().map(_.name()).collect(Collectors.toList())),
           "COMPLETED",
           currentTime,
           currentTimeNano
