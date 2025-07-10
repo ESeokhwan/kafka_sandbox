@@ -31,7 +31,7 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
     monitorLogWriter = new MonitorLogWriter(
-      monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1000)
+      monitorQueue, new ConsoleMonitorLogWriteStrategy(logContext, true, false), 1_000_000)
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
   }

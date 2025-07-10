@@ -9,7 +9,7 @@ public class ScrapableConsoleMonitorLogWriteStrategy implements IMonitorLogWrite
 
     @Override
     public void write(MonitorLog log) {
-        System.out.println(log.getType() + ", " + log.getId() + ", " + log.getTimestamp() + ", " + log.getState());
+        System.out.println(log.getType() + ", " + log.getId() + ", " + log.getTimestamp() + ", " + log.getTimestampNano() + ", " + log.getState());
     }
 
     @Override

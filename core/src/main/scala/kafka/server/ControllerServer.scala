@@ -187,9 +187,8 @@ class ControllerServer(
       unusedBrokerInterceptors = new BrokerInterceptors(Vector(
         new MonitorLoggingBrokerInterceptor(logContext)
       ))
-      unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
-
-      brokerInterceptors = new BrokerInterceptors(Vector.empty)
+      brokerInterceptors = new BrokerInterceptors(Vector(
+      ))
       brokerInterceptors.init()
 
       tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)

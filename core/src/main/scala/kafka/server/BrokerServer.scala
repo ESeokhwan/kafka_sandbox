@@ -254,9 +254,8 @@ class BrokerServer(
       unusedBrokerInterceptors = new BrokerInterceptors(Vector(
         new MonitorLoggingBrokerInterceptor(logContext)
       ))
-      unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
-
-      brokerInterceptors = new BrokerInterceptors(Vector.empty)
+      brokerInterceptors = new BrokerInterceptors(Vector(
+      ))
       brokerInterceptors.init()
 
       // Create and start the socket server acceptor threads so that the bound port is known.
