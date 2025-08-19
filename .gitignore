@@ -65,3 +65,5 @@ __pycache__
 
 custom-bin**/
 custom-config**/
+
+GEMINI.md
