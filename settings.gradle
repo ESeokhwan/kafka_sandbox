@@ -102,6 +102,7 @@ include 'clients',
     'tools',
     'tools:tools-api',
     'transaction-coordinator',
+    'transient-topic-coordinator',
     'trogdor'
 
 project(":storage:api").name = "storage-api"
