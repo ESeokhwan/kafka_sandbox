@@ -16,22 +16,6 @@
  */
 package org.apahce.kafka.coordinator.transienttopic;
 
-import org.apache.kafka.common.TransientTopicPartition;
+public class TransientTopicCoordinatorConfig {
 
-public class TransientTopicPartitionPool {
-
-    public static class Builder {
-        public TransientTopicPartitionPool build() {
-            return new TransientTopicPartitionPool();
-        }
-    }
-
-    public TransientTopicPartition allocatePartition() {
-        // TODO: Implement here
-        return null;
-    }
-
-    public void releasePartition(TransientTopicPartition partition) {
-        // TODO: Implement here
-    }
 }
