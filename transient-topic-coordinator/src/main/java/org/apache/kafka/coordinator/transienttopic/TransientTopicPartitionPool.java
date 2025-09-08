@@ -14,9 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apahce.kafka.coordinator.transienttopic;
+package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TransientTopicPartition;
+import org.apache.kafka.common.internals.Topic;
 
 public class TransientTopicPartitionPool {
 
@@ -28,7 +29,7 @@ public class TransientTopicPartitionPool {
 
     public TransientTopicPartition allocatePartition() {
         // TODO: Implement here
-        return null;
+        return new TransientTopicPartition(Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME, 0, 0);
     }
 
     public void releasePartition(TransientTopicPartition partition) {

@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apahce.kafka.coordinator.transienttopic;
+package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TransientTopic;
@@ -29,11 +29,16 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.coordinator.group.CoordinatorRecord;
 import org.apache.kafka.coordinator.group.CoordinatorRecordSerde;
 import org.apache.kafka.coordinator.group.metrics.CoordinatorRuntimeMetrics;
-import org.apache.kafka.coordinator.group.runtime.*;
+import org.apache.kafka.coordinator.group.runtime.CoordinatorEventProcessor;
+import org.apache.kafka.coordinator.group.runtime.CoordinatorLoader;
+import org.apache.kafka.coordinator.group.runtime.CoordinatorRuntime;
+import org.apache.kafka.coordinator.group.runtime.CoordinatorShardBuilderSupplier;
+import org.apache.kafka.coordinator.group.runtime.MultiThreadedEventProcessor;
+import org.apache.kafka.coordinator.group.runtime.PartitionWriter;
+import org.apache.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetrics;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.server.util.timer.Timer;
-import org.apahce.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetrics;
 import org.slf4j.Logger;
 
 import java.time.Duration;
@@ -190,13 +195,13 @@ public class TransientTopicCoordinator {
     }
 
     private TopicPartition topicPartitionFor(
-            Uuid topicId
+        Uuid topicId
     ) {
         return new TopicPartition(Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME, partitionFor(topicId));
     }
 
     private int partitionFor(
-            Uuid topicId
+        Uuid topicId
     ) {
         return Utils.abs(topicId.hashCode()) % numPartitions;
     }

@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apahce.kafka.coordinator.transienttopic;
+package org.apache.kafka.coordinator.transienttopic;
 
 public class TransientTopicCoordinatorConfig {
 

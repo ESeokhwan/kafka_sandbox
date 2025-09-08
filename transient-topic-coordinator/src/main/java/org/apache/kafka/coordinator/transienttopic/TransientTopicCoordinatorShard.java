@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apahce.kafka.coordinator.transienttopic;
+package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TransientTopic;
@@ -30,10 +30,10 @@ import org.apache.kafka.coordinator.group.runtime.CoordinatorResult;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorShard;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorShardBuilder;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorTimer;
+import org.apache.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetrics;
+import org.apache.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetricsShard;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.timeline.SnapshotRegistry;
-import org.apahce.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetrics;
-import org.apahce.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetricsShard;
 import org.slf4j.Logger;
 
 public class TransientTopicCoordinatorShard implements CoordinatorShard<CoordinatorRecord> {
@@ -146,14 +146,14 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
     private final CoordinatorMetricsShard metricsShard;
 
     TransientTopicCoordinatorShard(
-            LogContext logContext,
-            TransientTopicIndexCache indexCache,
-            TransientTopicPartitionPool partitionPool,
-            Time time,
-            CoordinatorTimer<Void, CoordinatorRecord> timer,
-            TransientTopicCoordinatorConfig config,
-            CoordinatorMetrics coordinatorMetrics,
-            CoordinatorMetricsShard metricsShard
+        LogContext logContext,
+        TransientTopicIndexCache indexCache,
+        TransientTopicPartitionPool partitionPool,
+        Time time,
+        CoordinatorTimer<Void, CoordinatorRecord> timer,
+        TransientTopicCoordinatorConfig config,
+        CoordinatorMetrics coordinatorMetrics,
+        CoordinatorMetricsShard metricsShard
     ) {
         this.log = logContext.logger(TransientTopicCoordinatorShard.class);
         this.indexCache = indexCache;
@@ -166,9 +166,9 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
     }
 
     public CoordinatorResult<TransientTopic, CoordinatorRecord> createNewTransientTopic(
-            RequestContext context,
-            Uuid topicId,
-            String topicName
+        RequestContext context,
+        Uuid topicId,
+        String topicName
     ) {
         // TODO: Implement here
         return null;

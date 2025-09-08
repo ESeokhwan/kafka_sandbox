@@ -16,14 +16,12 @@
  */
 package org.apache.kafka.common;
 
-import java.io.Serializable;
-
 /**
  * This class represents a transient topic in Kafka, which is not persisted in the cluster.
  * It contains the topic's unique identifier, name, partition information, and timestamps
  * for creation and last usage.
  */
-public class TransientTopic implements Serializable {
+public class TransientTopic {
     private int hash = 0;
 
     private final Uuid id;
@@ -42,6 +40,10 @@ public class TransientTopic implements Serializable {
 
     public TransientTopic(String name, TransientTopicPartition partition) {
         this(Uuid.randomUuid(), name, partition, System.currentTimeMillis(), System.currentTimeMillis());
+    }
+
+    public TransientTopic(Uuid id, String name, TransientTopicPartition partition) {
+        this(id, name, partition, System.currentTimeMillis(), System.currentTimeMillis());
     }
 
     /**
