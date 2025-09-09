@@ -16,6 +16,9 @@
  */
 package org.apache.kafka.coordinator.transienttopic;
 
+import org.apache.kafka.common.config.ConfigDef;
+
 public class TransientTopicCoordinatorConfig {
 
+    public static final ConfigDef TRANSIENT_TOPIC_COORDINATOR_CONFIG_DEF = new ConfigDef();
 }

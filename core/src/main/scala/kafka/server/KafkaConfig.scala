@@ -36,6 +36,7 @@ import org.apache.kafka.common.utils.Utils
 import org.apache.kafka.coordinator.group.Group.GroupType
 import org.apache.kafka.coordinator.group.GroupCoordinatorConfig
 import org.apache.kafka.coordinator.transaction.{TransactionLogConfigs, TransactionStateManagerConfigs}
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinatorConfig
 import org.apache.kafka.network.SocketServerConfigs
 import org.apache.kafka.raft.QuorumConfig
 import org.apache.kafka.security.authorizer.AuthorizerUtils
@@ -233,6 +234,9 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
   private val _groupCoordinatorConfig = new GroupCoordinatorConfig(this)
 
   def groupCoordinatorConfig: GroupCoordinatorConfig = _groupCoordinatorConfig
+
+  private val _transientTopicCoordinatorConfig = new TransientTopicCoordinatorConfig(this)
+  def transientTopicCoordinatorConfig: TransientTopicCoordinatorConfig
 
   private val _shareGroupConfig = new ShareGroupConfig(this)
   def shareGroupConfig: ShareGroupConfig = _shareGroupConfig

@@ -23,6 +23,7 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.coordinator.group.GroupCoordinatorConfig;
 import org.apache.kafka.coordinator.transaction.TransactionLogConfigs;
 import org.apache.kafka.coordinator.transaction.TransactionStateManagerConfigs;
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinatorConfig;
 import org.apache.kafka.network.SocketServerConfigs;
 import org.apache.kafka.raft.QuorumConfig;
 import org.apache.kafka.security.PasswordEncoderConfigs;
@@ -54,6 +55,7 @@ public abstract class AbstractKafkaConfig extends AbstractConfig {
             GroupCoordinatorConfig.OFFSET_MANAGEMENT_CONFIG_DEF,
             GroupCoordinatorConfig.CONSUMER_GROUP_CONFIG_DEF,
             GroupCoordinatorConfig.SHARE_GROUP_CONFIG_DEF,
+            TransientTopicCoordinatorConfig.TRANSIENT_TOPIC_COORDINATOR_CONFIG_DEF,
             CleanerConfig.CONFIG_DEF,
             LogConfig.SERVER_CONFIG_DEF,
             ShareGroupConfig.CONFIG_DEF,
