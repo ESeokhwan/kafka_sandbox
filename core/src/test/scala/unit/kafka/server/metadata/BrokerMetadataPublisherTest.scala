@@ -32,6 +32,7 @@ import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.config.ConfigResource.Type.BROKER
 import org.apache.kafka.common.utils.Exit
 import org.apache.kafka.coordinator.group.GroupCoordinator
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
 import org.apache.kafka.image.{MetadataDelta, MetadataImage, MetadataImageTest, MetadataProvenance}
 import org.apache.kafka.image.loader.LogDeltaManifest
 import org.apache.kafka.network.SocketServerConfigs
@@ -194,6 +195,7 @@ class BrokerMetadataPublisherTest {
       replicaManager,
       groupCoordinator,
       mock(classOf[TransactionCoordinator]),
+      mock(classOf[TransientTopicCoordinator]), // TODO: add test logic
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
       mock(classOf[ScramPublisher]),

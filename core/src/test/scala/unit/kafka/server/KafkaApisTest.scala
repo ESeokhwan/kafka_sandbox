@@ -75,6 +75,7 @@ import org.apache.kafka.common.utils.annotation.ApiKeyVersionsSource
 import org.apache.kafka.common.utils.{ProducerIdAndEpoch, SecurityUtils, Utils}
 import org.apache.kafka.coordinator.group.{GroupCoordinator, GroupCoordinatorConfig}
 import org.apache.kafka.coordinator.transaction.TransactionLogConfigs
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
 import org.apache.kafka.raft.QuorumConfig
 import org.apache.kafka.security.authorizer.AclEntry
 import org.apache.kafka.server.ClientMetricsManager
@@ -111,6 +112,7 @@ class KafkaApisTest extends Logging {
   private val groupCoordinator: GroupCoordinator = mock(classOf[GroupCoordinator])
   private val adminManager: ZkAdminManager = mock(classOf[ZkAdminManager])
   private val txnCoordinator: TransactionCoordinator = mock(classOf[TransactionCoordinator])
+  private val transientTopicCoordinator: TransientTopicCoordinator = mock(classOf[TransientTopicCoordinator]) // TODO: add test logic
   private val controller: KafkaController = mock(classOf[KafkaController])
   private val forwardingManager: ForwardingManager = mock(classOf[ForwardingManager])
   private val autoTopicCreationManager: AutoTopicCreationManager = mock(classOf[AutoTopicCreationManager])
@@ -211,6 +213,7 @@ class KafkaApisTest extends Logging {
       replicaManager = replicaManager,
       groupCoordinator = groupCoordinator,
       txnCoordinator = txnCoordinator,
+      transientTopicCoordinator = transientTopicCoordinator,
       autoTopicCreationManager = autoTopicCreationManager,
       brokerId = brokerId,
       config = config,

@@ -35,7 +35,9 @@ import org.apache.kafka.common.security.token.delegation.internals.DelegationTok
 import org.apache.kafka.common.utils.{LogContext, Time}
 import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
-import org.apache.kafka.coordinator.group.{CoordinatorRecord, GroupCoordinator, GroupCoordinatorService, CoordinatorRecordSerde}
+import org.apache.kafka.coordinator.group.{CoordinatorRecord, CoordinatorRecordSerde, GroupCoordinator, GroupCoordinatorService}
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
+import org.apache.kafka.coordinator.transienttopic.metrics.{TransientTopicCoordinatorMetrics, TransientTopicCoordinatorRuntimeMetrics}
 import org.apache.kafka.image.publisher.{BrokerRegistrationTracker, MetadataPublisher}
 import org.apache.kafka.metadata.{BrokerState, ListenerInfo}
 import org.apache.kafka.security.CredentialProvider
@@ -55,7 +57,7 @@ import java.util
 import java.util.Optional
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.{Condition, ReentrantLock}
-import java.util.concurrent.{CompletableFuture, ExecutionException, TimeoutException, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ExecutionException, TimeUnit, TimeoutException}
 import scala.collection.Map
 import scala.compat.java8.OptionConverters.RichOptionForJava8
 import scala.jdk.CollectionConverters._
@@ -115,6 +117,8 @@ class BrokerServer(
   @volatile var groupCoordinator: GroupCoordinator = _
 
   var transactionCoordinator: TransactionCoordinator = _
+
+  var transientTopicCoordinator: TransientTopicCoordinator = _
 
   var clientToControllerChannelManager: NodeToControllerChannelManager = _
 
@@ -347,6 +351,8 @@ class BrokerServer(
         new KafkaScheduler(1, true, "transaction-log-manager-"),
         producerIdManagerSupplier, metrics, metadataCache, Time.SYSTEM)
 
+      transientTopicCoordinator = createTransientTopicCoordinator()
+
       autoTopicCreationManager = new DefaultAutoTopicCreationManager(
         config, Some(clientToControllerChannelManager), None, None,
         groupCoordinator, transactionCoordinator)
@@ -400,6 +406,7 @@ class BrokerServer(
         replicaManager = replicaManager,
         groupCoordinator = groupCoordinator,
         txnCoordinator = transactionCoordinator,
+        transientTopicCoordinator = transientTopicCoordinator,
         autoTopicCreationManager = autoTopicCreationManager,
         brokerId = config.nodeId,
         config = config,
@@ -445,6 +452,7 @@ class BrokerServer(
         replicaManager,
         groupCoordinator,
         transactionCoordinator,
+        transientTopicCoordinator,
         new DynamicConfigPublisher(
           config,
           sharedServer.metadataPublishingFaultHandler,
@@ -555,6 +563,33 @@ class BrokerServer(
         shutdown()
         throw if (e.isInstanceOf[ExecutionException]) e.getCause else e
     }
+  }
+
+  private def createTransientTopicCoordinator(): TransientTopicCoordinator = {
+    val time = Time.SYSTEM
+    val serde = new CoordinatorRecordSerde
+    val timer = new SystemTimerReaper(
+      "transient-topic-coordinator-reaper",
+      new SystemTimer("transient-topic-coordinator")
+    )
+    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
+      time,
+      replicaManager,
+      serde,
+      config.groupCoordinatorConfig.offsetsLoadBufferSize
+    )
+    val writer = new CoordinatorPartitionWriter(
+      replicaManager
+    )
+
+    new TransientTopicCoordinator.Builder(config.brokerId, config.transientTopicCoordinatorConfig)
+      .withTime(time)
+      .withTimer(timer)
+      .withLoader(loader)
+      .withWriter(writer)
+      .withCoordinatorRuntimeMetrics(new TransientTopicCoordinatorRuntimeMetrics(metrics))
+      .withTransientTopicCoordinatorMetrics(new TransientTopicCoordinatorMetrics(KafkaYammerMetrics.defaultRegistry, metrics))
+      .build()
   }
 
   private def createGroupCoordinator(): GroupCoordinator = {

@@ -35,6 +35,7 @@ import kafka.server.metadata.ConfigRepository;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.coordinator.group.GroupCoordinator;
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator;
 import org.apache.kafka.server.ClientMetricsManager;
 import org.apache.kafka.server.authorizer.Authorizer;
 
@@ -50,6 +51,7 @@ public class KafkaApisBuilder {
     private ReplicaManager replicaManager = null;
     private GroupCoordinator groupCoordinator = null;
     private TransactionCoordinator txnCoordinator = null;
+    private TransientTopicCoordinator transientTopicCoordinator = null;
     private AutoTopicCreationManager autoTopicCreationManager = null;
     private int brokerId = 0;
     private KafkaConfig config = null;
@@ -88,6 +90,11 @@ public class KafkaApisBuilder {
 
     public KafkaApisBuilder setTxnCoordinator(TransactionCoordinator txnCoordinator) {
         this.txnCoordinator = txnCoordinator;
+        return this;
+    }
+
+    public KafkaApisBuilder setTransientTopicCoordinator(TransientTopicCoordinator transientTopicCoordinator) {
+        this.transientTopicCoordinator = transientTopicCoordinator;
         return this;
     }
 
@@ -172,6 +179,7 @@ public class KafkaApisBuilder {
         if (replicaManager == null) throw new RuntimeException("You must set replicaManager");
         if (groupCoordinator == null) throw new RuntimeException("You must set groupCoordinator");
         if (txnCoordinator == null) throw new RuntimeException("You must set txnCoordinator");
+        if (transientTopicCoordinator == null) throw new RuntimeException("You must set transientTopicCoordinator");
         if (autoTopicCreationManager == null)
             throw new RuntimeException("You must set autoTopicCreationManager");
         if (config == null) config = new KafkaConfig(Collections.emptyMap());
@@ -188,6 +196,7 @@ public class KafkaApisBuilder {
                              replicaManager,
                              groupCoordinator,
                              txnCoordinator,
+                             transientTopicCoordinator,
                              autoTopicCreationManager,
                              brokerId,
                              config,

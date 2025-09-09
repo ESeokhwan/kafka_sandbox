@@ -26,6 +26,7 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.TimeoutException
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.coordinator.group.GroupCoordinator
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
 import org.apache.kafka.image.loader.LoaderManifest
 import org.apache.kafka.image.publisher.MetadataPublisher
 import org.apache.kafka.image.{MetadataDelta, MetadataImage, TopicDelta}
@@ -66,6 +67,7 @@ class BrokerMetadataPublisher(
   replicaManager: ReplicaManager,
   groupCoordinator: GroupCoordinator,
   txnCoordinator: TransactionCoordinator,
+  transientTopicCoordinator: TransientTopicCoordinator,
   var dynamicConfigPublisher: DynamicConfigPublisher,
   dynamicClientQuotaPublisher: DynamicClientQuotaPublisher,
   scramPublisher: ScramPublisher,
@@ -160,6 +162,18 @@ class BrokerMetadataPublisher(
             s"coordinator with local changes in $deltaName", t)
         }
         try {
+          updateCoordinator(newImage,
+            delta,
+            Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME,
+            transientTopicCoordinator.onElection,
+            (partitionIndex, leaderEpochOpt) =>
+              transientTopicCoordinator.onResignation(partitionIndex, toOptionalInt(leaderEpochOpt))
+          )
+        } catch {
+          case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating transient topic " +
+            s"coordinator with local changes in $deltaName", t)
+        }
+        try {
           // Notify the group coordinator about deleted topics.
           val deletedTopicPartitions = new mutable.ArrayBuffer[TopicPartition]()
           topicsDelta.deletedTopicIds().forEach { id =>
@@ -197,6 +211,14 @@ class BrokerMetadataPublisher(
         groupCoordinator.onNewMetadataImage(newImage, delta)
       } catch {
         case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating group " +
+          s"coordinator with local changes in $deltaName", t)
+      }
+
+      try {
+        // Propagate the new image to the transient topic coordinator.
+        transientTopicCoordinator.onNewMetadataImage(newImage, delta)
+      } catch {
+        case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating transient topic " +
           s"coordinator with local changes in $deltaName", t)
       }
 
@@ -311,6 +333,12 @@ class BrokerMetadataPublisher(
         Topic.TRANSACTION_STATE_TOPIC_NAME).getOrElse(config.transactionTopicPartitions))
     } catch {
       case t: Throwable => fatalFaultHandler.handleFault("Error starting TransactionCoordinator", t)
+    }
+    try {
+      // Start the transient topic coordinator.
+      transientTopicCoordinator.startup(() => 1) // TODO: make it configurable
+    } catch {
+      case t: Throwable => fatalFaultHandler.handleFault("Error starting TransientTopicCoordinator", t)
     }
   }
 

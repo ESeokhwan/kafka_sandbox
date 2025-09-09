@@ -236,7 +236,7 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
   def groupCoordinatorConfig: GroupCoordinatorConfig = _groupCoordinatorConfig
 
   private val _transientTopicCoordinatorConfig = new TransientTopicCoordinatorConfig(this)
-  def transientTopicCoordinatorConfig: TransientTopicCoordinatorConfig
+  def transientTopicCoordinatorConfig: TransientTopicCoordinatorConfig = _transientTopicCoordinatorConfig
 
   private val _shareGroupConfig = new ShareGroupConfig(this)
   def shareGroupConfig: ShareGroupConfig = _shareGroupConfig

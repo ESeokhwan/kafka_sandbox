@@ -56,6 +56,7 @@ import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.coordinator.group.GroupCoordinator;
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.MetadataProvenance;
@@ -104,6 +105,7 @@ public class KRaftMetadataRequestBenchmark {
     private final ReplicaManager replicaManager = Mockito.mock(ReplicaManager.class);
     private final GroupCoordinator groupCoordinator = Mockito.mock(GroupCoordinator.class);
     private final TransactionCoordinator transactionCoordinator = Mockito.mock(TransactionCoordinator.class);
+    private final TransientTopicCoordinator transientTopicCoordinator = Mockito.mock(TransientTopicCoordinator.class);
     private final AutoTopicCreationManager autoTopicCreationManager = Mockito.mock(AutoTopicCreationManager.class);
     private final Metrics metrics = new Metrics();
     private final int brokerId = 1;
@@ -190,6 +192,7 @@ public class KRaftMetadataRequestBenchmark {
                 setReplicaManager(replicaManager).
                 setGroupCoordinator(groupCoordinator).
                 setTxnCoordinator(transactionCoordinator).
+                setTransientTopicCoordinator(transientTopicCoordinator).
                 setAutoTopicCreationManager(autoTopicCreationManager).
                 setBrokerId(brokerId).
                 setConfig(config).

@@ -20,7 +20,7 @@ package kafka.server
 import kafka.cluster.{Broker, EndPoint}
 import kafka.common.GenerateBrokerIdException
 import kafka.controller.KafkaController
-import kafka.coordinator.group.GroupCoordinatorAdapter
+import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
@@ -45,7 +45,9 @@ import org.apache.kafka.common.security.token.delegation.internals.DelegationTok
 import org.apache.kafka.common.security.{JaasContext, JaasUtils}
 import org.apache.kafka.common.utils.{AppInfoParser, LogContext, Time, Utils}
 import org.apache.kafka.common.{Endpoint, Node, TopicPartition}
-import org.apache.kafka.coordinator.group.GroupCoordinator
+import org.apache.kafka.coordinator.group.{CoordinatorRecord, CoordinatorRecordSerde, GroupCoordinator}
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
+import org.apache.kafka.coordinator.transienttopic.metrics.{TransientTopicCoordinatorMetrics, TransientTopicCoordinatorRuntimeMetrics}
 import org.apache.kafka.image.loader.metrics.MetadataLoaderMetrics
 import org.apache.kafka.metadata.properties.MetaPropertiesEnsemble.VerificationFlag
 import org.apache.kafka.metadata.properties.MetaPropertiesEnsemble.VerificationFlag.REQUIRE_V0
@@ -63,6 +65,7 @@ import org.apache.kafka.server.fault.LoggingFaultHandler
 import org.apache.kafka.server.log.remote.storage.RemoteLogManagerConfig
 import org.apache.kafka.server.metrics.KafkaYammerMetrics
 import org.apache.kafka.server.util.KafkaScheduler
+import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel
 import org.apache.zookeeper.client.ZKClientConfig
 
@@ -153,6 +156,8 @@ class KafkaServer(
   @volatile var groupCoordinator: GroupCoordinator = _
 
   var transactionCoordinator: TransactionCoordinator = _
+
+  var transientTopicCoordinator: TransientTopicCoordinator = _
 
   @volatile private var _kafkaController: KafkaController = _
 
@@ -529,6 +534,8 @@ class KafkaServer(
         transactionCoordinator.startup(
           () => zkClient.getTopicPartitionCount(Topic.TRANSACTION_STATE_TOPIC_NAME).getOrElse(config.transactionTopicPartitions))
 
+        transientTopicCoordinator = createTransientTopicCoordinator() // TODO: Need more initializing logic
+
         /* start auto topic creation manager */
         this.autoTopicCreationManager = AutoTopicCreationManager(
           config,
@@ -588,6 +595,7 @@ class KafkaServer(
           replicaManager = replicaManager,
           groupCoordinator = groupCoordinator,
           txnCoordinator = transactionCoordinator,
+          transientTopicCoordinator = transientTopicCoordinator,
           autoTopicCreationManager = autoTopicCreationManager,
           brokerId = config.brokerId,
           config = config,
@@ -684,6 +692,33 @@ class KafkaServer(
   private def createCurrentControllerIdMetric(): Unit = {
     KafkaYammerMetrics.defaultRegistry().newGauge(MetadataLoaderMetrics.CURRENT_CONTROLLER_ID,
       () => getCurrentControllerIdFromOldController())
+  }
+
+  private def createTransientTopicCoordinator(): TransientTopicCoordinator = {
+    val time = Time.SYSTEM
+    val serde = new CoordinatorRecordSerde
+    val timer = new SystemTimerReaper(
+      "transient-topic-coordinator-reaper",
+      new SystemTimer("transient-topic-coordinator")
+    )
+    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
+      time,
+      replicaManager,
+      serde,
+      config.groupCoordinatorConfig.offsetsLoadBufferSize
+    )
+    val writer = new CoordinatorPartitionWriter(
+      replicaManager
+    )
+
+    new TransientTopicCoordinator.Builder(config.brokerId, config.transientTopicCoordinatorConfig)
+      .withTime(time)
+      .withTimer(timer)
+      .withLoader(loader)
+      .withWriter(writer)
+      .withCoordinatorRuntimeMetrics(new TransientTopicCoordinatorRuntimeMetrics(metrics))
+      .withTransientTopicCoordinatorMetrics(new TransientTopicCoordinatorMetrics(KafkaYammerMetrics.defaultRegistry, metrics))
+      .build()
   }
 
   /**

@@ -60,6 +60,7 @@ import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.coordinator.group.GroupCoordinator;
+import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator;
 import org.apache.kafka.server.common.FinalizedFeatures;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.server.config.ServerConfigs;
@@ -106,6 +107,7 @@ public class MetadataRequestBenchmark {
     private final GroupCoordinator groupCoordinator = Mockito.mock(GroupCoordinator.class);
     private final ZkAdminManager adminManager = Mockito.mock(ZkAdminManager.class);
     private final TransactionCoordinator transactionCoordinator = Mockito.mock(TransactionCoordinator.class);
+    private final TransientTopicCoordinator transientTopicCoordinator = Mockito.mock(TransientTopicCoordinator.class);
     private final KafkaController kafkaController = Mockito.mock(KafkaController.class);
     private final AutoTopicCreationManager autoTopicCreationManager = Mockito.mock(AutoTopicCreationManager.class);
     private final KafkaZkClient kafkaZkClient = Mockito.mock(KafkaZkClient.class);
@@ -190,6 +192,7 @@ public class MetadataRequestBenchmark {
             setReplicaManager(replicaManager).
             setGroupCoordinator(groupCoordinator).
             setTxnCoordinator(transactionCoordinator).
+            setTransientTopicCoordinator(transientTopicCoordinator).
             setAutoTopicCreationManager(autoTopicCreationManager).
             setBrokerId(brokerId).
             setConfig(config).
