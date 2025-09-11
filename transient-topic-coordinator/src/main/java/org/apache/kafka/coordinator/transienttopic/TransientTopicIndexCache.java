@@ -28,6 +28,11 @@ public class TransientTopicIndexCache {
 
     TransientTopicIndexCache() {}
 
+    public boolean contains(String topicName) {
+        // TODO: Implement here
+        return false;
+    }
+
     public TransientTopic getIndex(String topicName) {
         // TODO: Implement here
         return null;

@@ -22,6 +22,7 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.requests.RequestContext;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
@@ -116,8 +117,11 @@ public class TransientTopicCoordinator {
             String logPrefix = String.format("TransientTopicCoordinator id=%d", nodeId);
             LogContext logContext = new LogContext(String.format("[%s] ", logPrefix));
 
+            TransientTopicIndexCache indexCache = new TransientTopicIndexCache.Builder()
+                .build();
             CoordinatorShardBuilderSupplier<TransientTopicCoordinatorShard, CoordinatorRecord> supplier = () ->
-                new TransientTopicCoordinatorShard.Builder(config);
+                new TransientTopicCoordinatorShard.Builder(config)
+                    .withIndexCache(indexCache);
 
             CoordinatorEventProcessor processor = new MultiThreadedEventProcessor(
                 logContext,
@@ -141,7 +145,7 @@ public class TransientTopicCoordinator {
                     .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
                     .withCoordinatorMetrics(transientTopicCoordinatorMetrics)
                     .withSerializer(new CoordinatorRecordSerde())
-                    .withCompression(Compression.of("").build()) // TODO: make configurable
+                    .withCompression(Compression.of(CompressionType.NONE).build()) // TODO: make configurable
                     .withAppendLingerMs(1000) // TODO: make configurable
                     .build();
 
@@ -149,6 +153,7 @@ public class TransientTopicCoordinator {
                 logContext,
                 config,
                 runtime,
+                indexCache,
                 transientTopicCoordinatorMetrics
             );
         }
@@ -159,6 +164,8 @@ public class TransientTopicCoordinator {
     private final TransientTopicCoordinatorConfig config;
 
     private final CoordinatorRuntime<TransientTopicCoordinatorShard, CoordinatorRecord> runtime;
+
+    private final TransientTopicIndexCache indexCache;
 
     private final TransientTopicCoordinatorMetrics transientTopicCoordinatorMetrics;
 
@@ -177,12 +184,18 @@ public class TransientTopicCoordinator {
         LogContext logContext,
         TransientTopicCoordinatorConfig config,
         CoordinatorRuntime<TransientTopicCoordinatorShard, CoordinatorRecord> runtime,
+        TransientTopicIndexCache indexCache,
         TransientTopicCoordinatorMetrics transientTopicCoordinatorMetrics
     ) {
         this.log = logContext.logger(TransientTopicCoordinator.class);
         this.config = config;
         this.runtime = runtime;
+        this.indexCache = indexCache;
         this.transientTopicCoordinatorMetrics = transientTopicCoordinatorMetrics;
+    }
+
+    public TransientTopicIndexCache indexCache() {
+        return indexCache;
     }
 
     /**
@@ -206,9 +219,18 @@ public class TransientTopicCoordinator {
         return Utils.abs(topicId.hashCode()) % numPartitions;
     }
 
+    public TransientTopic getCachedIndex(
+        String topicName
+    ) {
+        return indexCache.getIndex(topicName);
+    }
+
+    public boolean existsInIndexCache(String topicName) {
+        return indexCache.contains(topicName);
+    }
+
     public CompletableFuture<TransientTopic> createNewTransientTopic(
         RequestContext context,
-        Uuid topicId,
         String topicName
     ) {
         // TODO: Implement here
@@ -221,10 +243,14 @@ public class TransientTopicCoordinator {
     }
 
     public void onElection(
-        int groupMetadataPartitionIndex,
-        int groupMetadataPartitionLeaderEpoch
+        int indexMetadataPartitionIndex,
+        int indexMetadataPartitionLeaderEpoch
     ) {
-        // TODO: Implement here
+        throwIfNotActive();
+        runtime.scheduleLoadOperation(
+            new TopicPartition(Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME, indexMetadataPartitionIndex),
+            indexMetadataPartitionLeaderEpoch
+        );
     }
 
     public void onResignation(

@@ -59,6 +59,7 @@ import org.apache.kafka.common.replica.ClientMetadata
 import org.apache.kafka.common.replica.ClientMetadata.DefaultClientMetadata
 import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
+import org.apache.kafka.common.requests.TransientTopicProduceResponse.TopicResponse
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.resource.Resource.CLUSTER_NAME
 import org.apache.kafka.common.resource.ResourceType._
@@ -66,7 +67,7 @@ import org.apache.kafka.common.resource.{Resource, ResourceType}
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.security.token.delegation.{DelegationToken, TokenInformation}
 import org.apache.kafka.common.utils.{ProducerIdAndEpoch, Time}
-import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
+import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, TransientTopic, Uuid}
 import org.apache.kafka.coordinator.group.{Group, GroupCoordinator}
 import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
 import org.apache.kafka.server.ClientMetricsManager
@@ -189,6 +190,7 @@ class KafkaApis(val requestChannel: RequestChannel,
 
       request.header.apiKey match {
         case ApiKeys.PRODUCE => handleProduceRequest(request, requestLocal)
+        case ApiKeys.TRANSIENT_TOPIC_PRODUCE => handleTransientTopicProduceRequest(request, requestLocal)
         case ApiKeys.FETCH => handleFetchRequest(request)
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
@@ -750,6 +752,170 @@ class KafkaApis(val requestChannel: RequestChannel,
       // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
       // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
       produceRequest.clearPartitionRecords()
+    }
+  }
+
+  /**
+   * Handle a transient topic produce request
+   */
+  def handleTransientTopicProduceRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
+    val ttpRequest = request.body[TransientTopicProduceRequest]
+
+    val unauthorizedTopicResponses = mutable.Map[String, TopicResponse]()
+    val invalidRequestResponses = mutable.Map[String, TopicResponse]()
+    val authorizedRequestInfo = mutable.Map[String, MemoryRecords]()
+    val topicCreationNeededRequestInfo = mutable.Map[String, MemoryRecords]()
+
+    // TODO: check auth check logic
+    // cache the result to avoid redundant authorization calls
+    val authorizedTopics = authHelper.filterByAuthorized(request.context, WRITE, TOPIC,
+      ttpRequest.data().topicData().asScala)(_.name())
+
+    ttpRequest.data.topicData.forEach(td => {
+      val topicName = td.name
+      val memoryRecords = td.records.asInstanceOf[MemoryRecords]
+      if (!authorizedTopics.contains(topicName))
+        unauthorizedTopicResponses += topicName -> new TopicResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
+      else
+        try {
+          TransientTopicProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
+          authorizedRequestInfo += (topicName -> memoryRecords)
+          if (!transientTopicCoordinator.existsInIndexCache(topicName))
+            topicCreationNeededRequestInfo += (topicName -> memoryRecords)
+        } catch {
+          case e: ApiException =>
+            invalidRequestResponses += topicName -> new TopicResponse(Errors.forException(e))
+        }
+    })
+
+    // the callback for sending a produce response
+    // The construction of ProduceResponse is able to accept auto-generated protocol data so
+    // KafkaApis#handleProduceRequest should apply auto-generated protocol to avoid extra conversion.
+    // https://issues.apache.org/jira/browse/KAFKA-10730
+    @nowarn("cat=deprecation")
+    def sendResponseCallback(responseStatus: Map[TopicPartition, PartitionResponse], ttReverseIndexMap: Map[TopicPartition, String]): Unit = {
+      val responseStatusForTransient = mutable.Map[String, TopicResponse]()
+      responseStatus.forKeyValue { (tp, pResponse) =>
+        val ttName = ttReverseIndexMap.get(tp)
+        val tResponse = TransientTopicProduceResponse.TopicResponse.from(pResponse)
+        if (ttName.nonEmpty) responseStatusForTransient += ttName.get -> tResponse
+      }
+      val mergedResponseStatus = responseStatusForTransient ++ unauthorizedTopicResponses ++ invalidRequestResponses
+      var errorInResponse = false
+
+      val nodeEndpoints = new mutable.HashMap[Int, Node]
+      mergedResponseStatus.forKeyValue { (topicName, status) =>
+        if (status.error != Errors.NONE) {
+          errorInResponse = true
+          debug("Transient Topic Produce request with correlation id %d from client %s on transient topic %s failed due to %s".format(
+            request.header.correlationId,
+            request.header.clientId,
+            topicName,
+            status.error.exceptionName))
+
+          /* // TODO-2: Add leader check logic for transient topic
+          if (request.header.apiVersion >= 10) {
+            status.error match {
+              case Errors.NOT_LEADER_OR_FOLLOWER =>
+                val leaderNode = getCurrentLeader(topicName, request.context.listenerName)
+                leaderNode.node.foreach { node =>
+                  nodeEndpoints.put(node.id(), node)
+                }
+                status.currentLeader
+                  .setLeaderId(leaderNode.leaderId)
+                  .setLeaderEpoch(leaderNode.leaderEpoch)
+              case _ =>
+            }
+          } */
+        }
+      }
+
+      // Record both bandwidth and request quota-specific values and throttle by muting the channel if any of the quotas
+      // have been violated. If both quotas have been violated, use the max throttle time between the two quotas. Note
+      // that the request quota is not enforced if acks == 0.
+      val timeMs = time.milliseconds()
+      val requestSize = request.sizeInBytes
+
+      // TODO-2: Think about whether making quotas for transient topic produce or not
+      val bandwidthThrottleTimeMs = quotas.produce.maybeRecordAndGetThrottleTimeMs(request, requestSize, timeMs)
+      val requestThrottleTimeMs =
+        if (ttpRequest.acks == 0) 0
+        else quotas.request.maybeRecordAndGetThrottleTimeMs(request, timeMs)
+      val maxThrottleTimeMs = Math.max(bandwidthThrottleTimeMs, requestThrottleTimeMs)
+      if (maxThrottleTimeMs > 0) {
+        request.apiThrottleTimeMs = maxThrottleTimeMs
+        if (bandwidthThrottleTimeMs > requestThrottleTimeMs) {
+          requestHelper.throttle(quotas.produce, request, bandwidthThrottleTimeMs)
+        } else {
+          requestHelper.throttle(quotas.request, request, requestThrottleTimeMs)
+        }
+      }
+
+      // Send the response immediately. In case of throttling, the channel has already been muted.
+      if (ttpRequest.acks == 0) {
+        // no operation needed if producer request.required.acks = 0; however, if there is any error in handling
+        // the request, since no response is expected by the producer, the server will close socket server so that
+        // the producer client will know that some error has happened and will refresh its metadata
+        if (errorInResponse) {
+          val exceptionsSummary = mergedResponseStatus.map { case (topicName, status) =>
+            topicName -> status.error.exceptionName
+          }.mkString(", ")
+          info(
+            s"Closing connection due to error during transient topic produce request with correlation id ${request.header.correlationId} " +
+              s"from client id ${request.header.clientId} with ack=0\n" +
+              s"Topic and partition to exceptions: $exceptionsSummary"
+          )
+          requestChannel.closeConnection(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava).errorCounts)
+        } else {
+          // Note that although request throttling is exempt for acks == 0, the channel may be throttled due to
+          // bandwidth quota violation.
+          requestHelper.sendNoOpResponseExemptThrottle(request)
+        }
+      } else {
+        requestChannel.sendResponse(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava, maxThrottleTimeMs, nodeEndpoints.values.toList.asJava), None)
+      }
+    }
+
+    def processingStatsCallback(processingStats: FetchResponseStats): Unit = {
+      processingStats.forKeyValue { (tp, info) =>
+        updateRecordConversionStats(request, tp, info)
+      }
+    }
+
+    if (authorizedRequestInfo.isEmpty) sendResponseCallback(Map.empty, Map.empty)
+    else {
+      val internalTopicsAllowed = request.header.clientId == AdminUtils.ADMIN_CLIENT_ID
+      val transactionSupportedOperation = if (request.header.apiVersion > 10) genericError else defaultError
+
+      val newTopicCreationTasks = new ArrayBuffer[CompletableFuture[TransientTopic]]()
+      topicCreationNeededRequestInfo.forKeyValue { (name, _) =>
+        newTopicCreationTasks += transientTopicCoordinator.createNewTransientTopic(request.context, name)
+      }
+      newTopicCreationTasks.foreach(task => task.get())
+
+      val assignedRecords = mutable.Map[TopicPartition, MemoryRecords]()
+      val ttReverseIndexMap = mutable.Map[TopicPartition, String]()
+      authorizedRequestInfo.forKeyValue { (name, record) =>
+        val assignedPartition = transientTopicCoordinator.getCachedIndex(name).partition().topicPartition()
+        assignedRecords += (assignedPartition -> record)
+        ttReverseIndexMap += (assignedPartition -> name)
+      }
+
+      // call the replica manager to append messages to the replicas
+      replicaManager.handleProduceAppend(
+        timeout = ttpRequest.timeout.toLong,
+        requiredAcks = ttpRequest.acks,
+        internalTopicsAllowed = internalTopicsAllowed,
+        transactionalId = null,
+        entriesPerPartition = assignedRecords,
+        responseCallback = responseStatus => sendResponseCallback(responseStatus, ttReverseIndexMap),
+        recordValidationStatsCallback = processingStatsCallback,
+        requestLocal = requestLocal,
+        transactionSupportedOperation = transactionSupportedOperation)
+
+      // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
+      // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
+      ttpRequest.clearTopicRecords()
     }
   }
 

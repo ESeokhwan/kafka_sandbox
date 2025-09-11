@@ -47,6 +47,7 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
         private CoordinatorTimer<Void, CoordinatorRecord> timer;
         private CoordinatorMetrics coordinatorMetrics;
         private TopicPartition topicPartition;
+        private TransientTopicIndexCache indexCache;
 
         public Builder(
             TransientTopicCoordinatorConfig config
@@ -90,6 +91,11 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
             return this;
         }
 
+        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withIndexCache(TransientTopicIndexCache indexCache) {
+            this.indexCache = indexCache;
+            return this;
+        }
+
         @Override
         public TransientTopicCoordinatorShard build() {
             if (logContext == null) logContext = new LogContext();
@@ -105,12 +111,12 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
                 throw new IllegalArgumentException("CoordinatorMetrics must be set and be of type TransientTopicCoordinatorMetrics.");
             if (topicPartition == null)
                 throw new IllegalArgumentException("TopicPartition must be set.");
+            if (indexCache == null)
+                throw new IllegalArgumentException("IndexCache must be set.");
 
             TransientTopicCoordinatorMetricsShard metricsShard = ((TransientTopicCoordinatorMetrics) coordinatorMetrics)
                 .newMetricsShard(snapshotRegistry, topicPartition);
 
-            TransientTopicIndexCache indexCache = new TransientTopicIndexCache.Builder()
-                .build();
             TransientTopicPartitionPool partitionPool = new TransientTopicPartitionPool.Builder()
                 .build();
 
