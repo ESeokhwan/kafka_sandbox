@@ -72,6 +72,10 @@ public class TransientTopicPartition {
         return offset;
     }
 
+    public TransientTopicPartition withOffset(int offset) {
+        return new TransientTopicPartition(topicPartition, offset);
+    }
+
     /**
      * @return Topic partition representing this instance.
      */

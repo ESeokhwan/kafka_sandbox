@@ -17,26 +17,51 @@
 package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TransientTopicPartition;
+import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
+
+import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class BasicTransientTopicPartitionPool implements TransientTopicPartitionPool {
 
     private final Logger log;
+
+    private int numPartitions;
+
+    private final Queue<TransientTopicPartition> freePartitions = new ConcurrentLinkedQueue<>();
+    private final Map<Integer, TransientTopicPartition> usingPartitions = new ConcurrentHashMap<>();
 
     public BasicTransientTopicPartitionPool(LogContext logContext) {
         this.log = logContext.logger(BasicTransientTopicPartitionPool.class);
     }
 
     public void startup(int numPartitions) {
+        log.info("BasicTransientTopicPartitionPool is used for transient topic partition pool(the number of partitions: {}).",
+            numPartitions);
+        this.numPartitions = numPartitions;
+        for (int i = 0; i < numPartitions; i++) {
+            // TODO-1: set offset based on real last offsets
+            // TODO-1: create partitions if there are less partitions than given num partitions.
+            freePartitions.add(new TransientTopicPartition(Topic.TRANSIENT_TOPIC_NAME, i, 0));
+        }
     }
 
     public TransientTopicPartition allocatePartition() {
-        // TODO: implement here
-        return null;
+        TransientTopicPartition freePartition = freePartitions.poll();
+        if (freePartition == null) throw new RuntimeException(); // TODO-2: handle exception
+        usingPartitions.put(freePartition.partition(), freePartition);
+        return freePartition;
     }
 
     public void releasePartition(int partition, int usedOffset) {
-        // TODO: implement here
+        TransientTopicPartition target = usingPartitions.remove(partition);
+        if (target == null) throw new RuntimeException(); // TODO-2: handle exception
+
+        int updatedOffset = target.offset() + usedOffset;
+        freePartitions.add(target.withOffset(updatedOffset));
     }
 }

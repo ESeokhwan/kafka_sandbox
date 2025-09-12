@@ -336,7 +336,7 @@ class BrokerMetadataPublisher(
     }
     try {
       // Start the transient topic coordinator.
-      transientTopicCoordinator.startup(() => 1) // TODO: make it configurable
+      transientTopicCoordinator.startup(() => config.transientTopicInitPartitions) // TODO: make it configurable
     } catch {
       case t: Throwable => fatalFaultHandler.handleFault("Error starting TransientTopicCoordinator", t)
     }

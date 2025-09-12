@@ -607,6 +607,15 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
   def producerIdExpirationMs = getInt(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_MS_CONFIG)
   val producerIdExpirationCheckIntervalMs = getInt(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_CONFIG)
 
+  /** ****** Transient Topic management Configuration *******/
+  val transientTopicInitPartitions = getInt(TransientTopicCoordinatorConfig.TRANSIENT_TOPIC_INIT_PARTITIONS_CONFIG)
+  val transientTopicReplicationFactor = getShort(TransientTopicCoordinatorConfig.TRANSIENT_TOPIC_REPLICATION_FACTOR_CONFIG)
+  val transientTopicSegmentBytes = getInt(TransientTopicCoordinatorConfig.TRANSIENT_TOPIC_SEGMENT_BYTES_CONFIG)
+  val transientTopicMinIsr = getInt(TransientTopicCoordinatorConfig.TRANSIENT_TOPIC_MIN_ISR_CONFIG)
+  val transientIndexTopicReplicationFactor = getShort(TransientTopicCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG)
+  val transientIndexTopicSegmentBytes = getInt(TransientTopicCoordinatorConfig.INDEX_TOPIC_SEGMENT_BYTES_CONFIG)
+  val transientIndexTopicMinIsr = getInt(TransientTopicCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG)
+
   /** ********* Metric Configuration **************/
   val metricNumSamples = getInt(MetricConfigs.METRIC_NUM_SAMPLES_CONFIG)
   val metricSampleWindowMs = getLong(MetricConfigs.METRIC_SAMPLE_WINDOW_MS_CONFIG)

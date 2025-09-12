@@ -20,9 +20,14 @@ import org.apache.kafka.common.TransientTopic;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public class TransientTopicIndexCache {
 
     private final Logger log;
+
+    private final Map<String, TransientTopic> indexMap = new HashMap<>();
 
     public TransientTopicIndexCache(LogContext logContext) {
         this.log = logContext.logger(TransientTopicIndexCache.class);
@@ -31,22 +36,27 @@ public class TransientTopicIndexCache {
     public void startup() {}
 
     public TransientTopic getIndex(String topicName) {
-        // TODO: Implement here
-        return null;
+        return indexMap.get(topicName);
     }
 
     public boolean contains(String topicName) {
-        // TODO: Implement here
-        return false;
+        return indexMap.containsKey(topicName);
     }
 
     public TransientTopic addIndexToCache(TransientTopic transientTopic) {
-        // TODO: Implement here
-        return null;
+        String topicName = transientTopic.name();
+        if (indexMap.containsKey(topicName)) {
+            return null;
+        }
+        return indexMap.put(topicName, transientTopic);
     }
 
     public TransientTopic evictIndexFromCache(String topicName) {
-        // TODO: Implement here
-        return null;
+        if (indexMap.containsKey(topicName)) {
+            // TODO: add Exception Logic
+            return null;
+        }
+
+        return indexMap.remove(topicName);
     }
 }
