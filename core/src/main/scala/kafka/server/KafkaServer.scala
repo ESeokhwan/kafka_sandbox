@@ -46,7 +46,7 @@ import org.apache.kafka.common.security.{JaasContext, JaasUtils}
 import org.apache.kafka.common.utils.{AppInfoParser, LogContext, Time, Utils}
 import org.apache.kafka.common.{Endpoint, Node, TopicPartition}
 import org.apache.kafka.coordinator.group.{CoordinatorRecord, CoordinatorRecordSerde, GroupCoordinator}
-import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
+import org.apache.kafka.coordinator.transienttopic.{BasicTransientTopicPartitionPool, TransientTopicCoordinator, TransientTopicIndexCache, TransientTopicPartitionPool}
 import org.apache.kafka.coordinator.transienttopic.metrics.{TransientTopicCoordinatorMetrics, TransientTopicCoordinatorRuntimeMetrics}
 import org.apache.kafka.image.loader.metrics.MetadataLoaderMetrics
 import org.apache.kafka.metadata.properties.MetaPropertiesEnsemble.VerificationFlag
@@ -534,7 +534,10 @@ class KafkaServer(
         transactionCoordinator.startup(
           () => zkClient.getTopicPartitionCount(Topic.TRANSACTION_STATE_TOPIC_NAME).getOrElse(config.transactionTopicPartitions))
 
-        transientTopicCoordinator = createTransientTopicCoordinator() // TODO: Need more initializing logic
+        val transientTopicIndexCache = new TransientTopicIndexCache(logContext)
+        val transientTopicPartitionPool = new BasicTransientTopicPartitionPool(logContext)
+        transientTopicCoordinator = createTransientTopicCoordinator(transientTopicIndexCache, transientTopicPartitionPool)
+        // TODO: Need more initializing logic (ex. startup)
 
         /* start auto topic creation manager */
         this.autoTopicCreationManager = AutoTopicCreationManager(
@@ -694,7 +697,10 @@ class KafkaServer(
       () => getCurrentControllerIdFromOldController())
   }
 
-  private def createTransientTopicCoordinator(): TransientTopicCoordinator = {
+  private def createTransientTopicCoordinator(
+    indexCache: TransientTopicIndexCache,
+    partitionPool: TransientTopicPartitionPool
+  ): TransientTopicCoordinator = {
     val time = Time.SYSTEM
     val serde = new CoordinatorRecordSerde
     val timer = new SystemTimerReaper(
@@ -705,7 +711,7 @@ class KafkaServer(
       time,
       replicaManager,
       serde,
-      config.groupCoordinatorConfig.offsetsLoadBufferSize
+      config.groupCoordinatorConfig.offsetsLoadBufferSize // TODO-1: change it to transient topic config
     )
     val writer = new CoordinatorPartitionWriter(
       replicaManager
@@ -716,6 +722,8 @@ class KafkaServer(
       .withTimer(timer)
       .withLoader(loader)
       .withWriter(writer)
+      .withIndexCache(indexCache)
+      .withPartitionPool(partitionPool)
       .withCoordinatorRuntimeMetrics(new TransientTopicCoordinatorRuntimeMetrics(metrics))
       .withTransientTopicCoordinatorMetrics(new TransientTopicCoordinatorMetrics(KafkaYammerMetrics.defaultRegistry, metrics))
       .build()

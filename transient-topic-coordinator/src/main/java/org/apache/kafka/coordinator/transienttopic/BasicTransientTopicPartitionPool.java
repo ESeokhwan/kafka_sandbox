@@ -17,12 +17,26 @@
 package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TransientTopicPartition;
+import org.apache.kafka.common.utils.LogContext;
+import org.slf4j.Logger;
 
-public interface TransientTopicPartitionPool {
+public class BasicTransientTopicPartitionPool implements TransientTopicPartitionPool {
 
-    void startup(int numPartitions);
+    private final Logger log;
 
-    TransientTopicPartition allocatePartition();
+    public BasicTransientTopicPartitionPool(LogContext logContext) {
+        this.log = logContext.logger(BasicTransientTopicPartitionPool.class);
+    }
 
-    void releasePartition(int partition, int usedOffset);
+    public void startup(int numPartitions) {
+    }
+
+    public TransientTopicPartition allocatePartition() {
+        // TODO: implement here
+        return null;
+    }
+
+    public void releasePartition(int partition, int usedOffset) {
+        // TODO: implement here
+    }
 }

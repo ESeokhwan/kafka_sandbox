@@ -48,6 +48,7 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
         private CoordinatorMetrics coordinatorMetrics;
         private TopicPartition topicPartition;
         private TransientTopicIndexCache indexCache;
+        private TransientTopicPartitionPool partitionPool;
 
         public Builder(
             TransientTopicCoordinatorConfig config
@@ -56,46 +57,52 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
         }
 
         @Override
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withSnapshotRegistry(SnapshotRegistry snapshotRegistry) {
+        public Builder withSnapshotRegistry(SnapshotRegistry snapshotRegistry) {
             this.snapshotRegistry = snapshotRegistry;
             return this;
         }
 
         @Override
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withLogContext(LogContext logContext) {
+        public Builder withLogContext(LogContext logContext) {
             this.logContext = logContext;
             return this;
         }
 
         @Override
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withTime(Time time) {
+        public Builder withTime(Time time) {
             this.time = time;
             return this;
         }
 
         @Override
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withTimer(CoordinatorTimer<Void, CoordinatorRecord> timer) {
+        public Builder withTimer(CoordinatorTimer<Void, CoordinatorRecord> timer) {
             this.timer = timer;
             return this;
         }
 
         @Override
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withCoordinatorMetrics(CoordinatorMetrics coordinatorMetrics) {
+        public Builder withCoordinatorMetrics(CoordinatorMetrics coordinatorMetrics) {
             this.coordinatorMetrics = coordinatorMetrics;
             return this;
         }
 
         @Override
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withTopicPartition(TopicPartition topicPartition) {
+        public Builder withTopicPartition(TopicPartition topicPartition) {
             this.topicPartition = topicPartition;
             return this;
         }
 
-        public CoordinatorShardBuilder<TransientTopicCoordinatorShard, CoordinatorRecord> withIndexCache(TransientTopicIndexCache indexCache) {
+        public Builder withIndexCache(TransientTopicIndexCache indexCache) {
             this.indexCache = indexCache;
             return this;
         }
 
+        public Builder withPartitionPool(TransientTopicPartitionPool partitionPool) {
+            this.partitionPool = partitionPool;
+            return this;
+        }
+
+        @SuppressWarnings("NPathComplexity")
         @Override
         public TransientTopicCoordinatorShard build() {
             if (logContext == null) logContext = new LogContext();
@@ -113,12 +120,11 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
                 throw new IllegalArgumentException("TopicPartition must be set.");
             if (indexCache == null)
                 throw new IllegalArgumentException("IndexCache must be set.");
+            if (partitionPool == null)
+                throw new IllegalArgumentException("PartitionPool must be set");
 
             TransientTopicCoordinatorMetricsShard metricsShard = ((TransientTopicCoordinatorMetrics) coordinatorMetrics)
                 .newMetricsShard(snapshotRegistry, topicPartition);
-
-            TransientTopicPartitionPool partitionPool = new TransientTopicPartitionPool.Builder()
-                .build();
 
             return new TransientTopicCoordinatorShard(
                 logContext,

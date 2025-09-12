@@ -17,25 +17,27 @@
 package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TransientTopic;
+import org.apache.kafka.common.utils.LogContext;
+import org.slf4j.Logger;
 
 public class TransientTopicIndexCache {
 
-    public static class Builder {
-        public TransientTopicIndexCache build() {
-            return new TransientTopicIndexCache();
-        }
+    private final Logger log;
+
+    public TransientTopicIndexCache(LogContext logContext) {
+        this.log = logContext.logger(TransientTopicIndexCache.class);
     }
 
-    TransientTopicIndexCache() {}
-
-    public boolean contains(String topicName) {
-        // TODO: Implement here
-        return false;
-    }
+    public void startup() {}
 
     public TransientTopic getIndex(String topicName) {
         // TODO: Implement here
         return null;
+    }
+
+    public boolean contains(String topicName) {
+        // TODO: Implement here
+        return false;
     }
 
     public TransientTopic addIndexToCache(TransientTopic transientTopic) {

@@ -57,6 +57,8 @@ public class TransientTopicCoordinator {
         private CoordinatorLoader<CoordinatorRecord> loader;
         private Time time;
         private Timer timer;
+        private TransientTopicIndexCache indexCache;
+        private TransientTopicPartitionPool partitionPool;
         private CoordinatorRuntimeMetrics coordinatorRuntimeMetrics;
         private TransientTopicCoordinatorMetrics transientTopicCoordinatorMetrics;
 
@@ -88,6 +90,16 @@ public class TransientTopicCoordinator {
             return this;
         }
 
+        public Builder withIndexCache(TransientTopicIndexCache indexCache) {
+            this.indexCache = indexCache;
+            return this;
+        }
+
+        public Builder withPartitionPool(TransientTopicPartitionPool partitionPool) {
+            this.partitionPool = partitionPool;
+            return this;
+        }
+
         public Builder withCoordinatorRuntimeMetrics(CoordinatorRuntimeMetrics coordinatorRuntimeMetrics) {
             this.coordinatorRuntimeMetrics = coordinatorRuntimeMetrics;
             return this;
@@ -98,6 +110,7 @@ public class TransientTopicCoordinator {
             return this;
         }
 
+        @SuppressWarnings("NPathComplexity")
         public TransientTopicCoordinator build() {
             if (config == null)
                 throw new IllegalArgumentException("Config must be set.");
@@ -109,6 +122,10 @@ public class TransientTopicCoordinator {
                 throw new IllegalArgumentException("Time must be set.");
             if (timer == null)
                 throw new IllegalArgumentException("Timer must be set.");
+            if (indexCache == null)
+                throw new IllegalArgumentException("IndexCache must be set.");
+            if (partitionPool == null)
+                throw new IllegalArgumentException("PartitionPool must be set.");
             if (coordinatorRuntimeMetrics == null)
                 throw new IllegalArgumentException("CoordinatorRuntimeMetrics must be set.");
             if (transientTopicCoordinatorMetrics == null)
@@ -117,11 +134,10 @@ public class TransientTopicCoordinator {
             String logPrefix = String.format("TransientTopicCoordinator id=%d", nodeId);
             LogContext logContext = new LogContext(String.format("[%s] ", logPrefix));
 
-            TransientTopicIndexCache indexCache = new TransientTopicIndexCache.Builder()
-                .build();
             CoordinatorShardBuilderSupplier<TransientTopicCoordinatorShard, CoordinatorRecord> supplier = () ->
                 new TransientTopicCoordinatorShard.Builder(config)
-                    .withIndexCache(indexCache);
+                    .withIndexCache(indexCache)
+                    .withPartitionPool(partitionPool);
 
             CoordinatorEventProcessor processor = new MultiThreadedEventProcessor(
                 logContext,
@@ -154,6 +170,7 @@ public class TransientTopicCoordinator {
                 config,
                 runtime,
                 indexCache,
+                partitionPool,
                 transientTopicCoordinatorMetrics
             );
         }
@@ -166,6 +183,8 @@ public class TransientTopicCoordinator {
     private final CoordinatorRuntime<TransientTopicCoordinatorShard, CoordinatorRecord> runtime;
 
     private final TransientTopicIndexCache indexCache;
+
+    private final TransientTopicPartitionPool partitionPool;
 
     private final TransientTopicCoordinatorMetrics transientTopicCoordinatorMetrics;
 
@@ -185,12 +204,14 @@ public class TransientTopicCoordinator {
         TransientTopicCoordinatorConfig config,
         CoordinatorRuntime<TransientTopicCoordinatorShard, CoordinatorRecord> runtime,
         TransientTopicIndexCache indexCache,
+        TransientTopicPartitionPool partitionPool,
         TransientTopicCoordinatorMetrics transientTopicCoordinatorMetrics
     ) {
         this.log = logContext.logger(TransientTopicCoordinator.class);
         this.config = config;
         this.runtime = runtime;
         this.indexCache = indexCache;
+        this.partitionPool = partitionPool;
         this.transientTopicCoordinatorMetrics = transientTopicCoordinatorMetrics;
     }
 
@@ -276,6 +297,8 @@ public class TransientTopicCoordinator {
 
         log.info("Starting up.");
         numPartitions = transientTopicIndexTopicPartitionCount.getAsInt();
+        indexCache.startup();
+        partitionPool.startup(numPartitions);
         isActive.set(true);
         log.info("Startup complete.");
     }

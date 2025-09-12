@@ -36,7 +36,7 @@ import org.apache.kafka.common.utils.{LogContext, Time}
 import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.group.{CoordinatorRecord, CoordinatorRecordSerde, GroupCoordinator, GroupCoordinatorService}
-import org.apache.kafka.coordinator.transienttopic.TransientTopicCoordinator
+import org.apache.kafka.coordinator.transienttopic.{BasicTransientTopicPartitionPool, TransientTopicCoordinator, TransientTopicIndexCache, TransientTopicPartitionPool}
 import org.apache.kafka.coordinator.transienttopic.metrics.{TransientTopicCoordinatorMetrics, TransientTopicCoordinatorRuntimeMetrics}
 import org.apache.kafka.image.publisher.{BrokerRegistrationTracker, MetadataPublisher}
 import org.apache.kafka.metadata.{BrokerState, ListenerInfo}
@@ -351,7 +351,9 @@ class BrokerServer(
         new KafkaScheduler(1, true, "transaction-log-manager-"),
         producerIdManagerSupplier, metrics, metadataCache, Time.SYSTEM)
 
-      transientTopicCoordinator = createTransientTopicCoordinator()
+      val transientTopicIndexCache = new TransientTopicIndexCache(logContext)
+      val transientTopicPartitionPool = new BasicTransientTopicPartitionPool(logContext)
+      transientTopicCoordinator = createTransientTopicCoordinator(transientTopicIndexCache, transientTopicPartitionPool)
 
       autoTopicCreationManager = new DefaultAutoTopicCreationManager(
         config, Some(clientToControllerChannelManager), None, None,
@@ -565,7 +567,10 @@ class BrokerServer(
     }
   }
 
-  private def createTransientTopicCoordinator(): TransientTopicCoordinator = {
+  private def createTransientTopicCoordinator(
+    indexCache: TransientTopicIndexCache,
+    partitionPool: TransientTopicPartitionPool
+  ): TransientTopicCoordinator = {
     val time = Time.SYSTEM
     val serde = new CoordinatorRecordSerde
     val timer = new SystemTimerReaper(
@@ -576,7 +581,7 @@ class BrokerServer(
       time,
       replicaManager,
       serde,
-      config.groupCoordinatorConfig.offsetsLoadBufferSize
+      config.groupCoordinatorConfig.offsetsLoadBufferSize // TODO-1: change it to transient topic config
     )
     val writer = new CoordinatorPartitionWriter(
       replicaManager
@@ -587,6 +592,8 @@ class BrokerServer(
       .withTimer(timer)
       .withLoader(loader)
       .withWriter(writer)
+      .withIndexCache(indexCache)
+      .withPartitionPool(partitionPool)
       .withCoordinatorRuntimeMetrics(new TransientTopicCoordinatorRuntimeMetrics(metrics))
       .withTransientTopicCoordinatorMetrics(new TransientTopicCoordinatorMetrics(KafkaYammerMetrics.defaultRegistry, metrics))
       .build()
