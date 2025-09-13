@@ -189,8 +189,8 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
 
       request.header.apiKey match {
-        case ApiKeys.PRODUCE => handleProduceRequest(request, requestLocal)
-        case ApiKeys.TRANSIENT_TOPIC_PRODUCE => handleTransientTopicProduceRequest(request, requestLocal)
+        case ApiKeys.PRODUCE => handleTransientTopicProduceRequest(request, requestLocal, useProduceRequest = true)
+        case ApiKeys.TRANSIENT_TOPIC_PRODUCE => handleTransientTopicProduceRequest(request, requestLocal, useProduceRequest = false)
         case ApiKeys.FETCH => handleFetchRequest(request)
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
@@ -758,35 +758,73 @@ class KafkaApis(val requestChannel: RequestChannel,
   /**
    * Handle a transient topic produce request
    */
-  def handleTransientTopicProduceRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
-    val ttpRequest = request.body[TransientTopicProduceRequest]
+  def handleTransientTopicProduceRequest(request: RequestChannel.Request, requestLocal: RequestLocal, useProduceRequest: Boolean): Unit = {
+    var acks: Short = 0
+    var timeout = 0
+    var clearTopicRecords = () => {}
 
     val unauthorizedTopicResponses = mutable.Map[String, TopicResponse]()
     val invalidRequestResponses = mutable.Map[String, TopicResponse]()
     val authorizedRequestInfo = mutable.Map[String, MemoryRecords]()
     val topicCreationNeededRequestInfo = mutable.Map[String, MemoryRecords]()
 
-    // TODO: check auth check logic
-    // cache the result to avoid redundant authorization calls
-    val authorizedTopics = authHelper.filterByAuthorized(request.context, WRITE, TOPIC,
-      ttpRequest.data().topicData().asScala)(_.name())
+    if (!useProduceRequest) {
+      val ttpRequest = request.body[TransientTopicProduceRequest]
+      acks = ttpRequest.acks()
+      timeout = ttpRequest.timeout()
+      clearTopicRecords = () => ttpRequest.clearTopicRecords()
 
-    ttpRequest.data.topicData.forEach(td => {
-      val topicName = td.name
-      val memoryRecords = td.records.asInstanceOf[MemoryRecords]
-      if (!authorizedTopics.contains(topicName))
-        unauthorizedTopicResponses += topicName -> new TopicResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
-      else
-        try {
-          TransientTopicProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
-          authorizedRequestInfo += (topicName -> memoryRecords)
-          if (!transientTopicCoordinator.existsInIndexCache(topicName))
-            topicCreationNeededRequestInfo += (topicName -> memoryRecords)
-        } catch {
-          case e: ApiException =>
-            invalidRequestResponses += topicName -> new TopicResponse(Errors.forException(e))
+      // TODO: check auth check logic
+      // cache the result to avoid redundant authorization calls
+      val authorizedTopics = authHelper.filterByAuthorized(request.context, WRITE, TOPIC,
+        ttpRequest.data().topicData().asScala)(_.name())
+
+      ttpRequest.data.topicData.forEach(td => {
+        val topicName = td.name
+        val memoryRecords = td.records.asInstanceOf[MemoryRecords]
+        if (!authorizedTopics.contains(topicName))
+          unauthorizedTopicResponses += topicName -> new TopicResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
+        else
+          try {
+            TransientTopicProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
+            authorizedRequestInfo += (topicName -> memoryRecords)
+            if (!transientTopicCoordinator.existsInIndexCache(topicName))
+              topicCreationNeededRequestInfo += (topicName -> memoryRecords)
+          } catch {
+            case e: ApiException =>
+              invalidRequestResponses += topicName -> new TopicResponse(Errors.forException(e))
+          }
+      })
+    } else {
+      // This code is for using ProduceRequest as TransientTopicProduceRequest. It is just for test
+      val ttpRequest = request.body[ProduceRequest]
+      acks = ttpRequest.acks()
+      timeout = ttpRequest.timeout()
+      clearTopicRecords = () => ttpRequest.clearPartitionRecords()
+
+      val authorizedTopics = authHelper.filterByAuthorized(request.context, WRITE, TOPIC,
+        ttpRequest.data().topicData().asScala)(_.name())
+
+      ttpRequest.data.topicData().forEach(td => {
+        val topicName = td.name
+        if (!authorizedTopics.contains(topicName)) {
+          unauthorizedTopicResponses += topicName -> new TopicResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
+        } else {
+          td.partitionData().forEach(tpd => {
+            val memoryRecords = tpd.records.asInstanceOf[MemoryRecords]
+            try {
+              TransientTopicProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
+              authorizedRequestInfo += (topicName -> memoryRecords)
+              if (!transientTopicCoordinator.existsInIndexCache(topicName))
+                topicCreationNeededRequestInfo += (topicName -> memoryRecords)
+            } catch {
+              case e: ApiException =>
+                invalidRequestResponses += topicName -> new TopicResponse(Errors.forException(e))
+            }
+          })
         }
-    })
+      })
+    }
 
     // the callback for sending a produce response
     // The construction of ProduceResponse is able to accept auto-generated protocol data so
@@ -839,7 +877,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       // TODO-2: Think about whether making quotas for transient topic produce or not
       val bandwidthThrottleTimeMs = quotas.produce.maybeRecordAndGetThrottleTimeMs(request, requestSize, timeMs)
       val requestThrottleTimeMs =
-        if (ttpRequest.acks == 0) 0
+        if (acks == 0) 0
         else quotas.request.maybeRecordAndGetThrottleTimeMs(request, timeMs)
       val maxThrottleTimeMs = Math.max(bandwidthThrottleTimeMs, requestThrottleTimeMs)
       if (maxThrottleTimeMs > 0) {
@@ -852,7 +890,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
 
       // Send the response immediately. In case of throttling, the channel has already been muted.
-      if (ttpRequest.acks == 0) {
+      if (acks == 0) {
         // no operation needed if producer request.required.acks = 0; however, if there is any error in handling
         // the request, since no response is expected by the producer, the server will close socket server so that
         // the producer client will know that some error has happened and will refresh its metadata
@@ -903,8 +941,8 @@ class KafkaApis(val requestChannel: RequestChannel,
 
       // call the replica manager to append messages to the replicas
       replicaManager.handleProduceAppend(
-        timeout = ttpRequest.timeout.toLong,
-        requiredAcks = ttpRequest.acks,
+        timeout = timeout.toLong,
+        requiredAcks = acks,
         internalTopicsAllowed = internalTopicsAllowed,
         transactionalId = null,
         entriesPerPartition = assignedRecords,
@@ -915,7 +953,7 @@ class KafkaApis(val requestChannel: RequestChannel,
 
       // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
       // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
-      ttpRequest.clearTopicRecords()
+      clearTopicRecords()
     }
   }
 
