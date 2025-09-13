@@ -89,7 +89,7 @@ public class TransientTopicProduceRequest extends AbstractRequest {
     private volatile Map<String, Integer> topicSizes;
 
     public TransientTopicProduceRequest(TransientTopicProduceRequestData transientTopicProduceRequestData, short version) {
-        super(ApiKeys.PRODUCE, version);
+        super(ApiKeys.TRANSIENT_TOPIC_PRODUCE, version);
         this.data = transientTopicProduceRequestData;
         this.acks = data.acks();
         this.timeout = data.timeoutMs();
