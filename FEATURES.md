@@ -58,12 +58,12 @@
 
 1. 데이터 모델 및 관리
    - [x] `Transient Topic`의 파티션 할당 정보를 위한 DTO Class(이하 `TransientTopicIndexDTO`) 제작
-   - [ ] `TransientTopicIndexDTO`를 토픽 레코드로 저장하기 위한 parser 제작
+   - [x] `TransientTopicIndexDTO`를 토픽 레코드로 저장하기 위한 parser 제작
    - [ ] 인메모리 `Topic Assign Map` 캐시 제작
-     - [ ] `getIndexByName(groupName)`
-     - [ ] `createIndex(groupName, partition)`
+     - [x] `getIndexByName(groupName)`
+     - [x] `createIndex(groupName, partition)`
      - [ ] `flushIndex()`
-     - [ ] `evictIndex(groupName)` or `evictIndex(groupId)`
+     - [x] `evictIndex(groupName)` or `evictIndex(groupId)`
    - [ ] 디스크 용 `Topic Assign Map` 제작
      - `KafkaMetadatLog.scala` 참고해서 구현
    - [x] `Topic Partition Pool`을 위한 파티션 DTO Class(이하 `TopicPartitionDTO`) 제작

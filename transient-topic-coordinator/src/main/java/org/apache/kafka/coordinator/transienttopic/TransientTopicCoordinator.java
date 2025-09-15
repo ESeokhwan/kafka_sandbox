@@ -20,9 +20,9 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TransientTopic;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.requests.RequestContext;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
@@ -44,6 +44,7 @@ import org.slf4j.Logger;
 
 import java.time.Duration;
 import java.util.OptionalInt;
+import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntSupplier;
@@ -161,7 +162,7 @@ public class TransientTopicCoordinator {
                     .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
                     .withCoordinatorMetrics(transientTopicCoordinatorMetrics)
                     .withSerializer(new CoordinatorRecordSerde())
-                    .withCompression(Compression.of(CompressionType.NONE).build()) // TODO: make configurable
+                    .withCompression(Compression.of(config.indexTopicCompressionType()).build())
                     .withAppendLingerMs(1000) // TODO: make configurable
                     .build();
 
@@ -213,6 +214,11 @@ public class TransientTopicCoordinator {
         this.indexCache = indexCache;
         this.partitionPool = partitionPool;
         this.transientTopicCoordinatorMetrics = transientTopicCoordinatorMetrics;
+
+        runtime.scheduleLoadOperation(
+            new TopicPartition(Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME, 0),
+            0
+        );
     }
 
     public TransientTopicIndexCache indexCache() {
@@ -254,8 +260,15 @@ public class TransientTopicCoordinator {
         RequestContext context,
         String topicName
     ) {
-        // TODO: Implement here
-        return null;
+        log.info("TRANSIENT_TOPIC_CREATION");
+
+        Uuid topicId = Uuid.randomUuid();
+        return runtime.scheduleWriteOperation(
+            "transient-topic-creation",
+            new TopicPartition(Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME, 0),
+            Duration.ofMillis(config.commitTimeoutMs()),
+            coordinator -> coordinator.createNewTransientTopic(context, topicId, topicName)
+        );
     }
 
     public CompletableFuture<Void> freeTransientTopic() {
@@ -287,6 +300,20 @@ public class TransientTopicCoordinator {
     ) {
         throwIfNotActive();
         runtime.onNewMetadataImage(newImage, delta);
+    }
+
+    public Properties transientTopicConfigs() {
+        Properties properties = new Properties();
+        properties.put(TopicConfig.SEGMENT_BYTES_CONFIG, String.valueOf(config.transientTopicSegmentBytes()));
+        properties.put(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, String.valueOf(config.transientTopicMinIsr()));
+        return properties;
+    }
+
+    public Properties indexTopicConfigs() {
+        Properties properties = new Properties();
+        properties.put(TopicConfig.SEGMENT_BYTES_CONFIG, String.valueOf(config.indexTopicSegmentBytes()));
+        properties.put(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, String.valueOf(config.indexTopicMinIsr()));
+        return properties;
     }
 
     public void startup(IntSupplier transientTopicIndexTopicPartitionCount) {

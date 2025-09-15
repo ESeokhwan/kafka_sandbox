@@ -18,6 +18,7 @@ package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TransientTopic;
+import org.apache.kafka.common.TransientTopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.requests.RequestContext;
 import org.apache.kafka.common.requests.TransactionResult;
@@ -30,11 +31,17 @@ import org.apache.kafka.coordinator.group.runtime.CoordinatorResult;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorShard;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorShardBuilder;
 import org.apache.kafka.coordinator.group.runtime.CoordinatorTimer;
+import org.apache.kafka.coordinator.transienttopic.generated.TransientTopicIndexLogKey;
+import org.apache.kafka.coordinator.transienttopic.generated.TransientTopicIndexLogValue;
 import org.apache.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetrics;
 import org.apache.kafka.coordinator.transienttopic.metrics.TransientTopicCoordinatorMetricsShard;
 import org.apache.kafka.image.MetadataImage;
+import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.slf4j.Logger;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public class TransientTopicCoordinatorShard implements CoordinatorShard<CoordinatorRecord> {
 
@@ -182,8 +189,31 @@ public class TransientTopicCoordinatorShard implements CoordinatorShard<Coordina
         Uuid topicId,
         String topicName
     ) {
-        // TODO: Implement here
-        return null;
+        TransientTopicPartition assignedPartition = partitionPool.allocatePartition();
+        TransientTopic newTopic = new TransientTopic(topicId, topicName, assignedPartition);
+        indexCache.addIndexToCache(newTopic);
+
+        List<CoordinatorRecord> records = new ArrayList<>();
+        records.add(toCoordinatorRecord(newTopic));
+        return new CoordinatorResult<>(records, newTopic);
+    }
+
+    private CoordinatorRecord toCoordinatorRecord(TransientTopic newTopic) {
+        TransientTopicIndexLogKey key = new TransientTopicIndexLogKey();
+        key.setTransientTopicId(newTopic.id());
+
+        TransientTopicIndexLogValue value = new TransientTopicIndexLogValue();
+        value.setTopicName(newTopic.name());
+        value.setCreatedAt(newTopic.createdAt());
+
+        TransientTopicIndexLogValue.Partition valuePartition = new TransientTopicIndexLogValue.Partition();
+        valuePartition.setPartitionIndex(newTopic.partition().partition());
+        valuePartition.setStartOffset(newTopic.partition().offset());
+
+        return new CoordinatorRecord(
+            new ApiMessageAndVersion(key, (short) 0),
+            new ApiMessageAndVersion(value, (short) 0)
+        );
     }
 
     @Override

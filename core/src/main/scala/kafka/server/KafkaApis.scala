@@ -768,6 +768,9 @@ class KafkaApis(val requestChannel: RequestChannel,
     val authorizedRequestInfo = mutable.Map[String, MemoryRecords]()
     val topicCreationNeededRequestInfo = mutable.Map[String, MemoryRecords]()
 
+    val unauthorizedTopicResponsesStopGap = mutable.Map[TopicPartition, PartitionResponse]()
+    val invalidRequestResponsesStopGap = mutable.Map[TopicPartition, PartitionResponse]()
+
     if (!useProduceRequest) {
       val ttpRequest = request.body[TransientTopicProduceRequest]
       acks = ttpRequest.acks()
@@ -782,9 +785,9 @@ class KafkaApis(val requestChannel: RequestChannel,
       ttpRequest.data.topicData.forEach(td => {
         val topicName = td.name
         val memoryRecords = td.records.asInstanceOf[MemoryRecords]
-        if (!authorizedTopics.contains(topicName))
+        if (!authorizedTopics.contains(topicName)) {
           unauthorizedTopicResponses += topicName -> new TopicResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
-        else
+        } else
           try {
             TransientTopicProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
             authorizedRequestInfo += (topicName -> memoryRecords)
@@ -808,7 +811,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       ttpRequest.data.topicData().forEach(td => {
         val topicName = td.name
         if (!authorizedTopics.contains(topicName)) {
-          unauthorizedTopicResponses += topicName -> new TopicResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
+          unauthorizedTopicResponsesStopGap += new TopicPartition(topicName, 0) -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
         } else {
           td.partitionData().forEach(tpd => {
             val memoryRecords = tpd.records.asInstanceOf[MemoryRecords]
@@ -819,19 +822,107 @@ class KafkaApis(val requestChannel: RequestChannel,
                 topicCreationNeededRequestInfo += (topicName -> memoryRecords)
             } catch {
               case e: ApiException =>
-                invalidRequestResponses += topicName -> new TopicResponse(Errors.forException(e))
+                invalidRequestResponsesStopGap += new TopicPartition(topicName, 0) -> new PartitionResponse(Errors.forException(e))
             }
           })
         }
       })
     }
 
+//    // the callback for sending a produce response
+//    // The construction of ProduceResponse is able to accept auto-generated protocol data so
+//    // KafkaApis#handleProduceRequest should apply auto-generated protocol to avoid extra conversion.
+//    // https://issues.apache.org/jira/browse/KAFKA-10730
+//    @nowarn("cat=deprecation")
+//    def sendResponseCallback(responseStatus: Map[TopicPartition, PartitionResponse], ttReverseIndexMap: Map[TopicPartition, String]): Unit = {
+//      val responseStatusForTransient = mutable.Map[String, TopicResponse]()
+//      responseStatus.forKeyValue { (tp, pResponse) =>
+//        val ttName = ttReverseIndexMap.get(tp)
+//        val tResponse = TransientTopicProduceResponse.TopicResponse.from(pResponse)
+//        if (ttName.nonEmpty) responseStatusForTransient += ttName.get -> tResponse
+//      }
+//      val mergedResponseStatus = responseStatusForTransient ++ unauthorizedTopicResponses ++ invalidRequestResponses
+//      var errorInResponse = false
+//
+//      val nodeEndpoints = new mutable.HashMap[Int, Node]
+//      mergedResponseStatus.forKeyValue { (topicName, status) =>
+//        if (status.error != Errors.NONE) {
+//          errorInResponse = true
+//          debug("Transient Topic Produce request with correlation id %d from client %s on transient topic %s failed due to %s".format(
+//            request.header.correlationId,
+//            request.header.clientId,
+//            topicName,
+//            status.error.exceptionName))
+//
+//          /* // TODO-2: Add leader check logic for transient topic
+//          if (request.header.apiVersion >= 10) {
+//            status.error match {
+//              case Errors.NOT_LEADER_OR_FOLLOWER =>
+//                val leaderNode = getCurrentLeader(topicName, request.context.listenerName)
+//                leaderNode.node.foreach { node =>
+//                  nodeEndpoints.put(node.id(), node)
+//                }
+//                status.currentLeader
+//                  .setLeaderId(leaderNode.leaderId)
+//                  .setLeaderEpoch(leaderNode.leaderEpoch)
+//              case _ =>
+//            }
+//          } */
+//        }
+//      }
+//
+//      // Record both bandwidth and request quota-specific values and throttle by muting the channel if any of the quotas
+//      // have been violated. If both quotas have been violated, use the max throttle time between the two quotas. Note
+//      // that the request quota is not enforced if acks == 0.
+//      val timeMs = time.milliseconds()
+//      val requestSize = request.sizeInBytes
+//
+//      // TODO-2: Think about whether making quotas for transient topic produce or not
+//      val bandwidthThrottleTimeMs = quotas.produce.maybeRecordAndGetThrottleTimeMs(request, requestSize, timeMs)
+//      val requestThrottleTimeMs =
+//        if (acks == 0) 0
+//        else quotas.request.maybeRecordAndGetThrottleTimeMs(request, timeMs)
+//      val maxThrottleTimeMs = Math.max(bandwidthThrottleTimeMs, requestThrottleTimeMs)
+//      if (maxThrottleTimeMs > 0) {
+//        request.apiThrottleTimeMs = maxThrottleTimeMs
+//        if (bandwidthThrottleTimeMs > requestThrottleTimeMs) {
+//          requestHelper.throttle(quotas.produce, request, bandwidthThrottleTimeMs)
+//        } else {
+//          requestHelper.throttle(quotas.request, request, requestThrottleTimeMs)
+//        }
+//      }
+//
+//      // Send the response immediately. In case of throttling, the channel has already been muted.
+//      if (acks == 0) {
+//        // no operation needed if producer request.required.acks = 0; however, if there is any error in handling
+//        // the request, since no response is expected by the producer, the server will close socket server so that
+//        // the producer client will know that some error has happened and will refresh its metadata
+//        if (errorInResponse) {
+//          val exceptionsSummary = mergedResponseStatus.map { case (topicName, status) =>
+//            topicName -> status.error.exceptionName
+//          }.mkString(", ")
+//          info(
+//            s"Closing connection due to error during transient topic produce request with correlation id ${request.header.correlationId} " +
+//              s"from client id ${request.header.clientId} with ack=0\n" +
+//              s"Topic and partition to exceptions: $exceptionsSummary"
+//          )
+//          requestChannel.closeConnection(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava).errorCounts)
+//        } else {
+//          // Note that although request throttling is exempt for acks == 0, the channel may be throttled due to
+//          // bandwidth quota violation.
+//          requestHelper.sendNoOpResponseExemptThrottle(request)
+//        }
+//      } else {
+//        requestChannel.sendResponse(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava, maxThrottleTimeMs, nodeEndpoints.values.toList.asJava), None)
+//      }
+//    }
+
     // the callback for sending a produce response
     // The construction of ProduceResponse is able to accept auto-generated protocol data so
     // KafkaApis#handleProduceRequest should apply auto-generated protocol to avoid extra conversion.
     // https://issues.apache.org/jira/browse/KAFKA-10730
     @nowarn("cat=deprecation")
-    def sendResponseCallback(responseStatus: Map[TopicPartition, PartitionResponse], ttReverseIndexMap: Map[TopicPartition, String]): Unit = {
+    def sendResponseCallbackStopGap(responseStatus: Map[TopicPartition, PartitionResponse], ttReverseIndexMap: Map[TopicPartition, String]): Unit = {
       val responseStatusForTransient = mutable.Map[String, TopicResponse]()
       responseStatus.forKeyValue { (tp, pResponse) =>
         val ttName = ttReverseIndexMap.get(tp)
@@ -839,32 +930,46 @@ class KafkaApis(val requestChannel: RequestChannel,
         if (ttName.nonEmpty) responseStatusForTransient += ttName.get -> tResponse
       }
       val mergedResponseStatus = responseStatusForTransient ++ unauthorizedTopicResponses ++ invalidRequestResponses
+      val mergedResponseStatusStopGap = responseStatus ++ unauthorizedTopicResponsesStopGap ++ invalidRequestResponsesStopGap
       var errorInResponse = false
 
       val nodeEndpoints = new mutable.HashMap[Int, Node]
-      mergedResponseStatus.forKeyValue { (topicName, status) =>
-        if (status.error != Errors.NONE) {
-          errorInResponse = true
-          debug("Transient Topic Produce request with correlation id %d from client %s on transient topic %s failed due to %s".format(
-            request.header.correlationId,
-            request.header.clientId,
-            topicName,
-            status.error.exceptionName))
+      if (!useProduceRequest) {
+        mergedResponseStatus.forKeyValue { (topicName, status) =>
+          if (status.error != Errors.NONE) {
+            errorInResponse = true
+            debug("Transient Topic Produce request with correlation id %d from client %s on transient topic %s failed due to %s".format(
+              request.header.correlationId,
+              request.header.clientId,
+              topicName,
+              status.error.exceptionName))
 
-          /* // TODO-2: Add leader check logic for transient topic
-          if (request.header.apiVersion >= 10) {
-            status.error match {
-              case Errors.NOT_LEADER_OR_FOLLOWER =>
-                val leaderNode = getCurrentLeader(topicName, request.context.listenerName)
-                leaderNode.node.foreach { node =>
-                  nodeEndpoints.put(node.id(), node)
-                }
-                status.currentLeader
-                  .setLeaderId(leaderNode.leaderId)
-                  .setLeaderEpoch(leaderNode.leaderEpoch)
-              case _ =>
-            }
-          } */
+            /* // TODO-2: Add leader check logic for transient topic
+            if (request.header.apiVersion >= 10) {
+              status.error match {
+                case Errors.NOT_LEADER_OR_FOLLOWER =>
+                  val leaderNode = getCurrentLeader(topicName, request.context.listenerName)
+                  leaderNode.node.foreach { node =>
+                    nodeEndpoints.put(node.id(), node)
+                  }
+                  status.currentLeader
+                    .setLeaderId(leaderNode.leaderId)
+                    .setLeaderEpoch(leaderNode.leaderEpoch)
+                case _ =>
+              }
+            } */
+          }
+        }
+      } else {
+        mergedResponseStatusStopGap.forKeyValue { (topicPartition, status) =>
+          if (status.error != Errors.NONE) {
+            errorInResponse = true
+            debug("Produce request with correlation id %d from client %s on partition %s failed due to %s".format(
+              request.header.correlationId,
+              request.header.clientId,
+              topicPartition,
+              status.error.exceptionName))
+          }
         }
       }
 
@@ -895,22 +1000,30 @@ class KafkaApis(val requestChannel: RequestChannel,
         // the request, since no response is expected by the producer, the server will close socket server so that
         // the producer client will know that some error has happened and will refresh its metadata
         if (errorInResponse) {
-          val exceptionsSummary = mergedResponseStatus.map { case (topicName, status) =>
-            topicName -> status.error.exceptionName
-          }.mkString(", ")
+          val exceptionsSummary = if (!useProduceRequest) {
+            mergedResponseStatus.map { case (topicName, status) =>
+              topicName -> status.error.exceptionName
+            }.mkString(", ")
+          } else {
+            mergedResponseStatusStopGap.map { case (topicPartition, status) =>
+              topicPartition -> status.error.exceptionName
+            }.mkString(", ")
+          }
           info(
             s"Closing connection due to error during transient topic produce request with correlation id ${request.header.correlationId} " +
               s"from client id ${request.header.clientId} with ack=0\n" +
               s"Topic and partition to exceptions: $exceptionsSummary"
           )
-          requestChannel.closeConnection(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava).errorCounts)
+          if (!useProduceRequest) requestChannel.closeConnection(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava).errorCounts)
+          else requestChannel.closeConnection(request, new ProduceResponse(mergedResponseStatusStopGap.asJava).errorCounts)
         } else {
           // Note that although request throttling is exempt for acks == 0, the channel may be throttled due to
           // bandwidth quota violation.
           requestHelper.sendNoOpResponseExemptThrottle(request)
         }
       } else {
-        requestChannel.sendResponse(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava, maxThrottleTimeMs, nodeEndpoints.values.toList.asJava), None)
+        if (!useProduceRequest) requestChannel.sendResponse(request, new TransientTopicProduceResponse(mergedResponseStatus.asJava, maxThrottleTimeMs, nodeEndpoints.values.toList.asJava), None)
+        else requestChannel.sendResponse(request, new ProduceResponse(mergedResponseStatusStopGap.asJava, maxThrottleTimeMs, nodeEndpoints.values.toList.asJava), None)
       }
     }
 
@@ -920,9 +1033,8 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
     }
 
-    if (authorizedRequestInfo.isEmpty) sendResponseCallback(Map.empty, Map.empty)
+    if (authorizedRequestInfo.isEmpty) sendResponseCallbackStopGap(Map.empty, Map.empty)
     else {
-      val internalTopicsAllowed = request.header.clientId == AdminUtils.ADMIN_CLIENT_ID
       val transactionSupportedOperation = if (request.header.apiVersion > 10) genericError else defaultError
 
       val newTopicCreationTasks = new ArrayBuffer[CompletableFuture[TransientTopic]]()
@@ -943,10 +1055,10 @@ class KafkaApis(val requestChannel: RequestChannel,
       replicaManager.handleProduceAppend(
         timeout = timeout.toLong,
         requiredAcks = acks,
-        internalTopicsAllowed = internalTopicsAllowed,
+        internalTopicsAllowed = true,
         transactionalId = null,
         entriesPerPartition = assignedRecords,
-        responseCallback = responseStatus => sendResponseCallback(responseStatus, ttReverseIndexMap),
+        responseCallback = responseStatus => sendResponseCallbackStopGap(responseStatus, ttReverseIndexMap),
         recordValidationStatsCallback = processingStatsCallback,
         requestLocal = requestLocal,
         transactionSupportedOperation = transactionSupportedOperation)
