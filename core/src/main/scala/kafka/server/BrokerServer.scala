@@ -256,6 +256,7 @@ class BrokerServer(
         new ProduceRequestMonitorBrokerInterceptor(logContext)
       ))
       brokerInterceptors = new BrokerInterceptors(Vector(
+        new ProduceRequestMonitorBrokerInterceptor(logContext),
       ))
       brokerInterceptors.init()
 
