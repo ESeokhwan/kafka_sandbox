@@ -20,6 +20,7 @@ package kafka.server
 import kafka.cluster.EndPoint
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor, ProduceRequestMonitorBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.network.{DataPlaneAcceptor, SocketServer}
@@ -96,6 +97,9 @@ class BrokerServer(
   var status: ProcessStatus = SHUTDOWN
 
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
+
+  var unusedBrokerInterceptors: BrokerInterceptors = _
+  var brokerInterceptors: BrokerInterceptors = _
 
   var authorizer: Option[Authorizer] = None
   @volatile var socketServer: SocketServer = _
@@ -250,10 +254,20 @@ class BrokerServer(
         Some(clientMetricsManager)
       )
 
+      // For testing purposes, backdoor for unused imports
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext),
+        new ProduceRequestMonitorBrokerInterceptor(logContext)
+      ))
+      brokerInterceptors = new BrokerInterceptors(Vector(
+        new ProduceRequestMonitorBrokerInterceptor(logContext),
+      ))
+      brokerInterceptors.init()
+
       // Create and start the socket server acceptor threads so that the bound port is known.
       // Delay starting processors until the end of the initialization sequence to ensure
       // that credentials have been loaded before processing authentications.
-      socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager)
+      socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, brokerInterceptors)
 
       clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
 
@@ -428,7 +442,10 @@ class BrokerServer(
       dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
         config.numIoThreads, s"${DataPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent",
-        DataPlaneAcceptor.ThreadPrefix)
+        DataPlaneAcceptor.ThreadPrefix,
+        "broker",
+        brokerInterceptors
+      )
 
       // Start RemoteLogManager before initializing broker metadata publishers.
       remoteLogManagerOpt.foreach { rlm =>
@@ -752,6 +769,9 @@ class BrokerServer(
       CoreUtils.swallow(config.dynamicConfig.clear(), this)
       if (clientMetricsManager != null)
         CoreUtils.swallow(clientMetricsManager.close(), this)
+
+      if (brokerInterceptors != null)
+        CoreUtils.swallow(brokerInterceptors.shutdown(), this)
 
       sharedServer.stopForBroker()
       info("shut down completed")

@@ -22,6 +22,7 @@ import java.util.concurrent._
 import com.fasterxml.jackson.databind.JsonNode
 import com.typesafe.scalalogging.Logger
 import com.yammer.metrics.core.{Histogram, Meter}
+import kafka.interceptor.BrokerInterceptors
 import kafka.network
 import kafka.server.{KafkaConfig, RequestLocal}
 import kafka.utils.{Logging, Pool}
@@ -358,7 +359,8 @@ object RequestChannel extends Logging {
 class RequestChannel(val queueSize: Int,
                      val metricNamePrefix: String,
                      time: Time,
-                     val metrics: RequestChannel.Metrics) {
+                     val metrics: RequestChannel.Metrics,
+                     val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)) {
   import RequestChannel._
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -433,6 +435,7 @@ class RequestChannel(val queueSize: Int,
 
   /** Send a response back to the socket server to be sent over the network */
   private[network] def sendResponse(response: RequestChannel.Response): Unit = {
+    brokerInterceptors.beforeSendResponseToQueue(response)
     if (isTraceEnabled) {
       val requestHeader = response.request.headerForLoggingOrThrottling()
       val message = response match {

@@ -22,6 +22,7 @@ import kafka.common.GenerateBrokerIdException
 import kafka.controller.KafkaController
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor, ProduceRequestMonitorBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.metrics.KafkaMetricsReporter
@@ -134,6 +135,9 @@ class KafkaServer(
 
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
   private var controlPlaneRequestProcessor: KafkaApis = _
+
+  var unusedBrokerInterceptors: BrokerInterceptors = _
+  var brokerInterceptors: BrokerInterceptors = _
 
   var authorizer: Option[Authorizer] = None
   @volatile var socketServer: SocketServer = _
@@ -379,13 +383,23 @@ class KafkaServer(
           None
         )
 
+        // For testing purposes, backdoor for unused imports
+        unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+          new MonitorLoggingBrokerInterceptor(logContext),
+          new ProduceRequestMonitorBrokerInterceptor(logContext)
+        ))
+        brokerInterceptors = new BrokerInterceptors(Vector(
+          new ProduceRequestMonitorBrokerInterceptor(logContext),
+        ))
+        brokerInterceptors.init()
+
         // Create and start the socket server acceptor threads so that the bound port is known.
         // Delay starting processors until the end of the initialization sequence to ensure
         // that credentials have been loaded before processing authentications.
         //
         // Note that we allow the use of KRaft mode controller APIs when forwarding is enabled
         // so that the Envelope request is exposed. This is only used in testing currently.
-        socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager)
+        socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, brokerInterceptors)
 
         // Start alter partition manager based on the IBP version
         alterPartitionManager = if (config.interBrokerProtocolVersion.isAlterPartitionSupported) {
@@ -618,12 +632,12 @@ class KafkaServer(
         dataPlaneRequestProcessor = createKafkaApis(socketServer.dataPlaneRequestChannel)
 
         dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
-          config.numIoThreads, s"${DataPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent", DataPlaneAcceptor.ThreadPrefix)
+          config.numIoThreads, s"${DataPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent", DataPlaneAcceptor.ThreadPrefix, "broker", brokerInterceptors)
 
         socketServer.controlPlaneRequestChannelOpt.foreach { controlPlaneRequestChannel =>
           controlPlaneRequestProcessor = createKafkaApis(controlPlaneRequestChannel)
           controlPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.controlPlaneRequestChannelOpt.get, controlPlaneRequestProcessor, time,
-            1, s"${ControlPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent", ControlPlaneAcceptor.ThreadPrefix)
+            1, s"${ControlPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent", ControlPlaneAcceptor.ThreadPrefix, "broker", brokerInterceptors)
         }
 
         Mx4jLoader.maybeLoad()
@@ -1114,6 +1128,9 @@ class KafkaServer(
           CoreUtils.swallow(metrics.close(), this)
         if (brokerTopicStats != null)
           CoreUtils.swallow(brokerTopicStats.close(), this)
+
+        if (brokerInterceptors != null)
+          CoreUtils.swallow(brokerInterceptors.shutdown(), this)
 
         // Clear all reconfigurable instances stored in DynamicBrokerConfig
         config.dynamicConfig.clear()
