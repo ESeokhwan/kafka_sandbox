@@ -254,8 +254,13 @@ public class TransientTopicCoordinator {
         RequestContext context,
         String topicName
     ) {
-        // TODO: Implement here
-        return null;
+        Uuid topicId = Uuid.randomUuid();
+        return runtime.scheduleWriteOperation(
+            "transient-topic-creation",
+            new TopicPartition(Topic.TRANSIENT_TOPIC_INDEX_TOPIC_NAME, 0),
+            Duration.ofMillis(config.commitTimeoutMs()),
+            coordinator -> coordinator.createNewTransientTopic(context, topicId, topicName)
+        );
     }
 
     public CompletableFuture<Void> freeTransientTopic() {
