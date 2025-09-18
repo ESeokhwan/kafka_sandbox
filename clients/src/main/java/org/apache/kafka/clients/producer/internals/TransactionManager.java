@@ -64,6 +64,7 @@ import org.apache.kafka.common.requests.InitProducerIdRequest;
 import org.apache.kafka.common.requests.InitProducerIdResponse;
 import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.TransactionResult;
+import org.apache.kafka.common.requests.TransientTopicProduceResponse;
 import org.apache.kafka.common.requests.TxnOffsetCommitRequest;
 import org.apache.kafka.common.requests.TxnOffsetCommitRequest.CommittedOffset;
 import org.apache.kafka.common.requests.TxnOffsetCommitResponse;
@@ -633,12 +634,30 @@ public class TransactionManager {
         txnPartitionMap.updateLastAckedOffset(batch.topicPartition, isTransactional(), lastOffset);
     }
 
+    private void updateLastAckedOffset(TransientTopicProduceResponse.TopicResponse response, ProducerBatch batch) {
+        if (response.baseOffset == ProduceResponse.INVALID_OFFSET)
+            return;
+        long lastOffset = response.baseOffset + batch.recordCount - 1;
+        txnPartitionMap.updateLastAckedOffset(batch.topicPartition, isTransactional(), lastOffset);
+    }
+
     public synchronized void handleCompletedBatch(ProducerBatch batch, ProduceResponse.PartitionResponse response) {
         int lastAckedSequence = maybeUpdateLastAckedSequence(batch.topicPartition, batch.lastSequence());
         log.trace("ProducerId: {}; Set last ack'd sequence number for topic-partition {} to {}",
                 batch.producerId(),
                 batch.topicPartition,
                 lastAckedSequence);
+
+        updateLastAckedOffset(response, batch);
+        removeInFlightBatch(batch);
+    }
+
+    public synchronized void handleCompletedBatch(ProducerBatch batch, TransientTopicProduceResponse.TopicResponse response) {
+        int lastAckedSequence = maybeUpdateLastAckedSequence(batch.topicPartition, batch.lastSequence());
+        log.trace("ProducerId: {}; Set last ack'd sequence number for transient-topic {} to {}",
+            batch.producerId(),
+            batch.topicPartition.topic(),
+            lastAckedSequence);
 
         updateLastAckedOffset(response, batch);
         removeInFlightBatch(batch);
@@ -951,6 +970,75 @@ public class TransactionManager {
                 // and wait to see if the sequence resolves
                 if (!hasUnresolvedSequence(batch.topicPartition) ||
                         isNextSequenceForUnresolvedPartition(batch.topicPartition, batch.baseSequence())) {
+                    requestEpochBumpForPartition(batch.topicPartition);
+                }
+                return true;
+            }
+        }
+
+        // If neither of the above cases are true, retry if the exception is retriable
+        return error.exception() instanceof RetriableException;
+    }
+
+    synchronized boolean canRetry(TransientTopicProduceResponse.TopicResponse response, ProducerBatch batch) {
+        Errors error = response.error;
+
+        // An UNKNOWN_PRODUCER_ID means that we have lost the producer state on the broker. Depending on the log start
+        // offset, we may want to retry these, as described for each case below. If none of those apply, then for the
+        // idempotent producer, we will locally bump the epoch and reset the sequence numbers of in-flight batches from
+        // sequence 0, then retry the failed batch, which should now succeed. For the transactional producer, allow the
+        // batch to fail. When processing the failed batch, we will transition to an abortable error and set a flag
+        // indicating that we need to bump the epoch (if supported by the broker).
+        if (error == Errors.UNKNOWN_PRODUCER_ID) {
+            if (response.logStartOffset == -1) {
+                // We don't know the log start offset with this response. We should just retry the request until we get it.
+                // The UNKNOWN_PRODUCER_ID error code was added along with the new ProduceResponse which includes the
+                // logStartOffset. So the '-1' sentinel is not for backward compatibility. Instead, it is possible for
+                // a broker to not know the logStartOffset at when it is returning the response because the partition
+                // may have moved away from the broker from the time the error was initially raised to the time the
+                // response was being constructed. In these cases, we should just retry the request: we are guaranteed
+                // to eventually get a logStartOffset once things settle down.
+                return true;
+            }
+
+            if (batch.sequenceHasBeenReset()) {
+                // When the first inflight batch fails due to the truncation case, then the sequences of all the other
+                // in flight batches would have been restarted from the beginning. However, when those responses
+                // come back from the broker, they would also come with an UNKNOWN_PRODUCER_ID error. In this case, we should not
+                // reset the sequence numbers to the beginning.
+                return true;
+            } else if (lastAckedOffset(batch.topicPartition).orElse(TxnPartitionEntry.NO_LAST_ACKED_SEQUENCE_NUMBER) < response.logStartOffset) {
+                // The head of the log has been removed, probably due to the retention time elapsing. In this case,
+                // we expect to lose the producer state. For the transactional producer, reset the sequences of all
+                // inflight batches to be from the beginning and retry them, so that the transaction does not need to
+                // be aborted. For the idempotent producer, bump the epoch to avoid reusing (sequence, epoch) pairs
+                if (isTransactional()) {
+                    txnPartitionMap.startSequencesAtBeginning(batch.topicPartition, this.producerIdAndEpoch);
+                } else {
+                    requestEpochBumpForPartition(batch.topicPartition);
+                }
+                return true;
+            }
+
+            if (!isTransactional()) {
+                // For the idempotent producer, always retry UNKNOWN_PRODUCER_ID errors. If the batch has the current
+                // producer ID and epoch, request a bump of the epoch. Otherwise just retry the produce.
+                requestEpochBumpForPartition(batch.topicPartition);
+                return true;
+            }
+        } else if (error == Errors.OUT_OF_ORDER_SEQUENCE_NUMBER) {
+            if (!hasUnresolvedSequence(batch.topicPartition) &&
+                (batch.sequenceHasBeenReset() || !isNextSequence(batch.topicPartition, batch.baseSequence()))) {
+                // We should retry the OutOfOrderSequenceException if the batch is _not_ the next batch, ie. its base
+                // sequence isn't the lastAckedSequence + 1.
+                return true;
+            } else if (!isTransactional()) {
+                // For the idempotent producer, retry all OUT_OF_ORDER_SEQUENCE_NUMBER errors. If there are no
+                // unresolved sequences, or this batch is the one immediately following an unresolved sequence, we know
+                // there is actually a gap in the sequences, and we bump the epoch. Otherwise, retry without bumping
+                // and wait to see if the sequence resolves
+                if (!hasUnresolvedSequence(batch.topicPartition) ||
+                    isNextSequenceForUnresolvedPartition(batch.topicPartition, batch.baseSequence())) {
                     requestEpochBumpForPartition(batch.topicPartition);
                 }
                 return true;
