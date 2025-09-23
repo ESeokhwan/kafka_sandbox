@@ -884,14 +884,12 @@ class KafkaApis(val requestChannel: RequestChannel,
 
     if (authorizedRequestInfo.isEmpty) sendResponseCallback(Map.empty, Map.empty)
     else {
-      val internalTopicsAllowed = request.header.clientId == AdminUtils.ADMIN_CLIENT_ID
       val transactionSupportedOperation = if (request.header.apiVersion > 10) genericError else defaultError
 
-      val newTopicCreationTasks = new ArrayBuffer[CompletableFuture[TransientTopic]]()
+      val newTopicList = new ArrayBuffer[TransientTopic]
       topicCreationNeededRequestInfo.forKeyValue { (name, _) =>
-        newTopicCreationTasks += transientTopicCoordinator.createNewTransientTopic(request.context, name)
+        newTopicList += transientTopicCoordinator.createNewTransientTopicOnlyMem(request.context, name)
       }
-      newTopicCreationTasks.foreach(task => task.get())
 
       val assignedRecords = mutable.Map[TopicPartition, MemoryRecords]()
       val ttReverseIndexMap = mutable.Map[TopicPartition, String]()
@@ -905,7 +903,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       replicaManager.handleProduceAppend(
         timeout = ttpRequest.timeout.toLong,
         requiredAcks = ttpRequest.acks,
-        internalTopicsAllowed = internalTopicsAllowed,
+        internalTopicsAllowed = true,
         transactionalId = null,
         entriesPerPartition = assignedRecords,
         responseCallback = responseStatus => sendResponseCallback(responseStatus, ttReverseIndexMap),

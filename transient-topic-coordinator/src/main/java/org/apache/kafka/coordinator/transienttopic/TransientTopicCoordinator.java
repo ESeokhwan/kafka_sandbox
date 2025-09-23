@@ -18,6 +18,7 @@ package org.apache.kafka.coordinator.transienttopic;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TransientTopic;
+import org.apache.kafka.common.TransientTopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.internals.Topic;
@@ -261,6 +262,18 @@ public class TransientTopicCoordinator {
             Duration.ofMillis(config.commitTimeoutMs()),
             coordinator -> coordinator.createNewTransientTopic(context, topicId, topicName)
         );
+    }
+
+    public TransientTopic createNewTransientTopicOnlyMem(
+        RequestContext context,
+        String topicName
+    ) {
+        Uuid topicId = Uuid.randomUuid();
+        TransientTopicPartition assignedPartition = partitionPool.allocatePartition();
+        TransientTopic newTopic = new TransientTopic(topicId, topicName, assignedPartition);
+        indexCache.addIndexToCache(newTopic);
+
+        return newTopic;
     }
 
     public CompletableFuture<Void> freeTransientTopic() {
