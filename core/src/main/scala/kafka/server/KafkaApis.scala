@@ -43,6 +43,7 @@ import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic
 import org.apache.kafka.common.message.CreateTopicsResponseData.{CreatableTopicResult, CreatableTopicResultCollection}
 import org.apache.kafka.common.message.DeleteRecordsResponseData.{DeleteRecordsPartitionResult, DeleteRecordsTopicResult}
 import org.apache.kafka.common.message.DeleteTopicsResponseData.{DeletableTopicResult, DeletableTopicResultCollection}
+import org.apache.kafka.common.message.DeleteTransientTopicsResponseData.{DeletableTransientTopicResult, DeletableTransientTopicResultCollection}
 import org.apache.kafka.common.message.ElectLeadersResponseData.{PartitionResult, ReplicaElectionResult}
 import org.apache.kafka.common.message.ListClientMetricsResourcesResponseData.ClientMetricsResource
 import org.apache.kafka.common.message.ListOffsetsRequestData.ListOffsetsPartition
@@ -271,6 +272,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.WRITE_SHARE_GROUP_STATE => handleWriteShareGroupStateRequest(request)
         case ApiKeys.DELETE_SHARE_GROUP_STATE => handleDeleteShareGroupStateRequest(request)
         case ApiKeys.READ_SHARE_GROUP_STATE_SUMMARY => handleReadShareGroupStateSummaryRequest(request)
+        case ApiKeys.DELETE_TRANSIENT_TOPICS => handleDeleteTransientTopics(request)
         case _ => throw new IllegalStateException(s"No handler for request api key ${request.header.apiKey}")
       }
     } catch {
@@ -2405,6 +2407,76 @@ class KafkaApis(val requestChannel: RequestChannel,
         )
       }
     }
+  }
+
+  private def handleDeleteTransientTopics(request: RequestChannel.Request): Unit = {
+    val deleteTopicsRequest = request.body[DeleteTransientTopicsRequest]
+    val results = deleteTransientTopics(
+      deleteTopicsRequest.data,
+      authHelper.authorize(request.context, DELETE, CLUSTER, CLUSTER_NAME, logIfDenied = false),
+      names => authHelper.filterByAuthorized(request.context, DESCRIBE, TOPIC, names)(n => n),
+      names => authHelper.filterByAuthorized(request.context, DELETE, TOPIC, names)(n => n)
+    )
+
+    def createResponse(results: util.List[DeletableTransientTopicResult], requestThrottleMs: Int): AbstractResponse =
+      new DeleteTransientTopicsResponse(new DeleteTransientTopicsResponseData()
+        .setThrottleTimeMs(requestThrottleMs)
+        .setResponses(new DeletableTransientTopicResultCollection(results.iterator)))
+    requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs => createResponse(results, requestThrottleMs))
+  }
+
+  def deleteTransientTopics(
+     request: DeleteTransientTopicsRequestData,
+     hasClusterAuth: Boolean,
+     getDescribableTopics: Iterable[String] => Set[String],
+     getDeletableTopics: Iterable[String] => Set[String]
+  ): util.List[DeletableTransientTopicResult] = {
+    val responses = new util.ArrayList[DeletableTransientTopicResult]
+    def appendResponse(name: String, id: Uuid, error: ApiError): Unit = {
+      responses.add(new DeletableTransientTopicResult().
+        setName(name).
+        setTopicId(id).
+        setErrorCode(error.error.code).
+        setErrorMessage(error.message))
+    }
+
+    val providedNames = new util.HashSet[String]
+    val duplicateProvidedNames = new util.HashSet[String]
+    def addProvidedName(name: String): Unit = {
+      if (duplicateProvidedNames.contains(name) || !providedNames.add(name)) {
+        duplicateProvidedNames.add(name)
+        providedNames.remove(name)
+      }
+    }
+    request.topics().forEach(addProvidedName)
+    duplicateProvidedNames.forEach(name => appendResponse(name, Uuid.ZERO_UUID,
+      new ApiError(Errors.INVALID_REQUEST, "Duplicate topic name.")))
+
+    val toAuthenticate = new util.HashSet[String]
+    toAuthenticate.addAll(providedNames)
+    val topicsToAuthenticate = toAuthenticate.asScala
+    val (describable, deletable) = if (hasClusterAuth) {
+      (topicsToAuthenticate.toSet, topicsToAuthenticate.toSet)
+    } else {
+      (getDescribableTopics(topicsToAuthenticate), getDeletableTopics(topicsToAuthenticate))
+    }
+
+    val targetTtNames = new ArrayBuffer[String]
+    providedNames.forEach(name => {
+      if (!describable.contains(name) || !deletable.contains(name)) {
+        appendResponse(name, Uuid.ZERO_UUID, new ApiError(Errors.TOPIC_AUTHORIZATION_FAILED))
+      } else {
+        targetTtNames += name
+      }
+    })
+
+    targetTtNames.foreach(ttName => {
+      val deletedTt = transientTopicCoordinator.freeTransientTopic(ttName)
+      if (deletedTt!= null) appendResponse(ttName, Uuid.ZERO_UUID, ApiError.NONE)
+      else appendResponse(ttName, Uuid.ZERO_UUID, new ApiError(Errors.UNKNOWN_TOPIC_OR_PARTITION))
+    })
+    Collections.shuffle(responses)
+    responses
   }
 
   def handleDeleteRecordsRequest(request: RequestChannel.Request): Unit = {

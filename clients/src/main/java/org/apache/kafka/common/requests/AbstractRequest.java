@@ -352,6 +352,8 @@ public abstract class AbstractRequest implements AbstractRequestResponse {
                 return ReadShareGroupStateSummaryRequest.parse(buffer, apiVersion);
             case TRANSIENT_TOPIC_PRODUCE:
                 return TransientTopicProduceRequest.parse(buffer, apiVersion);
+            case DELETE_TRANSIENT_TOPICS:
+                return DeleteTransientTopicsRequest.parse(buffer, apiVersion);
             default:
                 throw new AssertionError(String.format("ApiKey %s is not currently handled in `parseRequest`, the " +
                         "code should be updated to do so.", apiKey));

@@ -283,15 +283,16 @@ public class TransientTopicCoordinator {
         indexCache.updateIndexLastOffset(topicName, lastOffset);
     }
 
-    public void freeTransientTopic(
+    public TransientTopic freeTransientTopic(
         String topicName
     ) {
         TransientTopicIndexCache.IndexCacheEntry target = indexCache.evictIndexFromCache(topicName);
         if (target == null) {
             // TODO-2: handle exception
-            return;
+            return null;
         }
         partitionPool.releasePartition(target.transientTopic().partition().partition(), target.curOffset());
+        return target.transientTopic();
     }
 
     public void onElection(

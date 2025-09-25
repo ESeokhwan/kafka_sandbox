@@ -289,6 +289,8 @@ public abstract class AbstractResponse implements AbstractRequestResponse {
                 return ReadShareGroupStateSummaryResponse.parse(responseBuffer, version);
             case TRANSIENT_TOPIC_PRODUCE:
                 return TransientTopicProduceResponse.parse(responseBuffer, version);
+            case DELETE_TRANSIENT_TOPICS:
+                return DeleteTransientTopicsResponse.parse(responseBuffer, version);
             default:
                 throw new AssertionError(String.format("ApiKey %s is not currently handled in `parseResponse`, the " +
                         "code should be updated to do so.", apiKey));

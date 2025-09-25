@@ -131,7 +131,8 @@ public enum ApiKeys {
     WRITE_SHARE_GROUP_STATE(ApiMessageType.WRITE_SHARE_GROUP_STATE, true),
     DELETE_SHARE_GROUP_STATE(ApiMessageType.DELETE_SHARE_GROUP_STATE, true),
     READ_SHARE_GROUP_STATE_SUMMARY(ApiMessageType.READ_SHARE_GROUP_STATE_SUMMARY, true),
-    TRANSIENT_TOPIC_PRODUCE(ApiMessageType.TRANSIENT_TOPIC_PRODUCE);
+    TRANSIENT_TOPIC_PRODUCE(ApiMessageType.TRANSIENT_TOPIC_PRODUCE),
+    DELETE_TRANSIENT_TOPICS(ApiMessageType.DELETE_TRANSIENT_TOPICS);
 
     private static final Map<ApiMessageType.ListenerType, EnumSet<ApiKeys>> APIS_BY_LISTENER =
         new EnumMap<>(ApiMessageType.ListenerType.class);
