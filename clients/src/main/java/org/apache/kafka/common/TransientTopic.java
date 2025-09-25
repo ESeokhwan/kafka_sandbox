@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.common;
 
+import java.util.Objects;
+
 /**
  * This class represents a transient topic in Kafka, which is not persisted in the cluster.
  * It contains the topic's unique identifier, name, partition information, and timestamps
@@ -33,7 +35,7 @@ public class TransientTopic {
     TransientTopic(Uuid id, String name, TransientTopicPartition partition, long createdAt, long lastUsedAt) {
         this.id = id;
         this.name = name;
-        this.partition = partition;
+        this.partition = Objects.requireNonNull(partition, "partition cannot be null");
         this.createdAt = createdAt;
         this.lastUsedAt = lastUsedAt;
     }
@@ -64,7 +66,7 @@ public class TransientTopic {
      * @return the partition information of the transient topic
      */
     public TransientTopicPartition partition() {
-        return partition;
+        return Objects.requireNonNull(partition);
     }
 
     /**

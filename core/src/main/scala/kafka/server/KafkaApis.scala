@@ -798,7 +798,10 @@ class KafkaApis(val requestChannel: RequestChannel,
       responseStatus.forKeyValue { (tp, pResponse) =>
         val ttName = ttReverseIndexMap.get(tp)
         val tResponse = TransientTopicProduceResponse.TopicResponse.from(pResponse)
-        if (ttName.nonEmpty) responseStatusForTransient += ttName.get -> tResponse
+        if (ttName.nonEmpty) {
+          responseStatusForTransient += ttName.get -> tResponse
+          transientTopicCoordinator.updateTransientTopicOffset(ttName.get, pResponse.lastOffset)
+        }
       }
       val mergedResponseStatus = responseStatusForTransient ++ unauthorizedTopicResponses ++ invalidRequestResponses
       var errorInResponse = false

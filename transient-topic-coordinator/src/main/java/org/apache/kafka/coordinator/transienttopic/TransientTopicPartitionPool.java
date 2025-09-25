@@ -24,5 +24,5 @@ public interface TransientTopicPartitionPool {
 
     TransientTopicPartition allocatePartition();
 
-    void releasePartition(int partition, int usedOffset);
+    void releasePartition(int partition, long usedOffset);
 }

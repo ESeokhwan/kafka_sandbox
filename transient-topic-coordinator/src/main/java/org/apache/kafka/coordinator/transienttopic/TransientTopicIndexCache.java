@@ -20,14 +20,15 @@ import org.apache.kafka.common.TransientTopic;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
 
-import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class TransientTopicIndexCache {
 
     private final Logger log;
 
-    private final Map<String, TransientTopic> indexMap = new HashMap<>();
+    private final Map<String, IndexCacheEntry> indexMap = new ConcurrentHashMap<>();
 
     public TransientTopicIndexCache(LogContext logContext) {
         this.log = logContext.logger(TransientTopicIndexCache.class);
@@ -35,7 +36,7 @@ public class TransientTopicIndexCache {
 
     public void startup() {}
 
-    public TransientTopic getIndex(String topicName) {
+    public IndexCacheEntry getIndex(String topicName) {
         return indexMap.get(topicName);
     }
 
@@ -43,20 +44,50 @@ public class TransientTopicIndexCache {
         return indexMap.containsKey(topicName);
     }
 
-    public TransientTopic addIndexToCache(TransientTopic transientTopic) {
+    public void addIndexToCache(TransientTopic transientTopic) {
         String topicName = transientTopic.name();
         if (indexMap.containsKey(topicName)) {
-            return null;
+            return;
         }
-        return indexMap.put(topicName, transientTopic);
+        indexMap.put(topicName, new IndexCacheEntry(transientTopic, transientTopic.partition().offset()));
     }
 
-    public TransientTopic evictIndexFromCache(String topicName) {
+    // TODO: when this method are being executed, evict Index From Cache should be blocked.
+    public void updateIndexLastOffset(String topicName, long lastOffset) {
+        indexMap.computeIfPresent(topicName, (k, v) -> {
+            if (lastOffset <= v.curOffset()) return v;
+            return v.withCurOffset(lastOffset);
+        });
+    }
+
+    public IndexCacheEntry evictIndexFromCache(String topicName) {
         if (indexMap.containsKey(topicName)) {
             // TODO: add Exception Logic
             return null;
         }
 
         return indexMap.remove(topicName);
+    }
+
+    public static class IndexCacheEntry {
+        private final TransientTopic transientTopic;
+        private final long curOffset;
+
+        private IndexCacheEntry(TransientTopic transientTopic, long curOffset) {
+            this.transientTopic = Objects.requireNonNull(transientTopic);
+            this.curOffset = curOffset;
+        }
+
+        public TransientTopic transientTopic() {
+            return transientTopic;
+        }
+
+        public long curOffset() {
+            return curOffset;
+        }
+
+        public IndexCacheEntry withCurOffset(long curOffset) {
+            return new IndexCacheEntry(this.transientTopic, curOffset);
+        }
     }
 }

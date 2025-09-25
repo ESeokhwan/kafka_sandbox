@@ -244,7 +244,7 @@ public class TransientTopicCoordinator {
     public TransientTopic getCachedIndex(
         String topicName
     ) {
-        return indexCache.getIndex(topicName);
+        return indexCache.getIndex(topicName).transientTopic();
     }
 
     public boolean existsInIndexCache(String topicName) {
@@ -276,9 +276,22 @@ public class TransientTopicCoordinator {
         return newTopic;
     }
 
-    public CompletableFuture<Void> freeTransientTopic() {
-        // TODO: Implement here
-        return null;
+    public void updateTransientTopicOffset(
+        String topicName,
+        long lastOffset
+    ) {
+        indexCache.updateIndexLastOffset(topicName, lastOffset);
+    }
+
+    public void freeTransientTopic(
+        String topicName
+    ) {
+        TransientTopicIndexCache.IndexCacheEntry target = indexCache.evictIndexFromCache(topicName);
+        if (target == null) {
+            // TODO-2: handle exception
+            return;
+        }
+        partitionPool.releasePartition(target.transientTopic().partition().partition(), target.curOffset());
     }
 
     public void onElection(

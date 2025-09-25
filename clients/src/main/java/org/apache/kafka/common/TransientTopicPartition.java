@@ -26,7 +26,7 @@ import java.util.Objects;
 public class TransientTopicPartition {
 
     private final TopicPartition topicPartition;
-    private final int offset;
+    private final long offset;
 
     /**
      * Create an instance with the provided parameters.
@@ -34,7 +34,7 @@ public class TransientTopicPartition {
      * @param topicPartition the topic partition
      * @param offset the start position of the transient topic
      */
-    public TransientTopicPartition(TopicPartition topicPartition, int offset) {
+    public TransientTopicPartition(TopicPartition topicPartition, long offset) {
         this.topicPartition = Objects.requireNonNull(topicPartition, "topicPartition can not be null");
         this.offset = offset;
     }
@@ -46,7 +46,7 @@ public class TransientTopicPartition {
      * @param partition the partition id
      * @param offset the start position of the transient topic
      */
-    public TransientTopicPartition(String topic, int partition, int offset) {
+    public TransientTopicPartition(String topic, int partition, long offset) {
         this.topicPartition = new TopicPartition(topic, partition);
         this.offset = offset;
     }
@@ -68,11 +68,11 @@ public class TransientTopicPartition {
     /**
      * @return the start position of the transient topic.
      */
-    public int offset() {
+    public long offset() {
         return offset;
     }
 
-    public TransientTopicPartition withOffset(int offset) {
+    public TransientTopicPartition withOffset(long offset) {
         return new TransientTopicPartition(topicPartition, offset);
     }
 
@@ -98,7 +98,7 @@ public class TransientTopicPartition {
     @Override
     public int hashCode() {
         final int prime = 31;
-        int result = prime + offset;
+        int result = prime + (int) offset;
         result = prime * result + topicPartition.hashCode();
         return result;
     }

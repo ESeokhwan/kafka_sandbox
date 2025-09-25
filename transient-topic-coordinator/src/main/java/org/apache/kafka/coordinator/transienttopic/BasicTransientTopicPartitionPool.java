@@ -46,7 +46,7 @@ public class BasicTransientTopicPartitionPool implements TransientTopicPartition
         for (int i = 0; i < numPartitions; i++) {
             // TODO-1: set offset based on real last offsets
             // TODO-1: create partitions if there are less partitions than given num partitions.
-            freePartitions.add(new TransientTopicPartition(Topic.TRANSIENT_TOPIC_NAME, i, 0));
+            freePartitions.add(new TransientTopicPartition(Topic.TRANSIENT_TOPIC_NAME, i, 0L));
         }
     }
 
@@ -57,11 +57,11 @@ public class BasicTransientTopicPartitionPool implements TransientTopicPartition
         return freePartition;
     }
 
-    public void releasePartition(int partition, int usedOffset) {
+    public void releasePartition(int partition, long usedOffset) {
         TransientTopicPartition target = usingPartitions.remove(partition);
         if (target == null) throw new RuntimeException(); // TODO-2: handle exception
 
-        int updatedOffset = target.offset() + usedOffset;
+        long updatedOffset = target.offset() + usedOffset;
         freePartitions.add(target.withOffset(updatedOffset));
     }
 }
