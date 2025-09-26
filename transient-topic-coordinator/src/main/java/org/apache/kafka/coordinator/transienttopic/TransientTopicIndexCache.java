@@ -61,7 +61,7 @@ public class TransientTopicIndexCache {
     }
 
     public IndexCacheEntry evictIndexFromCache(String topicName) {
-        if (indexMap.containsKey(topicName)) {
+        if (!indexMap.containsKey(topicName)) {
             // TODO: add Exception Logic
             return null;
         }
