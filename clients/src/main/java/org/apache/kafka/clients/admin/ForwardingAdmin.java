@@ -68,6 +68,11 @@ public class ForwardingAdmin implements Admin {
     }
 
     @Override
+    public DeleteTopicsResult deleteTransientTopics(Collection<String> topics, DeleteTopicsOptions options) {
+        return delegate.deleteTransientTopics(topics, options);
+    }
+
+    @Override
     public ListTopicsResult listTopics(ListTopicsOptions options) {
         return delegate.listTopics(options);
     }

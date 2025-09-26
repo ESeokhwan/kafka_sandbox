@@ -267,6 +267,12 @@ public interface Admin extends AutoCloseable {
      */
     DeleteTopicsResult deleteTopics(TopicCollection topics, DeleteTopicsOptions options);
 
+    default DeleteTopicsResult deleteTransientTopics(Collection<String> topics) {
+        return deleteTransientTopics(topics, new DeleteTopicsOptions());
+    }
+
+    DeleteTopicsResult deleteTransientTopics(Collection<String> topics, DeleteTopicsOptions options);
+
     /**
      * List the topics available in the cluster with the default options.
      * <p>
