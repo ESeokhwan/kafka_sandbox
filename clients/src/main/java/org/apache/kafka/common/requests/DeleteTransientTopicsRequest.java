@@ -32,7 +32,7 @@ public class DeleteTransientTopicsRequest extends AbstractRequest {
         private final DeleteTransientTopicsRequestData data;
 
         public Builder(DeleteTransientTopicsRequestData data) {
-            super(ApiKeys.DELETE_TOPICS);
+            super(ApiKeys.DELETE_TRANSIENT_TOPICS);
             this.data = data;
         }
 
