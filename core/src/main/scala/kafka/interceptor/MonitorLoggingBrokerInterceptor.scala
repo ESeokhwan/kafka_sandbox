@@ -39,7 +39,6 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
           currentTime,
           currentTimeNano
         ))
-        monitorLogWriter.notifyIfNeeded()
       })
     } else if (request.header.apiKey == ApiKeys.PRODUCE) {
       val produceRequest = request.body[ProduceRequest]
@@ -65,7 +64,6 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
           })
         })
       })
-      monitorLogWriter.notifyIfNeeded()
     } else if (request.header.apiKey == ApiKeys.TRANSIENT_TOPIC_PRODUCE) {
       val produceRequest = request.body[TransientTopicProduceRequest]
       produceRequest.data().topicData().forEach(topic => {
@@ -90,8 +88,16 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
           })
         })
       })
-      monitorLogWriter.notifyIfNeeded()
+    } else {
+      monitorQueue.enqueue(new MonitorLog(
+        "OTHER_REQUEST",
+        request.header.apiKey().name,
+        "REQUESTED",
+        currentTime,
+        currentTimeNano
+      ))
     }
+    monitorLogWriter.notifyIfNeeded()
   }
 
   override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
@@ -107,11 +113,10 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
         monitorQueue.enqueue(new MonitorLog(
           "METADATA",
           topicName,
-          "RESPONDED",
+          "COMMITED",
           currentTime,
           currentTimeNano
         ))
-        monitorLogWriter.notifyIfNeeded()
       })
     } else if (response.request.header.apiKey == ApiKeys.PRODUCE) {
       val produceRequest = response.request.body[ProduceRequest]
@@ -137,7 +142,6 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
           })
         })
       })
-      monitorLogWriter.notifyIfNeeded()
     } else if (response.request.header.apiKey == ApiKeys.TRANSIENT_TOPIC_PRODUCE) {
       val produceRequest = response.request.body[TransientTopicProduceRequest]
       produceRequest.data().topicData().forEach(topic => {
@@ -162,8 +166,16 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
           })
         })
       })
-      monitorLogWriter.notifyIfNeeded()
+    } else {
+      monitorQueue.enqueue(new MonitorLog(
+        "OTHER_REQUEST",
+        response.request.header.apiKey().name,
+        "COMMITED",
+        currentTime,
+        currentTimeNano
+      ))
     }
+    monitorLogWriter.notifyIfNeeded()
   }
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}

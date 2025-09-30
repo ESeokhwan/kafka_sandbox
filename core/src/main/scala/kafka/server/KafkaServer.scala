@@ -389,7 +389,7 @@ class KafkaServer(
           new ProduceRequestMonitorBrokerInterceptor(logContext)
         ))
         brokerInterceptors = new BrokerInterceptors(Vector(
-          new ProduceRequestMonitorBrokerInterceptor(logContext),
+          new MonitorLoggingBrokerInterceptor(logContext),
         ))
         brokerInterceptors.init()
 
