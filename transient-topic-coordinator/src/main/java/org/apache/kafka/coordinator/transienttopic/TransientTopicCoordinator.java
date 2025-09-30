@@ -278,9 +278,9 @@ public class TransientTopicCoordinator {
 
     public void updateTransientTopicOffset(
         String topicName,
-        long lastOffset
+        long newCurOffset
     ) {
-        indexCache.updateIndexLastOffset(topicName, lastOffset);
+        indexCache.updateIndexCurOffset(topicName, newCurOffset);
     }
 
     public void freeTransientTopic(

@@ -53,10 +53,10 @@ public class TransientTopicIndexCache {
     }
 
     // TODO: when this method are being executed, evict Index From Cache should be blocked.
-    public void updateIndexLastOffset(String topicName, long lastOffset) {
+    public void updateIndexCurOffset(String topicName, long newCurOffset) {
         indexMap.computeIfPresent(topicName, (k, v) -> {
-            if (lastOffset <= v.curOffset()) return v;
-            return v.withCurOffset(lastOffset);
+            if (newCurOffset <= v.curOffset()) return v;
+            return v.withCurOffset(newCurOffset);
         });
     }
 

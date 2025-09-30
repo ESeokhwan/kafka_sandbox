@@ -57,11 +57,10 @@ public class BasicTransientTopicPartitionPool implements TransientTopicPartition
         return freePartition;
     }
 
-    public void releasePartition(int partition, long usedOffset) {
+    public void releasePartition(int partition, long lastOffset) {
         TransientTopicPartition target = usingPartitions.remove(partition);
         if (target == null) throw new RuntimeException(); // TODO-2: handle exception
 
-        long updatedOffset = target.offset() + usedOffset;
-        freePartitions.add(target.withOffset(updatedOffset));
+        freePartitions.add(target.withOffset(lastOffset + 1));
     }
 }
