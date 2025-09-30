@@ -4,8 +4,11 @@ import kafka.monitor.writer.{MonitorLogWriter, ScrapableConsoleMonitorLogWriteSt
 import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.ApiKeys
-import org.apache.kafka.common.requests.MetadataRequest
+import org.apache.kafka.common.record.MemoryRecords
+import org.apache.kafka.common.requests.{MetadataRequest, ProduceRequest, TransientTopicProduceRequest}
 import org.apache.kafka.common.utils.LogContext
+
+import java.nio.charset.StandardCharsets
 
 class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
@@ -16,7 +19,7 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
     monitorLogWriter = new MonitorLogWriter(
-      monitorQueue, new ScrapableConsoleMonitorLogWriteStrategy(), 1_000_000)
+      monitorQueue, new ScrapableConsoleMonitorLogWriteStrategy(), 1)
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
   }
@@ -38,6 +41,56 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
         ))
         monitorLogWriter.notifyIfNeeded()
       })
+    } else if (request.header.apiKey == ApiKeys.PRODUCE) {
+      val produceRequest = request.body[ProduceRequest]
+      produceRequest.data().topicData().forEach(topic => topic.partitionData.forEach { partition =>
+        val memoryRecords: MemoryRecords = partition.records.asInstanceOf[MemoryRecords]
+        memoryRecords.batches.forEach(batch => {
+          batch.forEach(record => {
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
+            monitorQueue.enqueue(new MonitorLog(
+              "PRODUCE",
+              messageId,
+              "REQUESTED",
+              currentTime,
+              currentTimeNano
+            ))
+          })
+        })
+      })
+      monitorLogWriter.notifyIfNeeded()
+    } else if (request.header.apiKey == ApiKeys.TRANSIENT_TOPIC_PRODUCE) {
+      val produceRequest = request.body[TransientTopicProduceRequest]
+      produceRequest.data().topicData().forEach(topic => {
+        val memoryRecords: MemoryRecords = topic.records.asInstanceOf[MemoryRecords]
+        memoryRecords.batches.forEach(batch => {
+          batch.forEach(record => {
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
+            monitorQueue.enqueue(new MonitorLog(
+              "TRANSIENT_TOPIC_PRODUCE",
+              messageId,
+              "REQUESTED",
+              currentTime,
+              currentTimeNano
+            ))
+          })
+        })
+      })
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
@@ -60,6 +113,56 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
         ))
         monitorLogWriter.notifyIfNeeded()
       })
+    } else if (response.request.header.apiKey == ApiKeys.PRODUCE) {
+      val produceRequest = response.request.body[ProduceRequest]
+      produceRequest.data().topicData().forEach(topic => topic.partitionData.forEach { partition =>
+        val memoryRecords: MemoryRecords = partition.records.asInstanceOf[MemoryRecords]
+        memoryRecords.batches.forEach(batch => {
+          batch.forEach(record => {
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
+            monitorQueue.enqueue(new MonitorLog(
+              "PRODUCE",
+              messageId,
+              "COMMITED",
+              currentTime,
+              currentTimeNano
+            ))
+          })
+        })
+      })
+      monitorLogWriter.notifyIfNeeded()
+    } else if (response.request.header.apiKey == ApiKeys.TRANSIENT_TOPIC_PRODUCE) {
+      val produceRequest = response.request.body[TransientTopicProduceRequest]
+      produceRequest.data().topicData().forEach(topic => {
+        val memoryRecords: MemoryRecords = topic.records.asInstanceOf[MemoryRecords]
+        memoryRecords.batches.forEach(batch => {
+          batch.forEach(record => {
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
+            monitorQueue.enqueue(new MonitorLog(
+              "TRANSIENT_TOPIC_PRODUCE",
+              messageId,
+              "COMMITED",
+              currentTime,
+              currentTimeNano
+            ))
+          })
+        })
+      })
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
