@@ -17,6 +17,7 @@
 
 package kafka.server
 
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
 import kafka.migration.MigrationPropagator
 import kafka.network.{DataPlaneAcceptor, SocketServer}
 import kafka.raft.KafkaRaftManager
@@ -126,6 +127,9 @@ class ControllerServer(
   @volatile var registrationManager: ControllerRegistrationManager = _
   @volatile var registrationChannelManager: NodeToControllerChannelManager = _
 
+  var unusedBrokerInterceptors: BrokerInterceptors = _
+  var brokerInterceptors: BrokerInterceptors = _
+
   private def maybeChangeStatus(from: ProcessStatus, to: ProcessStatus): Boolean = {
     lock.lock()
     try {
@@ -179,13 +183,22 @@ class ControllerServer(
         () => featuresPublisher.features()
       )
 
+      // For testing purposes, backdoor for unused imports
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext)
+      ))
+      brokerInterceptors = new BrokerInterceptors(Vector(
+      ))
+      brokerInterceptors.init()
+
       tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)
       credentialProvider = new CredentialProvider(ScramMechanism.mechanismNames, tokenCache)
       socketServer = new SocketServer(config,
         metrics,
         time,
         credentialProvider,
-        apiVersionManager)
+        apiVersionManager,
+        brokerInterceptors)
 
       val listenerInfo = ListenerInfo
         .create(config.effectiveAdvertisedControllerListeners.map(_.toJava).asJava)
@@ -334,7 +347,8 @@ class ControllerServer(
         config.numIoThreads,
         s"${DataPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent",
         DataPlaneAcceptor.ThreadPrefix,
-        "controller")
+        "controller",
+        brokerInterceptors)
 
       // Set up the metadata cache publisher.
       metadataPublishers.add(metadataCachePublisher)
@@ -517,6 +531,8 @@ class ControllerServer(
         controller.close()
       if (quorumControllerMetrics != null)
         CoreUtils.swallow(quorumControllerMetrics.close(), this)
+      if (brokerInterceptors != null)
+        CoreUtils.swallow(brokerInterceptors.shutdown(), this)
       CoreUtils.swallow(authorizer.foreach(_.close()), this)
       createTopicPolicy.foreach(policy => CoreUtils.swallow(policy.close(), this))
       alterConfigPolicy.foreach(policy => CoreUtils.swallow(policy.close(), this))
