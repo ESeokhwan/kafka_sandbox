@@ -5,7 +5,7 @@ import kafka.monitor.{MonitorLog, MonitorQueue}
 import kafka.network.RequestChannel
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.record.MemoryRecords
-import org.apache.kafka.common.requests.ProduceRequest
+import org.apache.kafka.common.requests.{ProduceRequest, TransientTopicProduceRequest}
 import org.apache.kafka.common.utils.LogContext
 
 import java.nio.charset.StandardCharsets
@@ -52,6 +52,31 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
         })
       })
       monitorLogWriter.notifyIfNeeded()
+    } else if (request.header.apiKey == ApiKeys.TRANSIENT_TOPIC_PRODUCE) {
+      val produceRequest = request.body[TransientTopicProduceRequest]
+      produceRequest.data().topicData().forEach(topic => {
+        val memoryRecords: MemoryRecords = topic.records.asInstanceOf[MemoryRecords]
+        memoryRecords.batches.forEach(batch => {
+          batch.forEach(record => {
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
+            monitorQueue.enqueue(new MonitorLog(
+              "TRANSIENT_TOPIC_PRODUCE",
+              messageId,
+              "REQUESTED",
+              currentTime,
+              currentTimeNano
+            ))
+          })
+        })
+      })
+      monitorLogWriter.notifyIfNeeded()
     }
   }
 
@@ -76,6 +101,31 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
             }
             monitorQueue.enqueue(new MonitorLog(
               "PRODUCE",
+              messageId,
+              "COMMITED",
+              currentTime,
+              currentTimeNano
+            ))
+          })
+        })
+      })
+      monitorLogWriter.notifyIfNeeded()
+    } else if (response.request.header.apiKey == ApiKeys.TRANSIENT_TOPIC_PRODUCE) {
+      val produceRequest = response.request.body[TransientTopicProduceRequest]
+      produceRequest.data().topicData().forEach(topic => {
+        val memoryRecords: MemoryRecords = topic.records.asInstanceOf[MemoryRecords]
+        memoryRecords.batches.forEach(batch => {
+          batch.forEach(record => {
+            val valueBuffer = record.value()
+            val messageId = if (valueBuffer != null) {
+              val bytes = new Array[Byte](Math.min(100, valueBuffer.remaining()))
+              valueBuffer.get(bytes)
+              new String(bytes, StandardCharsets.UTF_8)
+            } else {
+              ""
+            }
+            monitorQueue.enqueue(new MonitorLog(
+              "TRANSIENT_TOPIC_PRODUCE",
               messageId,
               "COMMITED",
               currentTime,
