@@ -41,13 +41,15 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
             } else {
               ""
             }
-            monitorQueue.enqueue(new MonitorLog(
-              "PRODUCE",
-              messageId,
-              "REQUESTED",
-              currentTime,
-              currentTimeNano
-            ))
+            if (messageId.startsWith("R")) {
+              monitorQueue.enqueue(new MonitorLog(
+                "PRODUCE",
+                messageId,
+                "REQUESTED",
+                currentTime,
+                currentTimeNano
+              ))
+            }
           })
         })
       })
@@ -66,13 +68,15 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
             } else {
               ""
             }
-            monitorQueue.enqueue(new MonitorLog(
-              "TRANSIENT_TOPIC_PRODUCE",
-              messageId,
-              "REQUESTED",
-              currentTime,
-              currentTimeNano
-            ))
+            if (messageId.startsWith("R")) {
+              monitorQueue.enqueue(new MonitorLog(
+                "TRANSIENT_TOPIC_PRODUCE",
+                messageId,
+                "REQUESTED",
+                currentTime,
+                currentTimeNano
+              ))
+            }
           })
         })
       })
@@ -99,13 +103,15 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
             } else {
               ""
             }
-            monitorQueue.enqueue(new MonitorLog(
-              "PRODUCE",
-              messageId,
-              "COMMITED",
-              currentTime,
-              currentTimeNano
-            ))
+            if (messageId.startsWith("R")) {
+              monitorQueue.enqueue(new MonitorLog(
+                "PRODUCE",
+                messageId,
+                "COMMITED",
+                currentTime,
+                currentTimeNano
+              ))
+            }
           })
         })
       })
@@ -124,13 +130,15 @@ class ProduceRequestMonitorBrokerInterceptor(val logContext: LogContext) extends
             } else {
               ""
             }
-            monitorQueue.enqueue(new MonitorLog(
-              "TRANSIENT_TOPIC_PRODUCE",
-              messageId,
-              "COMMITED",
-              currentTime,
-              currentTimeNano
-            ))
+            if (messageId.startsWith("R")) {
+              monitorQueue.enqueue(new MonitorLog(
+                "TRANSIENT_TOPIC_PRODUCE",
+                messageId,
+                "COMMITED",
+                currentTime,
+                currentTimeNano
+              ))
+            }
           })
         })
       })
