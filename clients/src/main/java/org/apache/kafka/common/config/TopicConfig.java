@@ -80,6 +80,10 @@ public class TopicConfig {
         "operates independently of \"segment.ms\" and \"segment.bytes\" configurations. " +
         "Moreover, it triggers the rolling of new segment if the retention.ms condition is satisfied.";
 
+    public static final String GLOBAL_SEQUENCE_ENABLED_CONFIG = "global.sequence.enabled";
+    public static final String GLOBAL_SEQUENCE_ENABLED_DOC = "Determines whether records appended to this topic " +
+        "are assigned a topic-wide global sequence and registered in the global sequence index.";
+
     public static final String REMOTE_LOG_STORAGE_ENABLE_CONFIG = "remote.storage.enable";
     public static final String REMOTE_LOG_STORAGE_ENABLE_DOC = "To enable tiered storage for a topic, set this configuration to true. " +
             "To disable tiered storage for a topic that has it enabled, set this configuration to false. " +

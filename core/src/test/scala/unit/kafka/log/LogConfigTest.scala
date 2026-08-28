@@ -74,10 +74,21 @@ class LogConfigTest {
       case TopicConfig.COMPRESSION_ZSTD_LEVEL_CONFIG => assertPropertyInvalid(name, "not_a_number", "-0.1")
       case TopicConfig.REMOTE_LOG_COPY_DISABLE_CONFIG => assertPropertyInvalid(name, "not_a_number", "remove", "0")
       case TopicConfig.REMOTE_LOG_DELETE_ON_DISABLE_CONFIG => assertPropertyInvalid(name, "not_a_number", "remove", "0")
+      case TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG => assertPropertyInvalid(name, "not_a_boolean")
       case LogConfig.INTERNAL_SEGMENT_BYTES_CONFIG => // no op
 
       case _ => assertPropertyInvalid(name, "not_a_number", "-1")
     })
+  }
+
+  @Test
+  def testGlobalSequenceEnabled(): Unit = {
+    assertFalse(new LogConfig(new Properties).globalSequenceEnabled)
+
+    val props = new Properties
+    props.setProperty(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true")
+
+    assertTrue(new LogConfig(props).globalSequenceEnabled)
   }
 
   @Test

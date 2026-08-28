@@ -132,6 +132,7 @@ public class LogConfig extends AbstractConfig {
     public static final double DEFAULT_MIN_CLEANABLE_DIRTY_RATIO = 0.5;
     public static final boolean DEFAULT_UNCLEAN_LEADER_ELECTION_ENABLE = false;
     public static final boolean DEFAULT_PREALLOCATE = false;
+    public static final boolean DEFAULT_GLOBAL_SEQUENCE_ENABLED = false;
 
     public static final boolean DEFAULT_REMOTE_STORAGE_ENABLE = false;
     public static final boolean DEFAULT_REMOTE_LOG_COPY_DISABLE_CONFIG = false;
@@ -235,6 +236,8 @@ public class LogConfig extends AbstractConfig {
                         atLeast(0), MEDIUM, TopicConfig.MESSAGE_TIMESTAMP_BEFORE_MAX_MS_DOC)
                 .define(TopicConfig.MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG, LONG, ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_AFTER_MAX_MS_DEFAULT,
                         atLeast(0), MEDIUM, TopicConfig.MESSAGE_TIMESTAMP_AFTER_MAX_MS_DOC)
+                .define(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, BOOLEAN, DEFAULT_GLOBAL_SEQUENCE_ENABLED,
+                        MEDIUM, TopicConfig.GLOBAL_SEQUENCE_ENABLED_DOC)
                 .define(QuotaConfig.LEADER_REPLICATION_THROTTLED_REPLICAS_CONFIG, LIST, QuotaConfig.LEADER_REPLICATION_THROTTLED_REPLICAS_DEFAULT,
                         ThrottledReplicaListValidator.INSTANCE, MEDIUM, QuotaConfig.LEADER_REPLICATION_THROTTLED_REPLICAS_DOC)
                 .define(QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_CONFIG, LIST, QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_DEFAULT,
@@ -278,6 +281,7 @@ public class LogConfig extends AbstractConfig {
     public final BrokerCompressionType compressionType;
     public final Optional<Compression> compression;
     public final boolean preallocate;
+    public final boolean globalSequenceEnabled;
 
     public final TimestampType messageTimestampType;
 
@@ -329,6 +333,7 @@ public class LogConfig extends AbstractConfig {
         this.compressionType = BrokerCompressionType.forName(getString(TopicConfig.COMPRESSION_TYPE_CONFIG));
         this.compression = getCompression();
         this.preallocate = getBoolean(TopicConfig.PREALLOCATE_CONFIG);
+        this.globalSequenceEnabled = getBoolean(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG);
         this.messageTimestampType = TimestampType.forName(getString(TopicConfig.MESSAGE_TIMESTAMP_TYPE_CONFIG));
         this.messageTimestampBeforeMaxMs = getLong(TopicConfig.MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG);
         this.messageTimestampAfterMaxMs = getLong(TopicConfig.MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG);
@@ -655,6 +660,7 @@ public class LogConfig extends AbstractConfig {
                 ", minInSyncReplicas=" + minInSyncReplicas +
                 ", compressionType='" + compressionType + '\'' +
                 ", preallocate=" + preallocate +
+                ", globalSequenceEnabled=" + globalSequenceEnabled +
                 ", messageTimestampType=" + messageTimestampType +
                 ", leaderReplicationThrottledReplicas=" + leaderReplicationThrottledReplicas +
                 ", followerReplicationThrottledReplicas=" + followerReplicationThrottledReplicas +
