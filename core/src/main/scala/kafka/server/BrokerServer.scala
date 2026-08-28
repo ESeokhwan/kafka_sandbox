@@ -37,6 +37,8 @@ import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.group.{GroupConfigManager, GroupCoordinator, GroupCoordinatorRecordSerde, GroupCoordinatorService}
+import org.apache.kafka.coordinator.globalsequence.metrics.{GlobalSequenceCoordinatorMetrics, GlobalSequenceCoordinatorRuntimeMetrics}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorRecordSerde, GlobalSequenceStateRegistry}
 import org.apache.kafka.coordinator.share.metrics.{ShareCoordinatorMetrics, ShareCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.share.{ShareCoordinator, ShareCoordinatorRecordSerde, ShareCoordinatorService}
 import org.apache.kafka.coordinator.transaction.ProducerIdManager
@@ -128,6 +130,8 @@ class BrokerServer(
   var transactionCoordinator: TransactionCoordinator = _
 
   var shareCoordinator: ShareCoordinator = _
+
+  var globalSequenceCoordinator: GlobalSequenceCoordinator = _
 
   var clientToControllerChannelManager: NodeToControllerChannelManager = _
 
@@ -393,6 +397,9 @@ class BrokerServer(
         new KafkaScheduler(1, true, "transaction-log-manager-"),
         producerIdManagerSupplier, metrics, metadataCache, Time.SYSTEM)
 
+      val globalSequenceStateRegistry = new GlobalSequenceStateRegistry(logContext)
+      globalSequenceCoordinator = createGlobalSequenceCoordinator(globalSequenceStateRegistry)
+
       autoTopicCreationManager = new DefaultAutoTopicCreationManager(
         config, clientToControllerChannelManager, groupCoordinator,
         transactionCoordinator, shareCoordinator)
@@ -455,6 +462,7 @@ class BrokerServer(
         groupCoordinator = groupCoordinator,
         txnCoordinator = transactionCoordinator,
         shareCoordinator = shareCoordinator,
+        globalSequenceCoordinator = globalSequenceCoordinator,
         autoTopicCreationManager = autoTopicCreationManager,
         brokerId = config.nodeId,
         config = config,
@@ -486,6 +494,7 @@ class BrokerServer(
         transactionCoordinator,
         shareCoordinator,
         sharePartitionManager,
+        globalSequenceCoordinator,
         new DynamicConfigPublisher(
           config,
           sharedServer.metadataPublishingFaultHandler,
@@ -697,6 +706,34 @@ class BrokerServer(
       info("Using no-op persister")
       new NoOpStatePersister()
     }
+  }
+
+  private def createGlobalSequenceCoordinator(indexCache: GlobalSequenceStateRegistry): GlobalSequenceCoordinator = {
+    val time = Time.SYSTEM
+    val serde = new GlobalSequenceCoordinatorRecordSerde
+    val timer = new SystemTimerReaper(
+      "global-sequence-coordinator-reaper",
+      new SystemTimer("global-sequence-coordinator")
+    )
+    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
+      time,
+      replicaManager,
+      serde,
+      config.groupCoordinatorConfig.offsetsLoadBufferSize // TODO: change it to global sequence coordinator config
+    )
+    val writer = new CoordinatorPartitionWriter(
+      replicaManager
+    )
+
+    new GlobalSequenceCoordinator.Builder(config.brokerId, config.globalSequenceCoordinatorConfig)
+      .withTime(time)
+      .withTimer(timer)
+      .withLoader(loader)
+      .withWriter(writer)
+      .withIndexCache(indexCache)
+      .withCoordinatorRuntimeMetrics(new GlobalSequenceCoordinatorRuntimeMetrics(metrics))
+      .withCoordinatorMetrics(new GlobalSequenceCoordinatorMetrics(KafkaYammerMetrics.defaultRegistry, metrics))
+      .build()
   }
 
   protected def createRemoteLogManager(listenerInfo: ListenerInfo): Option[RemoteLogManager] = {

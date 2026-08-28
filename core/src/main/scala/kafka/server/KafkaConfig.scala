@@ -34,6 +34,7 @@ import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.security.auth.KafkaPrincipalSerde
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.Utils
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
 import org.apache.kafka.coordinator.group.Group.GroupType
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig
 import org.apache.kafka.coordinator.group.{GroupConfig, GroupCoordinatorConfig}
@@ -203,6 +204,9 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
 
   private val _shareCoordinatorConfig = new ShareCoordinatorConfig(this)
   def shareCoordinatorConfig: ShareCoordinatorConfig = _shareCoordinatorConfig
+
+  private val _globalSequenceCoordinatorConfig = new GlobalSequenceCoordinatorConfig(this)
+  def globalSequenceCoordinatorConfig: GlobalSequenceCoordinatorConfig = _globalSequenceCoordinatorConfig
 
   private val _quotaConfig = new QuotaConfig(this)
   def quotaConfig: QuotaConfig = _quotaConfig
@@ -377,6 +381,9 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
     }
     protocols
   }
+
+  /** ****** Global Index Management Configuration *******/
+  val globalSequenceIndexTopicNumPartitions = getInt(GlobalSequenceCoordinatorConfig.NUM_INDEX_PARTITIONS_CONFIG)
 
   /** ********* Metric Configuration **************/
   val metricNumSamples = getInt(MetricConfigs.METRIC_NUM_SAMPLES_CONFIG)

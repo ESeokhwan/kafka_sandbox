@@ -27,7 +27,7 @@ import org.apache.kafka.clients.CommonClientConfigs
 import org.apache.kafka.clients.admin.EndpointType
 import org.apache.kafka.common.acl.AclOperation
 import org.apache.kafka.common.acl.AclOperation._
-import org.apache.kafka.common.config.ConfigResource
+import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors._
 import org.apache.kafka.common.internals.Topic.{GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME, isInternal}
 import org.apache.kafka.common.internals.{FatalExitError, Plugin, Topic}
@@ -57,6 +57,7 @@ import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.security.token.delegation.{DelegationToken, TokenInformation}
 import org.apache.kafka.common.utils.{ProducerIdAndEpoch, Time}
 import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
 import org.apache.kafka.coordinator.group.{Group, GroupConfig, GroupConfigManager, GroupCoordinator}
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
@@ -93,6 +94,7 @@ class KafkaApis(val requestChannel: RequestChannel,
                 val groupCoordinator: GroupCoordinator,
                 val txnCoordinator: TransactionCoordinator,
                 val shareCoordinator: ShareCoordinator,
+                val globalSequenceCoordinator: GlobalSequenceCoordinator,
                 val autoTopicCreationManager: AutoTopicCreationManager,
                 val brokerId: Int,
                 val config: KafkaConfig,
@@ -401,7 +403,15 @@ class KafkaApis(val requestChannel: RequestChannel,
     val nonExistingTopicResponses = mutable.Map[TopicIdPartition, PartitionResponse]()
     val invalidRequestResponses = mutable.Map[TopicIdPartition, PartitionResponse]()
     val authorizedRequestInfo = mutable.Map[TopicIdPartition, MemoryRecords]()
+    val globalSequenceEnabledPartitions = mutable.Set[TopicIdPartition]()
     val topicIdToPartitionData = new mutable.ArrayBuffer[(TopicIdPartition, ProduceRequestData.PartitionProduceData)]
+
+    def isGlobalSequenceEnabledTopic(topicName: String): Boolean = {
+      configRepository
+        .topicConfig(topicName)
+        .getProperty(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "false")
+        .toBoolean
+    }
 
     produceRequest.data.topicData.forEach { topic =>
       topic.partitionData.forEach { partition =>
@@ -435,6 +445,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         try {
           ProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
           authorizedRequestInfo += (topicIdPartition -> memoryRecords)
+          if (isGlobalSequenceEnabledTopic(topicIdPartition.topic)) globalSequenceEnabledPartitions += topicIdPartition
         } catch {
           case e: ApiException =>
             invalidRequestResponses += topicIdPartition -> new PartitionResponse(Errors.forException(e))

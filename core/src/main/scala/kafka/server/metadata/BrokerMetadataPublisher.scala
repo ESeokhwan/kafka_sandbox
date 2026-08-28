@@ -26,6 +26,7 @@ import kafka.utils.Logging
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.TimeoutException
 import org.apache.kafka.common.internals.Topic
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
 import org.apache.kafka.coordinator.group.GroupCoordinator
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.coordinator.transaction.TransactionLogConfig
@@ -75,6 +76,7 @@ class BrokerMetadataPublisher(
   txnCoordinator: TransactionCoordinator,
   shareCoordinator: ShareCoordinator,
   sharePartitionManager: SharePartitionManager,
+  globalSequenceCoordinator: GlobalSequenceCoordinator,
   var dynamicConfigPublisher: DynamicConfigPublisher,
   dynamicClientQuotaPublisher: DynamicClientQuotaPublisher,
   dynamicTopicClusterQuotaPublisher: DynamicTopicClusterQuotaPublisher,
@@ -211,6 +213,18 @@ class BrokerMetadataPublisher(
           case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating share " +
             s"coordinator with deleted partitions in $deltaName", t)
         }
+        try {
+          updateCoordinator(newImage,
+            delta,
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            globalSequenceCoordinator.onElection,
+            (partitionIndex, leaderEpochOpt) =>
+              globalSequenceCoordinator.onResignation(partitionIndex, toOptionalInt(leaderEpochOpt))
+          )
+        } catch {
+          case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating global sequence " +
+            s"coordinator with local changes in $deltaName", t)
+        }
       }
 
       // Apply configuration deltas.
@@ -244,6 +258,14 @@ class BrokerMetadataPublisher(
         shareCoordinator.onNewMetadataImage(newImage, delta)
       } catch {
         case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating share " +
+          s"coordinator with local changes in $deltaName", t)
+      }
+
+      try {
+        // Propagate the new image to the global sequence coordinator.
+        globalSequenceCoordinator.onNewMetadataImage(newImage, delta)
+      } catch {
+        case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating global sequence " +
           s"coordinator with local changes in $deltaName", t)
       }
 
@@ -385,6 +407,12 @@ class BrokerMetadataPublisher(
         .orElse(config.shareCoordinatorConfig.shareCoordinatorStateTopicNumPartitions()))
     } catch {
       case t: Throwable => fatalFaultHandler.handleFault("Error starting Share coordinator", t)
+    }
+    try {
+      // Start the global sequence coordinator.
+      globalSequenceCoordinator.startup(() => config.globalSequenceIndexTopicNumPartitions)
+    } catch {
+      case t: Throwable => fatalFaultHandler.handleFault("Error starting Global sequence coordinator", t)
     }
   }
 

@@ -902,6 +902,7 @@ project(':server') {
     implementation project(':storage')
     implementation project(':group-coordinator')
     implementation project(':transaction-coordinator')
+    implementation project(':global-sequence-coordinator')
     implementation project(':raft')
     implementation project(':share-coordinator')
     implementation project(':storage:storage-api')
@@ -1006,6 +1007,7 @@ project(':core') {
     implementation project(':group-coordinator:group-coordinator-api')
     implementation project(':group-coordinator')
     implementation project(':transaction-coordinator')
+    implementation project(':global-sequence-coordinator')
     implementation project(':metadata')
     implementation project(':storage:storage-api')
     implementation project(':tools:tools-api')
@@ -1648,6 +1650,79 @@ project(':transaction-coordinator') {
   }
 }
 
+project(':global-sequence-coordinator') {
+    base {
+        archivesName = "kafka-global-sequence-coordinator"
+    }
+
+    configurations {
+        generator
+    }
+
+    dependencies {
+        implementation project(':server-common')
+        implementation project(':coordinator-common')
+        implementation project(':clients')
+        implementation project(':metadata')
+        implementation project(':storage')
+        implementation libs.jacksonDatabind
+        implementation libs.jacksonJDK8Datatypes
+        implementation libs.slf4jApi
+        implementation libs.metrics
+
+        testImplementation testLog4j2Libs
+        testImplementation libs.junitJupiter
+        testImplementation libs.mockitoCore
+        testImplementation project(':clients').sourceSets.test.output
+        testImplementation project(':test-common:test-common-runtime')
+        testImplementation project(':test-common:test-common-internal-api')
+
+        testRuntimeOnly runtimeTestLibs
+
+        generator project(':generator')
+    }
+
+    sourceSets {
+        main {
+            java {
+                srcDirs = ["src/main/java", "${projectDir}/build/generated/main/java"]
+            }
+        }
+        test {
+            java {
+                srcDirs = ["src/test/java"]
+            }
+        }
+    }
+
+    checkstyle {
+        configProperties = checkstyleConfigProperties("import-control-global-sequence-coordinator.xml")
+    }
+
+    task processMessages(type:JavaExec) {
+        mainClass = "org.apache.kafka.message.MessageGenerator"
+        classpath = configurations.generator
+        args = [ "-p", "org.apache.kafka.coordinator.globalsequence.generated",
+                 "-o", "${projectDir}/build/generated/main/java/org/apache/kafka/coordinator/globalsequence/generated",
+                 "-i", "src/main/resources/common/message",
+                 "-m", "MessageDataGenerator", "JsonConverterGenerator",
+                 "-t", "CoordinatorRecordTypeGenerator", "CoordinatorRecordJsonConvertersGenerator"
+        ]
+        inputs.dir("src/main/resources/common/message")
+                .withPropertyName("messages")
+                .withPathSensitivity(PathSensitivity.RELATIVE)
+        outputs.cacheIf { true }
+        outputs.dir("${projectDir}/build/generated/main/java/org/apache/kafka/coordinator/globalsequence/generated")
+    }
+
+    compileJava.dependsOn 'processMessages'
+    srcJar.dependsOn 'processMessages'
+
+    javadoc {
+        enabled = false
+    }
+}
+
 project(':coordinator-common') {
   base {
     archivesName = "kafka-coordinator-common"
@@ -2001,6 +2076,7 @@ project(':clients:clients-integration-tests') {
     implementation project(':group-coordinator')
     implementation project(':group-coordinator:group-coordinator-api')
     implementation project(':transaction-coordinator')
+    implementation project(':global-sequence-coordinator')
 
     testImplementation libs.junitJupiter
     testImplementation libs.junitPlatformSuiteEngine
@@ -2270,6 +2346,7 @@ project(':storage') {
     testImplementation project(':server-common')
     testImplementation project(':server-common').sourceSets.test.output
     testImplementation project(':transaction-coordinator')
+    testImplementation project(':global-sequence-coordinator')
     testImplementation libs.hamcrest
     testImplementation libs.jacksonDatabindYaml
     testImplementation libs.junitJupiter
@@ -2433,6 +2510,7 @@ project(':tools') {
     implementation project(':connect:runtime')
     implementation project(':tools:tools-api')
     implementation project(':transaction-coordinator')
+    implementation project(':global-sequence-coordinator')
     implementation project(':group-coordinator')
     implementation project(':coordinator-common')
     implementation project(':share-coordinator')
@@ -2842,6 +2920,7 @@ project(':streams:integration-tests') {
     testImplementation project(':test-common:test-common-runtime')
     testImplementation project(':tools')
     testImplementation project(':transaction-coordinator')
+    implementation project(':global-sequence-coordinator')
     testImplementation libs.bcpkix
     testImplementation libs.hamcrest
     testImplementation libs.junitJupiter
@@ -3338,6 +3417,7 @@ project(':jmh-benchmarks') {
     implementation project(':storage')
     implementation project(':streams')
     implementation project(':transaction-coordinator')
+    implementation project(':global-sequence-coordinator')
     implementation project(':core')
     implementation project(':connect:api')
     implementation project(':connect:transforms')

@@ -35,6 +35,7 @@ import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.metadata.{FeatureLevelRecord, PartitionRecord, RemoveTopicRecord, TopicRecord}
 import org.apache.kafka.common.test.{KafkaClusterTestKit, TestKitNodes}
 import org.apache.kafka.common.utils.Exit
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
 import org.apache.kafka.coordinator.group.GroupCoordinator
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.image.{AclsImage, ClientQuotasImage, ClusterImageTest, ConfigurationsImage, DelegationTokenImage, FeaturesImage, MetadataDelta, MetadataImage, MetadataImageTest, MetadataProvenance, ProducerIdsImage, ScramImage, TopicsImage}
@@ -203,6 +204,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       mock(classOf[SharePartitionManager]),
+      mock(classOf[GlobalSequenceCoordinator]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
       mock(classOf[DynamicTopicClusterQuotaPublisher]),
@@ -267,6 +269,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       mock(classOf[SharePartitionManager]),
+      mock(classOf[GlobalSequenceCoordinator]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
       mock(classOf[DynamicTopicClusterQuotaPublisher]),
@@ -308,6 +311,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       sharePartitionManager,
+      mock(classOf[GlobalSequenceCoordinator]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
       mock(classOf[DynamicTopicClusterQuotaPublisher]),
