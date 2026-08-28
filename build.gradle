@@ -1674,6 +1674,7 @@ project(':global-sequence-coordinator') {
         testImplementation libs.junitJupiter
         testImplementation libs.mockitoCore
         testImplementation project(':clients').sourceSets.test.output
+        testImplementation project(':coordinator-common').sourceSets.test.output
         testImplementation project(':test-common:test-common-runtime')
         testImplementation project(':test-common:test-common-internal-api')
 

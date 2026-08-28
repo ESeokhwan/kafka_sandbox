@@ -55,11 +55,11 @@ public class GlobalSequenceStateRegistry {
         ));
     }
 
-    public GlobalSequenceIndexRecord addSequenceIndex(Uuid topicId, int numRecords, int partitionIndex, long partitionOffset, long producerId, short producerEpoch, int baseSequence) {
-        GlobalSequenceState topicState = stateMap.get(topicId);
+    public GlobalSequenceIndexRecord addSequenceIndex(GlobalSequenceAppendRequest request) {
+        GlobalSequenceState topicState = stateMap.get(request.topicId());
         if (topicState == null) return null;
 
-        return topicState.addSequenceIndex(topicId, numRecords, partitionIndex, partitionOffset, producerId, producerEpoch, baseSequence);
+        return topicState.addSequenceIndex(request);
     }
 
     public GlobalSequenceState evictIndexTableFromCache(Uuid topicId) {
@@ -84,16 +84,13 @@ public class GlobalSequenceStateRegistry {
             return sequenceIndex.toArray(new GlobalSequenceIndexRecord[0]);
         }
 
-        public GlobalSequenceIndexRecord addSequenceIndex(Uuid topicId, int numRecords, int partitionIndex, long partitionOffset, long producerId, short producerEpoch, int baseSequence) {
+        public GlobalSequenceIndexRecord addSequenceIndex(GlobalSequenceAppendRequest request) {
             GlobalSequenceIndexRecord newIndexRecord = new GlobalSequenceIndexRecord(
-                    topicId,
-                    offsetSequencer.nextOffset(),
-                    numRecords,
-                    partitionIndex,
-                    partitionOffset,
-                    producerId,
-                    producerEpoch,
-                    baseSequence
+                request.topicId(),
+                offsetSequencer.nextOffset(),
+                request.recordCount(),
+                request.partitionIndex(),
+                request.partitionBaseOffset()
             );
             sequenceIndex.add(newIndexRecord);
             return newIndexRecord;

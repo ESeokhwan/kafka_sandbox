@@ -67,6 +67,10 @@
             <allow pkg="org.apache.kafka.timeline" />
             <allow pkg="org.apache.kafka.coordinator.common" />
             <allow pkg="org.apache.kafka.coordinator.common.runtime" />
+            <allow pkg="org.junit.jupiter.api" />
+            <allow pkg="org.junit.jupiter.params" />
+            <allow pkg="org.junit.jupiter.provider" />
+            <allow pkg="org.mockito" />
             <allow pkg="com.google.re2j" />
             <allow pkg="com.dynatrace.hash4j.hashing" />
             <allow pkg="org.apache.kafka.metadata" />

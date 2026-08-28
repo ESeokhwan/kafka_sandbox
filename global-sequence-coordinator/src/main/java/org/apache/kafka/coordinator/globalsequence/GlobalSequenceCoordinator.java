@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.coordinator.globalsequence;
 
-import java.util.Map;
 import java.util.concurrent.Executors;
 
 import org.apache.kafka.common.TopicPartition;
@@ -44,7 +43,6 @@ import org.slf4j.Logger;
 
 import java.time.Duration;
 import java.util.OptionalInt;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntSupplier;
 
@@ -58,7 +56,6 @@ public class GlobalSequenceCoordinator {
         private Time time;
         private Timer timer;
         private GlobalSequenceStateRegistry indexCache;
-        private Map<String, GlobalOffsetSequencer> offsetSequencers;
         private CoordinatorRuntimeMetrics coordinatorRuntimeMetrics;
         private GlobalSequenceCoordinatorMetrics coordinatorMetrics;
 

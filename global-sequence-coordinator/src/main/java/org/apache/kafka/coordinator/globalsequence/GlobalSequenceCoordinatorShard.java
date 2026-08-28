@@ -17,8 +17,6 @@
 package org.apache.kafka.coordinator.globalsequence;
 
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.requests.RequestContext;
 import org.apache.kafka.common.requests.TransactionResult;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
@@ -39,7 +37,6 @@ import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.slf4j.Logger;
 
-import java.util.ArrayList;
 import java.util.List;
 
 public class GlobalSequenceCoordinatorShard implements CoordinatorShard<CoordinatorRecord> {
@@ -177,35 +174,26 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         this.metricsShard = metricsShard;
     }
 
-    public CoordinatorResult<GlobalSequenceIndexRecord, CoordinatorRecord> addNewIndexRecord(
-        RequestContext context,
-        Uuid topicId,
-        int numRecords,
-        int partitionIndex,
-        long partitionOffset,
-        long producerId,
-        short producerEpoch,
-        int baseSequence
+    CoordinatorResult<GlobalSequenceAppendResult, CoordinatorRecord> appendIndex(
+        GlobalSequenceAppendRequest request
     ) {
-        GlobalSequenceIndexRecord newIndexRecord = stateRegistry.addSequenceIndex(topicId, numRecords, partitionIndex, partitionOffset, producerId, producerEpoch, baseSequence);
+        GlobalSequenceIndexRecord newIndexRecord = stateRegistry.addSequenceIndex(request);
 
-        List<CoordinatorRecord> records = new ArrayList<>();
-        records.add(toCoordinatorRecord(newIndexRecord));
-        return new CoordinatorResult<>(records, newIndexRecord);
+        return new CoordinatorResult<>(
+            List.of(toCoordinatorRecord(newIndexRecord)),
+            newIndexRecord.toAppendResult(false)
+        );
     }
 
     private CoordinatorRecord toCoordinatorRecord(GlobalSequenceIndexRecord indexRecord) {
         GlobalSequenceIndexLogKey key = new GlobalSequenceIndexLogKey();
         key.setTopicId(indexRecord.topicId());
-        key.setGlobalOffset(indexRecord.globalOffset());
+        key.setGlobalOffset(indexRecord.globalBaseOffset());
 
         GlobalSequenceIndexLogValue value = new GlobalSequenceIndexLogValue();
-        value.setRecordsCount(indexRecord.numRecords());
-        value.setPartitionIndex(indexRecord.partition());
-        value.setPartitionOffset(indexRecord.partitionOffset());
-        value.setProducerId(indexRecord.producerId());
-        value.setProducerEpoch(indexRecord.producerEpoch());
-        value.setBaseSequence(indexRecord.baseSequence());
+        value.setRecordsCount(indexRecord.recordCount());
+        value.setPartitionIndex(indexRecord.partitionIndex());
+        value.setPartitionOffset(indexRecord.partitionBaseOffset());
 
         return CoordinatorRecord.record(key, new ApiMessageAndVersion(value, (short) 0));
     }

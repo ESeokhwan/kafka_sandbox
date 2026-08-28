@@ -16,9 +16,24 @@
  */
 package org.apache.kafka.coordinator.globalsequence;
 
-public interface GlobalOffsetSequencer {
-
-    void startup();
-
-    long nextOffset();
+/**
+ * The global range allocated to one physical record batch.
+ *
+ * @param globalBaseOffset the first global offset allocated to the batch
+ * @param recordCount the size of the allocated global range
+ * @param duplicate whether an existing index allocation was returned without writing a new record
+ */
+public record GlobalSequenceAppendResult(
+    long globalBaseOffset,
+    int recordCount,
+    boolean duplicate
+) {
+    public GlobalSequenceAppendResult {
+        if (globalBaseOffset < 0) {
+            throw new IllegalArgumentException("globalBaseOffset must not be negative");
+        }
+        if (recordCount <= 0) {
+            throw new IllegalArgumentException("recordCount must be positive");
+        }
+    }
 }

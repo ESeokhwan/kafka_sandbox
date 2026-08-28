@@ -25,12 +25,6 @@
     {"name": "PartitionIndex", "type":  "int32", "versions":  "0+",
       "about": "The index of assigned partition" },
     {"name":  "PartitionOffset", "type": "int64", "versions": "0+",
-      "about": "The offset of the record in the assigned partition" },
-    {"name":  "ProducerId", "type":  "int64", "versions": "0+", "default": "-1",
-      "about": "The producer ID used for index deduplication."},
-    {"name": "ProducerEpoch", "type": "int16", "versions": "0+", "default": "-1",
-      "about": "The producer epoch used for index deduplication."},
-    {"name": "BaseSequence", "type": "int32", "versions": "0+", "default": "-1",
-      "about": "The producer base sequence used for index deduplication."}
+      "about": "The offset of the record in the assigned partition" }
   ]
 }
