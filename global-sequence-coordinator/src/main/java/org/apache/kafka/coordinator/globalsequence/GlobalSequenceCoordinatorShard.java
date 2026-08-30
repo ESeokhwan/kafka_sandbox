@@ -17,17 +17,20 @@
 package org.apache.kafka.coordinator.globalsequence;
 
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.protocol.ApiMessage;
 import org.apache.kafka.common.requests.TransactionResult;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorExecutor;
-import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorMetricsShard;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorResult;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShard;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShardBuilder;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorTimer;
+import org.apache.kafka.coordinator.globalsequence.generated.CoordinatorRecordType;
 import org.apache.kafka.coordinator.globalsequence.generated.GlobalSequenceIndexLogKey;
 import org.apache.kafka.coordinator.globalsequence.generated.GlobalSequenceIndexLogValue;
 import org.apache.kafka.coordinator.globalsequence.metrics.GlobalSequenceCoordinatorMetrics;
@@ -35,6 +38,7 @@ import org.apache.kafka.coordinator.globalsequence.metrics.GlobalSequenceCoordin
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.timeline.SnapshotRegistry;
+
 import org.slf4j.Logger;
 
 import java.util.List;
@@ -51,7 +55,6 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         private CoordinatorExecutor<CoordinatorRecord> executor;
         private CoordinatorMetrics coordinatorMetrics;
         private TopicPartition topicPartition;
-        private GlobalSequenceStateRegistry stateRegistry;
 
         public Builder(GlobalSequenceCoordinatorConfig config) {
             this.config = config;
@@ -99,11 +102,6 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
             return this;
         }
 
-        public Builder withStateRegistry(GlobalSequenceStateRegistry stateRegistry) {
-            this.stateRegistry = stateRegistry;
-            return this;
-        }
-
         @SuppressWarnings("NPathComplexity")
         @Override
         public GlobalSequenceCoordinatorShard build() {
@@ -122,15 +120,12 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
                 throw new IllegalArgumentException("CoordinatorMetrics must be set and be of type GlobalSequenceCoordinatorMetrics.");
             if (topicPartition == null)
                 throw new IllegalArgumentException("TopicPartition must be set.");
-            if (stateRegistry == null)
-                throw new IllegalArgumentException("StateRegistry must be set.");
-
             GlobalSequenceCoordinatorMetricsShard metricsShard = ((GlobalSequenceCoordinatorMetrics) coordinatorMetrics)
                     .newMetricsShard(snapshotRegistry, topicPartition);
 
             return new GlobalSequenceCoordinatorShard(
                     logContext,
-                    stateRegistry,
+                    new GlobalSequenceStateRegistry(snapshotRegistry),
                     time,
                     timer,
                     config,
@@ -177,11 +172,18 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     CoordinatorResult<GlobalSequenceAppendResult, CoordinatorRecord> appendIndex(
         GlobalSequenceAppendRequest request
     ) {
-        GlobalSequenceIndexRecord newIndexRecord = stateRegistry.addSequenceIndex(request);
+        GlobalSequenceStateRegistry.PreparedAppend preparedAppend = stateRegistry.prepareAppend(request);
+
+        if (preparedAppend.duplicate()) {
+            return new CoordinatorResult<>(
+                List.of(),
+                preparedAppend.indexRecord().toAppendResult(true)
+            );
+        }
 
         return new CoordinatorResult<>(
-            List.of(toCoordinatorRecord(newIndexRecord)),
-            newIndexRecord.toAppendResult(false)
+            List.of(toCoordinatorRecord(preparedAppend.indexRecord())),
+            preparedAppend.indexRecord().toAppendResult(false)
         );
     }
 
@@ -211,7 +213,35 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
 
     @Override
     public void replay(long offset, long producerId, short producerEpoch, CoordinatorRecord record) throws RuntimeException {
-        // TODO: Implement here
+        ApiMessage key = record.key();
+        final CoordinatorRecordType recordType;
+        try {
+            recordType = CoordinatorRecordType.fromId(key.apiKey());
+        } catch (UnsupportedVersionException exception) {
+            throw new IllegalStateException("Unknown global sequence coordinator record type " + key.apiKey(), exception);
+        }
+
+        if (recordType != CoordinatorRecordType.GLOBAL_SEQUENCE_INDEX_LOG ||
+            !(key instanceof GlobalSequenceIndexLogKey indexKey)) {
+            throw new IllegalStateException("Unexpected global sequence coordinator record " + record);
+        }
+
+        ApiMessageAndVersion value = record.value();
+        if (value == null) {
+            stateRegistry.replayTombstone(indexKey.topicId(), indexKey.globalOffset());
+            return;
+        }
+        if (value.version() != 0 || !(value.message() instanceof GlobalSequenceIndexLogValue indexValue)) {
+            throw new IllegalStateException("Unexpected global sequence index record value " + value);
+        }
+
+        stateRegistry.replay(new GlobalSequenceIndexRecord(
+            indexKey.topicId(),
+            indexKey.globalOffset(),
+            indexValue.recordsCount(),
+            indexValue.partitionIndex(),
+            indexValue.partitionOffset()
+        ));
     }
 
     @Override

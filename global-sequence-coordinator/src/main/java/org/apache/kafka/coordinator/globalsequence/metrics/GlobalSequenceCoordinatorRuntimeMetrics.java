@@ -17,11 +17,11 @@
 package org.apache.kafka.coordinator.globalsequence.metrics;
 
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 
 import java.util.Objects;
 import java.util.function.Supplier;
-import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
-import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 
 public class GlobalSequenceCoordinatorRuntimeMetrics implements CoordinatorRuntimeMetrics {
 

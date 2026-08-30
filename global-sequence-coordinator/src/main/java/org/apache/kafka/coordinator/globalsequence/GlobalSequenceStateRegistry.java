@@ -17,25 +17,24 @@
 package org.apache.kafka.coordinator.globalsequence;
 
 import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.utils.LogContext;
-import org.slf4j.Logger;
+import org.apache.kafka.timeline.SnapshotRegistry;
+import org.apache.kafka.timeline.TimelineHashMap;
 
-import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Objects;
 
+/**
+ * The replay-driven state owned by one global sequence coordinator shard.
+ */
 public class GlobalSequenceStateRegistry {
+    private final SnapshotRegistry snapshotRegistry;
+    private final TimelineHashMap<Uuid, GlobalSequenceState> stateMap;
 
-    private final Logger log;
-
-    private final Map<Uuid, GlobalSequenceState> stateMap = new ConcurrentHashMap<>();
-
-    public GlobalSequenceStateRegistry(LogContext logContext) {
-        this.log = logContext.logger(GlobalSequenceStateRegistry.class);
+    public GlobalSequenceStateRegistry(SnapshotRegistry snapshotRegistry) {
+        this.snapshotRegistry = Objects.requireNonNull(snapshotRegistry, "snapshotRegistry");
+        this.stateMap = new TimelineHashMap<>(snapshotRegistry, 0);
     }
-
-    public void startup() {}
 
     public GlobalSequenceState getState(Uuid topicId) {
         return stateMap.get(topicId);
@@ -45,55 +44,164 @@ public class GlobalSequenceStateRegistry {
         return stateMap.containsKey(topicId);
     }
 
-    public void createNewTopicState(Uuid topicId) {
-        if (stateMap.containsKey(topicId)) {
-            return;
-        }
-        stateMap.put(topicId, new GlobalSequenceState(
-                new ConcurrentLinkedQueue<>(),
-                new BasicGlobalOffsetSequencer() // TODO: implement it first
-        ));
-    }
-
-    public GlobalSequenceIndexRecord addSequenceIndex(GlobalSequenceAppendRequest request) {
-        GlobalSequenceState topicState = stateMap.get(request.topicId());
-        if (topicState == null) return null;
-
-        return topicState.addSequenceIndex(request);
-    }
-
-    public GlobalSequenceState evictIndexTableFromCache(Uuid topicId) {
+    private void createNewTopicState(Uuid topicId) {
+        validateTopicId(topicId);
         if (!stateMap.containsKey(topicId)) {
-            // TODO: add Exception Logic
-            return null;
+            stateMap.put(topicId, new GlobalSequenceState(snapshotRegistry));
+        }
+    }
+
+    PreparedAppend prepareAppend(GlobalSequenceAppendRequest request) {
+        Objects.requireNonNull(request, "request");
+        GlobalSequenceState state = stateMap.get(request.topicId());
+        if (state == null) {
+            return new PreparedAppend(new GlobalSequenceIndexRecord(
+                request.topicId(),
+                0L,
+                request.recordCount(),
+                request.partitionIndex(),
+                request.partitionBaseOffset()
+            ), false);
+        }
+        return state.prepareAppend(request);
+    }
+
+    void replay(GlobalSequenceIndexRecord indexRecord) {
+        Objects.requireNonNull(indexRecord, "indexRecord");
+        createNewTopicState(indexRecord.topicId());
+        stateMap.get(indexRecord.topicId()).replay(indexRecord);
+    }
+
+    void replayTombstone(Uuid topicId, long globalBaseOffset) {
+        validateTopicId(topicId);
+        if (globalBaseOffset < 0) {
+            throw new IllegalArgumentException("globalBaseOffset must not be negative");
         }
 
-        return stateMap.remove(topicId);
+        GlobalSequenceState state = stateMap.get(topicId);
+        if (state != null) {
+            state.replayTombstone(globalBaseOffset);
+        }
     }
+
+    private static void validateTopicId(Uuid topicId) {
+        Objects.requireNonNull(topicId, "topicId");
+        if (Uuid.ZERO_UUID.equals(topicId)) {
+            throw new IllegalArgumentException("topicId must not be ZERO_UUID");
+        }
+    }
+
+    record PreparedAppend(GlobalSequenceIndexRecord indexRecord, boolean duplicate) { }
 
     public static class GlobalSequenceState {
-        private final Queue<GlobalSequenceIndexRecord> sequenceIndex;
+        private final TimelineHashMap<Long, GlobalSequenceIndexRecord> sequenceByGlobalBaseOffset;
+        private final TimelineHashMap<PhysicalBatchId, GlobalSequenceIndexRecord> sequenceByPhysicalBatch;
         private final GlobalOffsetSequencer offsetSequencer;
 
-        public GlobalSequenceState(Queue<GlobalSequenceIndexRecord> sequenceIndex, GlobalOffsetSequencer offsetSequencer) {
-            this.sequenceIndex = sequenceIndex;
-            this.offsetSequencer = offsetSequencer;
+        GlobalSequenceState(SnapshotRegistry snapshotRegistry) {
+            this.sequenceByGlobalBaseOffset = new TimelineHashMap<>(snapshotRegistry, 0);
+            this.sequenceByPhysicalBatch = new TimelineHashMap<>(snapshotRegistry, 0);
+            this.offsetSequencer = new BasicGlobalOffsetSequencer(snapshotRegistry);
         }
 
         public GlobalSequenceIndexRecord[] getSequenceIndexAsArray() {
-            return sequenceIndex.toArray(new GlobalSequenceIndexRecord[0]);
+            GlobalSequenceIndexRecord[] records = sequenceByGlobalBaseOffset.values().toArray(
+                new GlobalSequenceIndexRecord[0]
+            );
+            Arrays.sort(records, Comparator.comparingLong(GlobalSequenceIndexRecord::globalBaseOffset));
+            return records;
         }
 
-        public GlobalSequenceIndexRecord addSequenceIndex(GlobalSequenceAppendRequest request) {
-            GlobalSequenceIndexRecord newIndexRecord = new GlobalSequenceIndexRecord(
+        long nextGlobalOffset() {
+            return offsetSequencer.nextOffset();
+        }
+
+        PreparedAppend prepareAppend(GlobalSequenceAppendRequest request) {
+            GlobalSequenceIndexRecord existing = sequenceByPhysicalBatch.get(request.physicalBatchId());
+            if (existing != null) {
+                if (existing.recordCount() != request.recordCount()) {
+                    throw new IllegalArgumentException(
+                        "Physical batch " + request.physicalBatchId() + " is already allocated with recordCount=" +
+                            existing.recordCount() + ", but the retry has recordCount=" + request.recordCount()
+                    );
+                }
+                return new PreparedAppend(existing, true);
+            }
+
+            return new PreparedAppend(new GlobalSequenceIndexRecord(
                 request.topicId(),
                 offsetSequencer.nextOffset(),
                 request.recordCount(),
                 request.partitionIndex(),
                 request.partitionBaseOffset()
+            ), false);
+        }
+
+        void replay(GlobalSequenceIndexRecord indexRecord) {
+            PhysicalBatchId physicalBatchId = new PhysicalBatchId(
+                indexRecord.topicId(),
+                indexRecord.partitionIndex(),
+                indexRecord.partitionBaseOffset()
             );
-            sequenceIndex.add(newIndexRecord);
-            return newIndexRecord;
+            GlobalSequenceIndexRecord byPhysicalBatch = sequenceByPhysicalBatch.get(physicalBatchId);
+            GlobalSequenceIndexRecord byGlobalBaseOffset = sequenceByGlobalBaseOffset.get(
+                indexRecord.globalBaseOffset()
+            );
+
+            if (byPhysicalBatch != null && !byPhysicalBatch.equals(indexRecord)) {
+                throw new IllegalStateException(
+                    "Conflicting allocation for physical batch " + physicalBatchId + ": existing=" +
+                        byPhysicalBatch + ", replayed=" + indexRecord
+                );
+            }
+            if (byGlobalBaseOffset != null && !byGlobalBaseOffset.equals(indexRecord)) {
+                throw new IllegalStateException(
+                    "Conflicting allocation at global base offset " + indexRecord.globalBaseOffset() +
+                        ": existing=" + byGlobalBaseOffset + ", replayed=" + indexRecord
+                );
+            }
+            if (byPhysicalBatch != null || byGlobalBaseOffset != null) {
+                if (byPhysicalBatch == null || byGlobalBaseOffset == null) {
+                    throw new IllegalStateException("Global sequence indexes are inconsistent for " + indexRecord);
+                }
+                return;
+            }
+
+            validateReplayOrder(indexRecord);
+            sequenceByGlobalBaseOffset.put(indexRecord.globalBaseOffset(), indexRecord);
+            sequenceByPhysicalBatch.put(physicalBatchId, indexRecord);
+            offsetSequencer.replayAllocation(indexRecord.globalBaseOffset(), indexRecord.recordCount());
+        }
+
+        void replayTombstone(long globalBaseOffset) {
+            GlobalSequenceIndexRecord existing = sequenceByGlobalBaseOffset.get(globalBaseOffset);
+            if (existing == null) {
+                return;
+            }
+
+            PhysicalBatchId physicalBatchId = new PhysicalBatchId(
+                existing.topicId(),
+                existing.partitionIndex(),
+                existing.partitionBaseOffset()
+            );
+            if (!existing.equals(sequenceByPhysicalBatch.get(physicalBatchId))) {
+                throw new IllegalStateException("Global sequence indexes are inconsistent for " + existing);
+            }
+
+            // Tombstones define the end of the retry-safety window for this physical batch. They
+            // must not be emitted until a durable per-topic watermark is added to the log schema;
+            // otherwise compaction could make the in-memory next offset unrecoverable on restart.
+            sequenceByGlobalBaseOffset.remove(globalBaseOffset);
+            sequenceByPhysicalBatch.remove(physicalBatchId);
+        }
+
+        private void validateReplayOrder(GlobalSequenceIndexRecord candidate) {
+            if (candidate.globalBaseOffset() < offsetSequencer.nextOffset()) {
+                throw new IllegalStateException(
+                    "Overlapping or out-of-order global sequence allocation: nextGlobalOffset=" +
+                        offsetSequencer.nextOffset() + ", replayed=" + candidate
+                );
+            }
         }
     }
 }

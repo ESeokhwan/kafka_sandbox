@@ -18,7 +18,13 @@ package org.apache.kafka.coordinator.globalsequence;
 
 public interface GlobalOffsetSequencer {
 
-    void startup();
-
+    /**
+     * Returns the first offset available for a new allocation without changing the state.
+     */
     long nextOffset();
+
+    /**
+     * Advances the sequencer after a persisted allocation is replayed.
+     */
+    void replayAllocation(long globalBaseOffset, int recordCount);
 }

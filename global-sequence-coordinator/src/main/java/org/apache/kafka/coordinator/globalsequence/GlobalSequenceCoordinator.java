@@ -16,8 +16,6 @@
  */
 package org.apache.kafka.coordinator.globalsequence;
 
-import java.util.concurrent.Executors;
-
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
@@ -27,11 +25,11 @@ import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
-import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShardBuilderSupplier;
 import org.apache.kafka.coordinator.common.runtime.MultiThreadedEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.PartitionWriter;
@@ -39,10 +37,12 @@ import org.apache.kafka.coordinator.globalsequence.metrics.GlobalSequenceCoordin
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.server.util.timer.Timer;
+
 import org.slf4j.Logger;
 
 import java.time.Duration;
 import java.util.OptionalInt;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntSupplier;
 
@@ -55,7 +55,6 @@ public class GlobalSequenceCoordinator {
         private CoordinatorLoader<CoordinatorRecord> loader;
         private Time time;
         private Timer timer;
-        private GlobalSequenceStateRegistry indexCache;
         private CoordinatorRuntimeMetrics coordinatorRuntimeMetrics;
         private GlobalSequenceCoordinatorMetrics coordinatorMetrics;
 
@@ -87,11 +86,6 @@ public class GlobalSequenceCoordinator {
             return this;
         }
 
-        public Builder withIndexCache(GlobalSequenceStateRegistry indexCache) {
-            this.indexCache = indexCache;
-            return this;
-        }
-
         public Builder withCoordinatorRuntimeMetrics(CoordinatorRuntimeMetrics coordinatorRuntimeMetrics) {
             this.coordinatorRuntimeMetrics = coordinatorRuntimeMetrics;
             return this;
@@ -114,8 +108,6 @@ public class GlobalSequenceCoordinator {
                 throw new IllegalArgumentException("Time must be set.");
             if (timer == null)
                 throw new IllegalArgumentException("Timer must be set.");
-            if (indexCache == null)
-                throw new IllegalArgumentException("IndexCache must be set.");
             if (coordinatorRuntimeMetrics == null)
                 throw new IllegalArgumentException("CoordinatorRuntimeMetrics must be set.");
             if (coordinatorMetrics == null)
@@ -125,8 +117,7 @@ public class GlobalSequenceCoordinator {
             LogContext logContext = new LogContext(String.format("[%s] ", logPrefix));
 
             CoordinatorShardBuilderSupplier<GlobalSequenceCoordinatorShard, CoordinatorRecord> supplier = () ->
-                    new GlobalSequenceCoordinatorShard.Builder(config)
-                            .withStateRegistry(indexCache);
+                    new GlobalSequenceCoordinatorShard.Builder(config);
 
             CoordinatorEventProcessor processor = new MultiThreadedEventProcessor(
                     logContext,
@@ -159,7 +150,6 @@ public class GlobalSequenceCoordinator {
                     logContext,
                     config,
                     runtime,
-                    indexCache,
                     coordinatorMetrics
             );
         }
@@ -170,8 +160,6 @@ public class GlobalSequenceCoordinator {
     private final GlobalSequenceCoordinatorConfig config;
 
     private final CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime;
-
-    private final GlobalSequenceStateRegistry stateRegistry;
 
     private final GlobalSequenceCoordinatorMetrics coordinatorMetrics;
 
@@ -190,18 +178,12 @@ public class GlobalSequenceCoordinator {
             LogContext logContext,
             GlobalSequenceCoordinatorConfig config,
             CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime,
-            GlobalSequenceStateRegistry stateRegistry,
             GlobalSequenceCoordinatorMetrics coordinatorMetrics
     ) {
         this.log = logContext.logger(GlobalSequenceCoordinator.class);
         this.config = config;
         this.runtime = runtime;
-        this.stateRegistry = stateRegistry;
         this.coordinatorMetrics = coordinatorMetrics;
-    }
-
-    public GlobalSequenceStateRegistry indexCache() {
-        return stateRegistry;
     }
 
     /**
@@ -219,10 +201,6 @@ public class GlobalSequenceCoordinator {
 
     private int partitionFor(Uuid topicId) {
         return Utils.abs(topicId.hashCode()) % numPartitions;
-    }
-
-    public boolean existsInIndexCache(Uuid topicId) {
-        return stateRegistry.contains(topicId);
     }
 
     public void onElection(
@@ -259,7 +237,6 @@ public class GlobalSequenceCoordinator {
 
         log.info("Starting up.");
         numPartitions = globalSequenceIndexTopicPartitionCount.getAsInt();
-        stateRegistry.startup();
         isActive.set(true);
         log.info("Startup complete.");
     }

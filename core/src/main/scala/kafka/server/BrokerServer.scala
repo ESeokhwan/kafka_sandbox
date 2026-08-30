@@ -38,7 +38,7 @@ import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.group.{GroupConfigManager, GroupCoordinator, GroupCoordinatorRecordSerde, GroupCoordinatorService}
 import org.apache.kafka.coordinator.globalsequence.metrics.{GlobalSequenceCoordinatorMetrics, GlobalSequenceCoordinatorRuntimeMetrics}
-import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorRecordSerde, GlobalSequenceStateRegistry}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorRecordSerde}
 import org.apache.kafka.coordinator.share.metrics.{ShareCoordinatorMetrics, ShareCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.share.{ShareCoordinator, ShareCoordinatorRecordSerde, ShareCoordinatorService}
 import org.apache.kafka.coordinator.transaction.ProducerIdManager
@@ -397,8 +397,7 @@ class BrokerServer(
         new KafkaScheduler(1, true, "transaction-log-manager-"),
         producerIdManagerSupplier, metrics, metadataCache, Time.SYSTEM)
 
-      val globalSequenceStateRegistry = new GlobalSequenceStateRegistry(logContext)
-      globalSequenceCoordinator = createGlobalSequenceCoordinator(globalSequenceStateRegistry)
+      globalSequenceCoordinator = createGlobalSequenceCoordinator()
 
       autoTopicCreationManager = new DefaultAutoTopicCreationManager(
         config, clientToControllerChannelManager, groupCoordinator,
@@ -708,7 +707,7 @@ class BrokerServer(
     }
   }
 
-  private def createGlobalSequenceCoordinator(indexCache: GlobalSequenceStateRegistry): GlobalSequenceCoordinator = {
+  private def createGlobalSequenceCoordinator(): GlobalSequenceCoordinator = {
     val time = Time.SYSTEM
     val serde = new GlobalSequenceCoordinatorRecordSerde
     val timer = new SystemTimerReaper(
@@ -730,7 +729,6 @@ class BrokerServer(
       .withTimer(timer)
       .withLoader(loader)
       .withWriter(writer)
-      .withIndexCache(indexCache)
       .withCoordinatorRuntimeMetrics(new GlobalSequenceCoordinatorRuntimeMetrics(metrics))
       .withCoordinatorMetrics(new GlobalSequenceCoordinatorMetrics(KafkaYammerMetrics.defaultRegistry, metrics))
       .build()

@@ -38,9 +38,28 @@ public record GlobalSequenceIndexRecord(
         if (globalBaseOffset < 0) {
             throw new IllegalArgumentException("globalBaseOffset must not be negative");
         }
+        validateGlobalRange(globalBaseOffset, recordCount);
     }
 
     public GlobalSequenceAppendResult toAppendResult(boolean duplicate) {
         return new GlobalSequenceAppendResult(globalBaseOffset, recordCount, duplicate);
+    }
+
+    public long globalEndOffsetExclusive() {
+        return endOffsetExclusive(globalBaseOffset, recordCount);
+    }
+
+    private static void validateGlobalRange(long globalBaseOffset, int recordCount) {
+        endOffsetExclusive(globalBaseOffset, recordCount);
+    }
+
+    static long endOffsetExclusive(long globalBaseOffset, int recordCount) {
+        if (globalBaseOffset < 0) {
+            throw new IllegalArgumentException("globalBaseOffset must not be negative");
+        }
+        if (recordCount <= 0) {
+            throw new IllegalArgumentException("recordCount must be positive");
+        }
+        return Math.addExact(globalBaseOffset, recordCount);
     }
 }

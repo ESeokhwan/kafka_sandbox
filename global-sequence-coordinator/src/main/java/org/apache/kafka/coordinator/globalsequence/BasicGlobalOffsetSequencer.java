@@ -16,14 +16,31 @@
  */
 package org.apache.kafka.coordinator.globalsequence;
 
-public class BasicGlobalOffsetSequencer implements GlobalOffsetSequencer {
-    @Override
-    public void startup() {
+import org.apache.kafka.timeline.SnapshotRegistry;
+import org.apache.kafka.timeline.TimelineLong;
 
+import java.util.Objects;
+
+public class BasicGlobalOffsetSequencer implements GlobalOffsetSequencer {
+    private final TimelineLong nextOffset;
+
+    public BasicGlobalOffsetSequencer(SnapshotRegistry snapshotRegistry) {
+        this.nextOffset = new TimelineLong(Objects.requireNonNull(snapshotRegistry, "snapshotRegistry"));
     }
 
     @Override
     public long nextOffset() {
-        return 0;
+        return nextOffset.get();
+    }
+
+    @Override
+    public void replayAllocation(long globalBaseOffset, int recordCount) {
+        long allocationEndOffset = GlobalSequenceIndexRecord.endOffsetExclusive(
+            globalBaseOffset,
+            recordCount
+        );
+        if (allocationEndOffset > nextOffset.get()) {
+            nextOffset.set(allocationEndOffset);
+        }
     }
 }
