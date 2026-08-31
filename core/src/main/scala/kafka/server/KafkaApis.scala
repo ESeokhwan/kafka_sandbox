@@ -95,6 +95,7 @@ class KafkaApis(val requestChannel: RequestChannel,
                 val txnCoordinator: TransactionCoordinator,
                 val shareCoordinator: ShareCoordinator,
                 val globalSequenceCoordinator: GlobalSequenceCoordinator,
+                val globalSequenceIndexRoutingManager: GlobalSequenceIndexRoutingManager,
                 val autoTopicCreationManager: AutoTopicCreationManager,
                 val brokerId: Int,
                 val config: KafkaConfig,
@@ -240,6 +241,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.INITIALIZE_SHARE_GROUP_STATE => handleInitializeShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.READ_SHARE_GROUP_STATE => handleReadShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.WRITE_SHARE_GROUP_STATE => handleWriteShareGroupStateRequest(request).exceptionally(handleError)
+        case ApiKeys.WRITE_GLOBAL_SEQUENCE_INDEX => handleWriteGlobalSequenceIndexRequest(request).exceptionally(handleError)
         case ApiKeys.DELETE_SHARE_GROUP_STATE => handleDeleteShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.READ_SHARE_GROUP_STATE_SUMMARY => handleReadShareGroupStateSummaryRequest(request).exceptionally(handleError)
         case ApiKeys.DESCRIBE_SHARE_GROUP_OFFSETS => handleDescribeShareGroupOffsetsRequest(request).exceptionally(handleError)
@@ -546,8 +548,7 @@ class KafkaApis(val requestChannel: RequestChannel,
           None
         } else globalSequenceRecordCounts.get(topicIdPartition).map { recordCount =>
           val appendFuture: CompletableFuture[GlobalSequenceAppendResult] = try {
-            // TODO: Forward this request when the target index shard is led by another broker.
-            globalSequenceCoordinator.appendIndex(new GlobalSequenceAppendRequest(
+            globalSequenceIndexRoutingManager.appendIndex(new GlobalSequenceAppendRequest(
               topicIdPartition.topicId(),
               topicIdPartition.partition(),
               partitionResponse.baseOffset,
@@ -3641,6 +3642,44 @@ class KafkaApis(val requestChannel: RequestChannel,
           requestHelper.sendMaybeThrottle(request, new WriteShareGroupStateResponse(response))
         }
       }
+  }
+
+  def handleWriteGlobalSequenceIndexRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    val writeRequest = request.body[WriteGlobalSequenceIndexRequest]
+
+    if (!authorizeClusterOperation(request, CLUSTER_ACTION)) {
+      requestHelper.sendMaybeThrottle(request, writeRequest.getErrorResponse(
+        Errors.CLUSTER_AUTHORIZATION_FAILED.exception()
+      ))
+      return CompletableFuture.completedFuture[Unit](())
+    }
+
+    val data = writeRequest.data
+    val appendRequest = new GlobalSequenceAppendRequest(
+      data.topicId,
+      data.physicalPartition,
+      data.physicalBaseOffset,
+      data.recordCount
+    )
+
+    val appendFuture = try {
+      globalSequenceCoordinator.appendIndex(appendRequest)
+    } catch {
+      case exception: Throwable => CompletableFuture.failedFuture[GlobalSequenceAppendResult](exception)
+    }
+
+    appendFuture.handle[Unit] { (result, exception) =>
+      if (exception != null) {
+        requestHelper.sendMaybeThrottle(request, writeRequest.getErrorResponse(exception))
+      } else {
+        requestHelper.sendMaybeThrottle(request, new WriteGlobalSequenceIndexResponse(
+          new WriteGlobalSequenceIndexResponseData()
+            .setGlobalBaseOffset(result.globalBaseOffset)
+            .setRecordCount(result.recordCount)
+            .setDuplicateBatch(result.duplicate)
+        ))
+      }
+    }
   }
 
   def handleDeleteShareGroupStateRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {

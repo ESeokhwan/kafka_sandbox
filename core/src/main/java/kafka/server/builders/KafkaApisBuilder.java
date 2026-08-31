@@ -22,6 +22,7 @@ import kafka.network.RequestChannel;
 import kafka.server.AutoTopicCreationManager;
 import kafka.server.FetchManager;
 import kafka.server.ForwardingManager;
+import kafka.server.GlobalSequenceIndexRoutingManager;
 import kafka.server.KafkaApis;
 import kafka.server.KafkaConfig;
 import kafka.server.QuotaFactory.QuotaManagers;
@@ -55,6 +56,7 @@ public class KafkaApisBuilder {
     private GroupCoordinator groupCoordinator = null;
     private TransactionCoordinator txnCoordinator = null;
     private GlobalSequenceCoordinator globalSequenceCoordinator = null;
+    private GlobalSequenceIndexRoutingManager globalSequenceIndexRoutingManager = null;
     private AutoTopicCreationManager autoTopicCreationManager = null;
     private int brokerId = 0;
     private KafkaConfig config = null;
@@ -106,6 +108,13 @@ public class KafkaApisBuilder {
 
     public KafkaApisBuilder setGlobalSequenceCoordinator(GlobalSequenceCoordinator globalSequenceCoordinator) {
         this.globalSequenceCoordinator = globalSequenceCoordinator;
+        return this;
+    }
+
+    public KafkaApisBuilder setGlobalSequenceIndexRoutingManager(
+        GlobalSequenceIndexRoutingManager globalSequenceIndexRoutingManager
+    ) {
+        this.globalSequenceIndexRoutingManager = globalSequenceIndexRoutingManager;
         return this;
     }
 
@@ -203,6 +212,9 @@ public class KafkaApisBuilder {
         if (txnCoordinator == null) throw new RuntimeException("You must set txnCoordinator");
         if (shareCoordinator == null) throw new RuntimeException("You must set shareCoordinator");
         if (globalSequenceCoordinator == null) throw new RuntimeException("You must set globalSequenceCoordinator");
+        if (globalSequenceIndexRoutingManager == null) {
+            throw new RuntimeException("You must set globalSequenceIndexRoutingManager");
+        }
         if (autoTopicCreationManager == null) throw new RuntimeException("You must set autoTopicCreationManager");
         if (config == null) config = new KafkaConfig(Map.of());
         if (configRepository == null) throw new RuntimeException("You must set configRepository");
@@ -223,6 +235,7 @@ public class KafkaApisBuilder {
                              txnCoordinator,
                              shareCoordinator,
                              globalSequenceCoordinator,
+                             globalSequenceIndexRoutingManager,
                              autoTopicCreationManager,
                              brokerId,
                              config,

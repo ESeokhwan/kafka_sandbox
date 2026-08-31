@@ -130,6 +130,8 @@ class KafkaApisTest extends Logging {
   private val shareCoordinator: ShareCoordinator = mock(classOf[ShareCoordinator])
   private val txnCoordinator: TransactionCoordinator = mock(classOf[TransactionCoordinator])
   private val globalSequenceCoordinator: GlobalSequenceCoordinator = mock(classOf[GlobalSequenceCoordinator])
+  private val globalSequenceIndexRoutingManager: GlobalSequenceIndexRoutingManager =
+    mock(classOf[GlobalSequenceIndexRoutingManager])
   private val forwardingManager: ForwardingManager = mock(classOf[ForwardingManager])
   private val autoTopicCreationManager: AutoTopicCreationManager = mock(classOf[AutoTopicCreationManager])
 
@@ -196,6 +198,7 @@ class KafkaApisTest extends Logging {
       txnCoordinator = txnCoordinator,
       shareCoordinator = shareCoordinator,
       globalSequenceCoordinator = globalSequenceCoordinator,
+      globalSequenceIndexRoutingManager = globalSequenceIndexRoutingManager,
       autoTopicCreationManager = autoTopicCreationManager,
       brokerId = brokerId,
       config = config,
@@ -2380,13 +2383,13 @@ class KafkaApisTest extends Logging {
     mockProduceAppendResponse(Map(
       topicIdPartition -> new PartitionResponse(Errors.NONE, 42L, RecordBatch.NO_TIMESTAMP, 0L)
     ))
-    when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]())).thenReturn(indexFuture)
+    when(globalSequenceIndexRoutingManager.appendIndex(any[GlobalSequenceAppendRequest]())).thenReturn(indexFuture)
     kafkaApis = createKafkaApis(configRepository = configRepository)
 
     kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
 
     val appendRequest = ArgumentCaptor.forClass(classOf[GlobalSequenceAppendRequest])
-    verify(globalSequenceCoordinator).appendIndex(appendRequest.capture())
+    verify(globalSequenceIndexRoutingManager).appendIndex(appendRequest.capture())
     assertEquals(new GlobalSequenceAppendRequest(topicId, 2, 42L, 3), appendRequest.getValue)
     verifyNoInteractions(requestChannel)
 
@@ -2416,7 +2419,7 @@ class KafkaApisTest extends Logging {
 
     kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
 
-    verify(globalSequenceCoordinator, never()).appendIndex(any[GlobalSequenceAppendRequest]())
+    verify(globalSequenceIndexRoutingManager, never()).appendIndex(any[GlobalSequenceAppendRequest]())
     val response = verifyNoThrottling[ProduceResponse](request)
     assertEquals(Errors.NONE.code, response.data.responses.asScala.head.partitionResponses.asScala.head.errorCode)
   }
@@ -2444,7 +2447,7 @@ class KafkaApisTest extends Logging {
 
     kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
 
-    verify(globalSequenceCoordinator, never()).appendIndex(any[GlobalSequenceAppendRequest]())
+    verify(globalSequenceIndexRoutingManager, never()).appendIndex(any[GlobalSequenceAppendRequest]())
     val response = verifyNoThrottling[ProduceResponse](request)
     assertEquals(
       Errors.REQUEST_TIMED_OUT.code,
@@ -2473,10 +2476,10 @@ class KafkaApisTest extends Logging {
       topicIdPartition -> new PartitionResponse(Errors.NONE, 5L, RecordBatch.NO_TIMESTAMP, 0L)
     ))
     if (failSynchronously) {
-      when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]()))
+      when(globalSequenceIndexRoutingManager.appendIndex(any[GlobalSequenceAppendRequest]()))
         .thenThrow(Errors.COORDINATOR_NOT_AVAILABLE.exception())
     } else {
-      when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]()))
+      when(globalSequenceIndexRoutingManager.appendIndex(any[GlobalSequenceAppendRequest]()))
         .thenReturn(CompletableFuture.failedFuture(Errors.COORDINATOR_NOT_AVAILABLE.exception()))
     }
     kafkaApis = createKafkaApis(configRepository = configRepository)
@@ -2487,6 +2490,72 @@ class KafkaApisTest extends Logging {
     val partitionResponse = response.data.responses.asScala.head.partitionResponses.asScala.head
     assertEquals(Errors.COORDINATOR_NOT_AVAILABLE.code, partitionResponse.errorCode)
     assertEquals(ProduceResponse.INVALID_OFFSET, partitionResponse.baseOffset)
+  }
+
+  @Test
+  def testHandleWriteGlobalSequenceIndexRequest(): Unit = {
+    val topicId = Uuid.randomUuid()
+    val wireData = new WriteGlobalSequenceIndexRequestData()
+      .setTopicId(topicId)
+      .setPhysicalPartition(2)
+      .setPhysicalBaseOffset(42L)
+      .setRecordCount(3)
+    val request = buildRequest(new WriteGlobalSequenceIndexRequest.Builder(wireData).build())
+    val appendFuture = new CompletableFuture[GlobalSequenceAppendResult]()
+    when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]())).thenReturn(appendFuture)
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val appendRequest = ArgumentCaptor.forClass(classOf[GlobalSequenceAppendRequest])
+    verify(globalSequenceCoordinator).appendIndex(appendRequest.capture())
+    assertEquals(new GlobalSequenceAppendRequest(topicId, 2, 42L, 3), appendRequest.getValue)
+
+    appendFuture.complete(new GlobalSequenceAppendResult(10L, 3, true))
+    val response = verifyNoThrottling[WriteGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.NONE.code, response.data.errorCode)
+    assertEquals(10L, response.data.globalBaseOffset)
+    assertEquals(3, response.data.recordCount)
+    assertTrue(response.data.duplicateBatch)
+  }
+
+  @Test
+  def testHandleWriteGlobalSequenceIndexRequestFailure(): Unit = {
+    val wireData = new WriteGlobalSequenceIndexRequestData()
+      .setTopicId(Uuid.randomUuid())
+      .setPhysicalPartition(2)
+      .setPhysicalBaseOffset(42L)
+      .setRecordCount(3)
+    val request = buildRequest(new WriteGlobalSequenceIndexRequest.Builder(wireData).build())
+    when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]()))
+      .thenReturn(CompletableFuture.failedFuture(Errors.NOT_COORDINATOR.exception()))
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val response = verifyNoThrottling[WriteGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.NOT_COORDINATOR.code, response.data.errorCode)
+    assertEquals(-1L, response.data.globalBaseOffset)
+  }
+
+  @Test
+  def testHandleWriteGlobalSequenceIndexRequestAuthorizationFailure(): Unit = {
+    val wireData = new WriteGlobalSequenceIndexRequestData()
+      .setTopicId(Uuid.randomUuid())
+      .setPhysicalPartition(2)
+      .setPhysicalBaseOffset(42L)
+      .setRecordCount(3)
+    val request = buildRequest(new WriteGlobalSequenceIndexRequest.Builder(wireData).build())
+    val authorizer = mock(classOf[Authorizer])
+    when(authorizer.authorize(any[RequestContext], any[util.List[Action]]))
+      .thenReturn(util.List.of(AuthorizationResult.DENIED))
+
+    kafkaApis = createKafkaApis(authorizer = Some(authorizer))
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceCoordinator, never()).appendIndex(any[GlobalSequenceAppendRequest]())
+    val response = verifyNoThrottling[WriteGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.CLUSTER_AUTHORIZATION_FAILED.code, response.data.errorCode)
   }
 
   @Test

@@ -193,6 +193,8 @@ import org.apache.kafka.common.message.VoteRequestDataJsonConverter;
 import org.apache.kafka.common.message.VoteResponseDataJsonConverter;
 import org.apache.kafka.common.message.WriteShareGroupStateRequestDataJsonConverter;
 import org.apache.kafka.common.message.WriteShareGroupStateResponseDataJsonConverter;
+import org.apache.kafka.common.message.WriteGlobalSequenceIndexRequestDataJsonConverter;
+import org.apache.kafka.common.message.WriteGlobalSequenceIndexResponseDataJsonConverter;
 import org.apache.kafka.common.message.WriteTxnMarkersRequestDataJsonConverter;
 import org.apache.kafka.common.message.WriteTxnMarkersResponseDataJsonConverter;
 import org.apache.kafka.common.network.ClientInformation;
@@ -376,6 +378,8 @@ import org.apache.kafka.common.requests.VoteRequest;
 import org.apache.kafka.common.requests.VoteResponse;
 import org.apache.kafka.common.requests.WriteShareGroupStateRequest;
 import org.apache.kafka.common.requests.WriteShareGroupStateResponse;
+import org.apache.kafka.common.requests.WriteGlobalSequenceIndexRequest;
+import org.apache.kafka.common.requests.WriteGlobalSequenceIndexResponse;
 import org.apache.kafka.common.requests.WriteTxnMarkersRequest;
 import org.apache.kafka.common.requests.WriteTxnMarkersResponse;
 
@@ -569,6 +573,8 @@ public class RequestConvertToJson {
                 return VoteRequestDataJsonConverter.write(((VoteRequest) request).data(), request.version());
             case WRITE_SHARE_GROUP_STATE:
                 return WriteShareGroupStateRequestDataJsonConverter.write(((WriteShareGroupStateRequest) request).data(), request.version());
+            case WRITE_GLOBAL_SEQUENCE_INDEX:
+                return WriteGlobalSequenceIndexRequestDataJsonConverter.write(((WriteGlobalSequenceIndexRequest) request).data(), request.version());
             case WRITE_TXN_MARKERS:
                 return WriteTxnMarkersRequestDataJsonConverter.write(((WriteTxnMarkersRequest) request).data(), request.version());
             default:
@@ -755,6 +761,8 @@ public class RequestConvertToJson {
                 return VoteResponseDataJsonConverter.write(((VoteResponse) response).data(), version);
             case WRITE_SHARE_GROUP_STATE:
                 return WriteShareGroupStateResponseDataJsonConverter.write(((WriteShareGroupStateResponse) response).data(), version);
+            case WRITE_GLOBAL_SEQUENCE_INDEX:
+                return WriteGlobalSequenceIndexResponseDataJsonConverter.write(((WriteGlobalSequenceIndexResponse) response).data(), version);
             case WRITE_TXN_MARKERS:
                 return WriteTxnMarkersResponseDataJsonConverter.write(((WriteTxnMarkersResponse) response).data(), version);
             default:

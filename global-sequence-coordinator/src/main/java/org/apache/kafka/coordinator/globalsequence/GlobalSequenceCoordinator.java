@@ -200,7 +200,8 @@ public class GlobalSequenceCoordinator {
         return new TopicPartition(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, partitionFor(topicId));
     }
 
-    private int partitionFor(Uuid topicId) {
+    public int partitionFor(Uuid topicId) {
+        throwIfNotActive();
         return Utils.abs(topicId.hashCode()) % numPartitions;
     }
 

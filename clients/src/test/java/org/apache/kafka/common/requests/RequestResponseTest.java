@@ -246,6 +246,8 @@ import org.apache.kafka.common.message.UpdateRaftVoterRequestData;
 import org.apache.kafka.common.message.UpdateRaftVoterResponseData;
 import org.apache.kafka.common.message.VoteRequestData;
 import org.apache.kafka.common.message.VoteResponseData;
+import org.apache.kafka.common.message.WriteGlobalSequenceIndexRequestData;
+import org.apache.kafka.common.message.WriteGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.message.WriteShareGroupStateRequestData;
 import org.apache.kafka.common.message.WriteShareGroupStateResponseData;
 import org.apache.kafka.common.network.Send;
@@ -1080,6 +1082,7 @@ public class RequestResponseTest {
             case DESCRIBE_SHARE_GROUP_OFFSETS: return createDescribeShareGroupOffsetsRequest(version);
             case ALTER_SHARE_GROUP_OFFSETS: return createAlterShareGroupOffsetsRequest(version);
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsRequest(version);
+            case WRITE_GLOBAL_SEQUENCE_INDEX: return createWriteGlobalSequenceIndexRequest(version);
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
     }
@@ -1175,6 +1178,7 @@ public class RequestResponseTest {
             case DESCRIBE_SHARE_GROUP_OFFSETS: return createDescribeShareGroupOffsetsResponse();
             case ALTER_SHARE_GROUP_OFFSETS: return createAlterShareGroupOffsetsResponse();
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsResponse();
+            case WRITE_GLOBAL_SEQUENCE_INDEX: return createWriteGlobalSequenceIndexResponse();
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
     }
@@ -3757,6 +3761,22 @@ public class RequestResponseTest {
                     .setPartition(0)
                     .setErrorCode(Errors.NONE.code())))));
         return new WriteShareGroupStateResponse(data);
+    }
+
+    private WriteGlobalSequenceIndexRequest createWriteGlobalSequenceIndexRequest(short version) {
+        return new WriteGlobalSequenceIndexRequest.Builder(new WriteGlobalSequenceIndexRequestData()
+            .setTopicId(TOPIC_ID)
+            .setPhysicalPartition(2)
+            .setPhysicalBaseOffset(42L)
+            .setRecordCount(3))
+            .build(version);
+    }
+
+    private WriteGlobalSequenceIndexResponse createWriteGlobalSequenceIndexResponse() {
+        return new WriteGlobalSequenceIndexResponse(new WriteGlobalSequenceIndexResponseData()
+            .setGlobalBaseOffset(10L)
+            .setRecordCount(3)
+            .setDuplicateBatch(true));
     }
 
     private DeleteShareGroupStateRequest createDeleteShareGroupStateRequest(short version) {

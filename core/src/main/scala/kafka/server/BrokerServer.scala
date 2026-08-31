@@ -132,6 +132,7 @@ class BrokerServer(
   var shareCoordinator: ShareCoordinator = _
 
   var globalSequenceCoordinator: GlobalSequenceCoordinator = _
+  var globalSequenceIndexRoutingManager: GlobalSequenceIndexRoutingManager = _
 
   var clientToControllerChannelManager: NodeToControllerChannelManager = _
 
@@ -398,6 +399,8 @@ class BrokerServer(
         producerIdManagerSupplier, metrics, metadataCache, Time.SYSTEM)
 
       globalSequenceCoordinator = createGlobalSequenceCoordinator()
+      globalSequenceIndexRoutingManager = createGlobalSequenceIndexRoutingManager()
+      globalSequenceIndexRoutingManager.start()
 
       autoTopicCreationManager = new DefaultAutoTopicCreationManager(
         config, clientToControllerChannelManager, groupCoordinator,
@@ -462,6 +465,7 @@ class BrokerServer(
         txnCoordinator = transactionCoordinator,
         shareCoordinator = shareCoordinator,
         globalSequenceCoordinator = globalSequenceCoordinator,
+        globalSequenceIndexRoutingManager = globalSequenceIndexRoutingManager,
         autoTopicCreationManager = autoTopicCreationManager,
         brokerId = config.nodeId,
         config = config,
@@ -734,6 +738,25 @@ class BrokerServer(
       .build()
   }
 
+  private def createGlobalSequenceIndexRoutingManager(): GlobalSequenceIndexRoutingManager = {
+    new GlobalSequenceIndexRoutingManager(
+      config.brokerId,
+      globalSequenceCoordinator,
+      metadataCache,
+      config.interBrokerListenerName,
+      NetworkUtils.buildNetworkClient(
+        "GlobalSequenceIndex",
+        config,
+        metrics,
+        time,
+        new LogContext(s"[GlobalSequenceIndexRoutingManager broker=${config.brokerId}] ")
+      ),
+      time,
+      config.requestTimeoutMs,
+      GlobalSequenceIndexRoutingManager.DEFAULT_RETRY_BACKOFF_MS
+    )
+  }
+
   protected def createRemoteLogManager(listenerInfo: ListenerInfo): Option[RemoteLogManager] = {
     if (config.remoteLogManagerConfig.isRemoteStorageSystemEnabled) {
       val listenerName = config.remoteLogManagerConfig.remoteLogMetadataManagerListenerName()
@@ -822,6 +845,10 @@ class BrokerServer(
         CoreUtils.swallow(groupCoordinator.shutdown(), this)
       if (shareCoordinator != null)
         CoreUtils.swallow(shareCoordinator.shutdown(), this)
+      if (globalSequenceIndexRoutingManager != null)
+        CoreUtils.swallow(globalSequenceIndexRoutingManager.close(), this)
+      if (globalSequenceCoordinator != null)
+        CoreUtils.swallow(globalSequenceCoordinator.shutdown(), this)
 
       if (assignmentsManager != null)
         CoreUtils.swallow(assignmentsManager.close(), this)

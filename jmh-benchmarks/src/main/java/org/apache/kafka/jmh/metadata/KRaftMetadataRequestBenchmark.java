@@ -25,6 +25,7 @@ import kafka.server.ClientRequestQuotaManager;
 import kafka.server.ControllerMutationQuotaManager;
 import kafka.server.FetchManager;
 import kafka.server.ForwardingManager;
+import kafka.server.GlobalSequenceIndexRoutingManager;
 import kafka.server.KafkaApis;
 import kafka.server.KafkaConfig;
 import kafka.server.QuotaFactory;
@@ -107,6 +108,8 @@ public class KRaftMetadataRequestBenchmark {
     private final GroupCoordinator groupCoordinator = Mockito.mock(GroupCoordinator.class);
     private final TransactionCoordinator transactionCoordinator = Mockito.mock(TransactionCoordinator.class);
     private final GlobalSequenceCoordinator globalSequenceCoordinator = Mockito.mock(GlobalSequenceCoordinator.class);
+    private final GlobalSequenceIndexRoutingManager globalSequenceIndexRoutingManager =
+        Mockito.mock(GlobalSequenceIndexRoutingManager.class);
     private final AutoTopicCreationManager autoTopicCreationManager = Mockito.mock(AutoTopicCreationManager.class);
     private final Metrics metrics = new Metrics();
     private final int brokerId = 1;
@@ -192,6 +195,7 @@ public class KRaftMetadataRequestBenchmark {
                 setGroupCoordinator(groupCoordinator).
                 setTxnCoordinator(transactionCoordinator).
                 setGlobalSequenceCoordinator(globalSequenceCoordinator).
+                setGlobalSequenceIndexRoutingManager(globalSequenceIndexRoutingManager).
                 setAutoTopicCreationManager(autoTopicCreationManager).
                 setBrokerId(brokerId).
                 setConfig(config).
