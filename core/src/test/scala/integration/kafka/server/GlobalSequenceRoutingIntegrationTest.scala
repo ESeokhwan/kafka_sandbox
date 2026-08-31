@@ -19,6 +19,7 @@ package kafka.server
 import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.test.api.{ClusterConfigProperty, ClusterTest, Type}
@@ -32,6 +33,67 @@ import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters._
 
 class GlobalSequenceRoutingIntegrationTest {
+
+  @ClusterTest(
+    types = Array(Type.KRAFT),
+    brokers = 2,
+    controllers = 1,
+    serverProperties = Array(
+      new ClusterConfigProperty(
+        key = GlobalSequenceCoordinatorConfig.NUM_INDEX_PARTITIONS_CONFIG,
+        value = "1"
+      ),
+      new ClusterConfigProperty(
+        key = GlobalSequenceCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG,
+        value = "2"
+      )
+    )
+  )
+  def testProduceAutoCreatesGlobalSequenceIndexTopic(cluster: ClusterInstance): Unit = {
+    val dataTopic = "global-sequence-auto-create"
+    val dataTopicDefinition = new NewTopic(dataTopic, 1, 2.toShort)
+      .configs(util.Map.of(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true"))
+
+    val admin = cluster.admin()
+    try {
+      admin.createTopics(util.List.of(dataTopicDefinition)).all().get(30, TimeUnit.SECONDS)
+      cluster.waitForTopic(dataTopic, 1)
+    } finally {
+      admin.close()
+    }
+
+    val producer = cluster.producer[Array[Byte], Array[Byte]]()
+    try {
+      producer.send(new ProducerRecord(
+        dataTopic,
+        0,
+        null,
+        "first".getBytes(StandardCharsets.UTF_8)
+      )).get(30, TimeUnit.SECONDS)
+    } finally {
+      producer.close()
+    }
+
+    cluster.waitForTopic(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 1)
+
+    val verificationAdmin = cluster.admin()
+    try {
+      val description = verificationAdmin.describeTopics(
+        util.List.of(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+      ).allTopicNames().get(30, TimeUnit.SECONDS).get(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+      assertEquals(1, description.partitions().size())
+      assertEquals(2, description.partitions().get(0).replicas().size())
+
+      val resource = new ConfigResource(ConfigResource.Type.TOPIC, Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+      val topicConfig = verificationAdmin.describeConfigs(util.List.of(resource))
+        .all()
+        .get(30, TimeUnit.SECONDS)
+        .get(resource)
+      assertEquals(TopicConfig.CLEANUP_POLICY_COMPACT, topicConfig.get(TopicConfig.CLEANUP_POLICY_CONFIG).value())
+    } finally {
+      verificationAdmin.close()
+    }
+  }
 
   @ClusterTest(
     types = Array(Type.KRAFT),

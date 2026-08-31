@@ -24,13 +24,14 @@ import kafka.utils.Logging
 import org.apache.kafka.clients.ClientResponse
 import org.apache.kafka.common.errors.InvalidTopicException
 import org.apache.kafka.common.internals.Topic
-import org.apache.kafka.common.internals.Topic.{GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME}
+import org.apache.kafka.common.internals.Topic.{GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME}
 import org.apache.kafka.common.message.CreateTopicsRequestData
 import org.apache.kafka.common.message.CreateTopicsRequestData.{CreatableTopic, CreatableTopicConfig, CreatableTopicConfigCollection}
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.requests.{CreateTopicsRequest, RequestContext, RequestHeader}
 import org.apache.kafka.coordinator.group.GroupCoordinator
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.coordinator.transaction.TransactionLogConfig
 import org.apache.kafka.server.common.{ControllerRequestCompletionHandler, NodeToControllerChannelManager}
@@ -52,6 +53,8 @@ trait AutoTopicCreationManager {
     requestContext: RequestContext
   ): Unit
 
+  def createGlobalSequenceIndexTopic(): Unit
+
 }
 
 class DefaultAutoTopicCreationManager(
@@ -59,7 +62,8 @@ class DefaultAutoTopicCreationManager(
   channelManager: NodeToControllerChannelManager,
   groupCoordinator: GroupCoordinator,
   txnCoordinator: TransactionCoordinator,
-  shareCoordinator: ShareCoordinator
+  shareCoordinator: ShareCoordinator,
+  globalSequenceCoordinator: GlobalSequenceCoordinator
 ) extends AutoTopicCreationManager with Logging {
 
   private val inflightTopics = Collections.newSetFromMap(new ConcurrentHashMap[String, java.lang.Boolean]())
@@ -109,6 +113,10 @@ class DefaultAutoTopicCreationManager(
     if (topics.nonEmpty) {
       sendCreateTopicRequest(topics, Some(requestContext))
     }
+  }
+
+  override def createGlobalSequenceIndexTopic(): Unit = {
+    createTopics(Set(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME), UnboundedControllerMutationQuota, None)
   }
 
   private def sendCreateTopicRequest(
@@ -203,6 +211,12 @@ class DefaultAutoTopicCreationManager(
           .setNumPartitions(config.shareCoordinatorConfig.shareCoordinatorStateTopicNumPartitions())
           .setReplicationFactor(config.shareCoordinatorConfig.shareCoordinatorStateTopicReplicationFactor())
           .setConfigs(convertToTopicConfigCollections(shareCoordinator.shareGroupStateTopicConfigs()))
+      case GLOBAL_SEQUENCE_INDEX_TOPIC_NAME =>
+        new CreatableTopic()
+          .setName(topic)
+          .setNumPartitions(config.globalSequenceCoordinatorConfig.numIndexPartitions())
+          .setReplicationFactor(config.globalSequenceCoordinatorConfig.indexTopicReplicationFactor())
+          .setConfigs(convertToTopicConfigCollections(globalSequenceCoordinator.globalSequenceIndexTopicConfigs()))
       case topicName =>
         new CreatableTopic()
           .setName(topicName)

@@ -26,7 +26,7 @@ import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.{ClientResponse, NodeApiVersions, RequestCompletionHandler}
 import org.apache.kafka.common.Node
-import org.apache.kafka.common.internals.Topic.{GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME}
+import org.apache.kafka.common.internals.Topic.{GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME}
 import org.apache.kafka.common.message.{ApiVersionsResponseData, CreateTopicsRequestData}
 import org.apache.kafka.common.message.CreateTopicsRequestData.{CreatableTopic, CreatableTopicConfig, CreatableTopicConfigCollection}
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic
@@ -36,6 +36,7 @@ import org.apache.kafka.common.requests._
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, KafkaPrincipalSerde, SecurityProtocol}
 import org.apache.kafka.common.utils.{SecurityUtils, Utils}
 import org.apache.kafka.coordinator.group.{GroupCoordinator, GroupCoordinatorConfig}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorConfig}
 import org.apache.kafka.coordinator.share.{ShareCoordinator, ShareCoordinatorConfig}
 import org.apache.kafka.metadata.MetadataCache
 import org.apache.kafka.server.config.ServerConfigs
@@ -58,6 +59,7 @@ class AutoTopicCreationManagerTest {
   private val groupCoordinator = Mockito.mock(classOf[GroupCoordinator])
   private val transactionCoordinator = Mockito.mock(classOf[TransactionCoordinator])
   private val shareCoordinator = Mockito.mock(classOf[ShareCoordinator])
+  private val globalSequenceCoordinator = Mockito.mock(classOf[GlobalSequenceCoordinator])
   private var autoTopicCreationManager: AutoTopicCreationManager = _
 
   private val internalTopicPartitions = 2
@@ -71,10 +73,12 @@ class AutoTopicCreationManagerTest {
     props.setProperty(GroupCoordinatorConfig.OFFSETS_TOPIC_REPLICATION_FACTOR_CONFIG, internalTopicPartitions.toString)
     props.setProperty(TransactionLogConfig.TRANSACTIONS_TOPIC_REPLICATION_FACTOR_CONFIG, internalTopicPartitions.toString)
     props.setProperty(ShareCoordinatorConfig.STATE_TOPIC_REPLICATION_FACTOR_CONFIG , internalTopicPartitions.toString)
+    props.setProperty(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, internalTopicReplicationFactor.toString)
 
     props.setProperty(GroupCoordinatorConfig.OFFSETS_TOPIC_PARTITIONS_CONFIG, internalTopicReplicationFactor.toString)
     props.setProperty(TransactionLogConfig.TRANSACTIONS_TOPIC_PARTITIONS_CONFIG, internalTopicReplicationFactor.toString)
     props.setProperty(ShareCoordinatorConfig.STATE_TOPIC_NUM_PARTITIONS_CONFIG, internalTopicReplicationFactor.toString)
+    props.setProperty(GlobalSequenceCoordinatorConfig.NUM_INDEX_PARTITIONS_CONFIG, internalTopicPartitions.toString)
 
     config = KafkaConfig.fromProps(props)
     val aliveBrokers = util.List.of(new Node(0, "host0", 0), new Node(1, "host1", 1))
@@ -101,6 +105,12 @@ class AutoTopicCreationManagerTest {
   }
 
   @Test
+  def testCreateGlobalSequenceIndexTopic(): Unit = {
+    Mockito.when(globalSequenceCoordinator.globalSequenceIndexTopicConfigs()).thenReturn(new Properties)
+    testCreateTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, isInternal = true, internalTopicPartitions, internalTopicReplicationFactor)
+  }
+
+  @Test
   def testCreateNonInternalTopic(): Unit = {
     testCreateTopic("topic", isInternal = false)
   }
@@ -114,7 +124,8 @@ class AutoTopicCreationManagerTest {
       brokerToController,
       groupCoordinator,
       transactionCoordinator,
-      shareCoordinator)
+      shareCoordinator,
+      globalSequenceCoordinator)
 
     val topicsCollection = new CreateTopicsRequestData.CreatableTopicCollection
     topicsCollection.add(getNewTopic(topicName, numPartitions, replicationFactor))
@@ -230,7 +241,8 @@ class AutoTopicCreationManagerTest {
       brokerToController,
       groupCoordinator,
       transactionCoordinator,
-      shareCoordinator)
+      shareCoordinator,
+      globalSequenceCoordinator)
 
     autoTopicCreationManager.createStreamsInternalTopics(topics, requestContext)
 
@@ -266,7 +278,8 @@ class AutoTopicCreationManagerTest {
       brokerToController,
       groupCoordinator,
       transactionCoordinator,
-      shareCoordinator)
+      shareCoordinator,
+      globalSequenceCoordinator)
 
     autoTopicCreationManager.createStreamsInternalTopics(topics, requestContext)
 
@@ -287,7 +300,8 @@ class AutoTopicCreationManagerTest {
       brokerToController,
       groupCoordinator,
       transactionCoordinator,
-      shareCoordinator)
+      shareCoordinator,
+      globalSequenceCoordinator)
 
     autoTopicCreationManager.createStreamsInternalTopics(topics, requestContext)
 
@@ -324,7 +338,8 @@ class AutoTopicCreationManagerTest {
       brokerToController,
       groupCoordinator,
       transactionCoordinator,
-      shareCoordinator)
+      shareCoordinator,
+      globalSequenceCoordinator)
 
     autoTopicCreationManager.createStreamsInternalTopics(topics, requestContext)
 
@@ -355,7 +370,8 @@ class AutoTopicCreationManagerTest {
       brokerToController,
       groupCoordinator,
       transactionCoordinator,
-      shareCoordinator)
+      shareCoordinator,
+      globalSequenceCoordinator)
 
     val createTopicApiVersion = new ApiVersionsResponseData.ApiVersion()
       .setApiKey(ApiKeys.CREATE_TOPICS.id)

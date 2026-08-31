@@ -410,7 +410,8 @@ class BrokerMetadataPublisher(
     }
     try {
       // Start the global sequence coordinator.
-      globalSequenceCoordinator.startup(() => config.globalSequenceIndexTopicNumPartitions)
+      globalSequenceCoordinator.startup(() => metadataCache.numPartitions(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+        .orElse(config.globalSequenceIndexTopicNumPartitions))
     } catch {
       case t: Throwable => fatalFaultHandler.handleFault("Error starting Global sequence coordinator", t)
     }

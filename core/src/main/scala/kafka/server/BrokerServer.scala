@@ -399,12 +399,11 @@ class BrokerServer(
         producerIdManagerSupplier, metrics, metadataCache, Time.SYSTEM)
 
       globalSequenceCoordinator = createGlobalSequenceCoordinator()
-      globalSequenceIndexRoutingManager = createGlobalSequenceIndexRoutingManager()
-      globalSequenceIndexRoutingManager.start()
-
       autoTopicCreationManager = new DefaultAutoTopicCreationManager(
         config, clientToControllerChannelManager, groupCoordinator,
-        transactionCoordinator, shareCoordinator)
+        transactionCoordinator, shareCoordinator, globalSequenceCoordinator)
+      globalSequenceIndexRoutingManager = createGlobalSequenceIndexRoutingManager()
+      globalSequenceIndexRoutingManager.start()
 
       dynamicConfigHandlers = Map[ConfigType, ConfigHandler](
         ConfigType.TOPIC -> new TopicConfigHandler(replicaManager, config, quotaManagers),
@@ -743,6 +742,7 @@ class BrokerServer(
       config.brokerId,
       globalSequenceCoordinator,
       metadataCache,
+      autoTopicCreationManager,
       config.interBrokerListenerName,
       NetworkUtils.buildNetworkClient(
         "GlobalSequenceIndex",

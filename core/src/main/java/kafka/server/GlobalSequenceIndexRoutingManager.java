@@ -66,6 +66,7 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
     private final int brokerId;
     private final GlobalSequenceCoordinator coordinator;
     private final MetadataCache metadataCache;
+    private final AutoTopicCreationManager autoTopicCreationManager;
     private final ListenerName interBrokerListenerName;
     private final Time time;
     private final int requestTimeoutMs;
@@ -80,6 +81,7 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         int brokerId,
         GlobalSequenceCoordinator coordinator,
         MetadataCache metadataCache,
+        AutoTopicCreationManager autoTopicCreationManager,
         ListenerName interBrokerListenerName,
         KafkaClient networkClient,
         Time time,
@@ -89,6 +91,7 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         this.brokerId = brokerId;
         this.coordinator = coordinator;
         this.metadataCache = metadataCache;
+        this.autoTopicCreationManager = autoTopicCreationManager;
         this.interBrokerListenerName = interBrokerListenerName;
         this.time = time;
         this.requestTimeoutMs = requestTimeoutMs;
@@ -105,7 +108,7 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
     public CompletableFuture<GlobalSequenceAppendResult> appendIndex(GlobalSequenceAppendRequest request) {
         if (closed.get()) {
             return CompletableFuture.failedFuture(new IllegalStateException(
-                "The global sequence index manager is closed."
+                "The global sequence index routing manager is closed."
             ));
         }
 
@@ -143,6 +146,12 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
             }
             if (now < pending.nextAttemptMs) {
                 queue.add(pending);
+                continue;
+            }
+
+            if (!metadataCache.contains(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)) {
+                autoTopicCreationManager.createGlobalSequenceIndexTopic();
+                retry(pending);
                 continue;
             }
 
@@ -290,7 +299,7 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
             return;
         }
         IllegalStateException exception = new IllegalStateException(
-            "The global sequence index manager is closed."
+            "The global sequence index routing manager is closed."
         );
         pendingAppends.forEach(pending -> pending.result.completeExceptionally(exception));
         pendingAppends.clear();

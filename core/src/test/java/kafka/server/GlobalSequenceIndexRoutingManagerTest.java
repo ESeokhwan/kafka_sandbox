@@ -43,6 +43,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -63,6 +64,7 @@ class GlobalSequenceIndexRoutingManagerTest {
 
     private final GlobalSequenceCoordinator coordinator = mock(GlobalSequenceCoordinator.class);
     private final MetadataCache metadataCache = mock(MetadataCache.class);
+    private final AutoTopicCreationManager autoTopicCreationManager = mock(AutoTopicCreationManager.class);
     private final KafkaClient networkClient = mock(KafkaClient.class);
     private final MockTime time = new MockTime();
     private GlobalSequenceIndexRoutingManager manager;
@@ -70,10 +72,12 @@ class GlobalSequenceIndexRoutingManagerTest {
     @BeforeEach
     void setUp() {
         when(coordinator.partitionFor(TOPIC_ID)).thenReturn(INDEX_PARTITION);
+        when(metadataCache.contains(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)).thenReturn(true);
         manager = new GlobalSequenceIndexRoutingManager(
             LOCAL_BROKER_ID,
             coordinator,
             metadataCache,
+            autoTopicCreationManager,
             LISTENER_NAME,
             networkClient,
             time,
@@ -125,6 +129,31 @@ class GlobalSequenceIndexRoutingManagerTest {
             .setDuplicateBatch(true)));
 
         assertEquals(new GlobalSequenceAppendResult(20L, 4, true), result.join());
+    }
+
+    @Test
+    void testCreatesMissingIndexTopicBeforeRetryingAppend() {
+        GlobalSequenceAppendResult expected = new GlobalSequenceAppendResult(10L, 4, false);
+        when(metadataCache.contains(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)).thenReturn(false, true);
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(new Node(LOCAL_BROKER_ID, "localhost", 9092)));
+        when(coordinator.appendIndex(APPEND_REQUEST)).thenReturn(CompletableFuture.completedFuture(expected));
+
+        CompletableFuture<GlobalSequenceAppendResult> result = manager.appendIndex(APPEND_REQUEST);
+
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertFalse(result.isDone());
+        verify(autoTopicCreationManager).createGlobalSequenceIndexTopic();
+        verify(coordinator, never()).appendIndex(APPEND_REQUEST);
+
+        time.sleep(RETRY_BACKOFF_MS);
+
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertEquals(expected, result.join());
+        verify(coordinator).appendIndex(APPEND_REQUEST);
     }
 
     @Test

@@ -19,6 +19,7 @@ package org.apache.kafka.coordinator.globalsequence;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.CoordinatorNotAvailableException;
 import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.utils.LogContext;
@@ -38,6 +39,7 @@ import java.util.Map;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -138,6 +140,22 @@ class GlobalSequenceCoordinatorTest {
         verify(runtime).scheduleUnloadOperation(
             new TopicPartition(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 4),
             OptionalInt.empty()
+        );
+    }
+
+    @Test
+    void testGlobalSequenceIndexTopicConfigs() {
+        assertEquals(
+            TopicConfig.CLEANUP_POLICY_COMPACT,
+            coordinator.globalSequenceIndexTopicConfigs().get(TopicConfig.CLEANUP_POLICY_CONFIG)
+        );
+        assertEquals(
+            GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_DEFAULT,
+            coordinator.globalSequenceIndexTopicConfigs().get(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG)
+        );
+        assertEquals(
+            GlobalSequenceCoordinatorConfig.INDEX_TOPIC_SEGMENT_BYTES_DEFAULT,
+            coordinator.globalSequenceIndexTopicConfigs().get(TopicConfig.SEGMENT_BYTES_CONFIG)
         );
     }
 
