@@ -57,7 +57,7 @@ import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.security.token.delegation.{DelegationToken, TokenInformation}
 import org.apache.kafka.common.utils.{ProducerIdAndEpoch, Time}
 import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator}
 import org.apache.kafka.coordinator.group.{Group, GroupConfig, GroupConfigManager, GroupCoordinator}
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
@@ -403,7 +403,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     val nonExistingTopicResponses = mutable.Map[TopicIdPartition, PartitionResponse]()
     val invalidRequestResponses = mutable.Map[TopicIdPartition, PartitionResponse]()
     val authorizedRequestInfo = mutable.Map[TopicIdPartition, MemoryRecords]()
-    val globalSequenceEnabledPartitions = mutable.Set[TopicIdPartition]()
+    val globalSequenceRecordCounts = mutable.Map[TopicIdPartition, Int]()
     val topicIdToPartitionData = new mutable.ArrayBuffer[(TopicIdPartition, ProduceRequestData.PartitionProduceData)]
 
     def isGlobalSequenceEnabledTopic(topicName: String): Boolean = {
@@ -445,7 +445,10 @@ class KafkaApis(val requestChannel: RequestChannel,
         try {
           ProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
           authorizedRequestInfo += (topicIdPartition -> memoryRecords)
-          if (isGlobalSequenceEnabledTopic(topicIdPartition.topic)) globalSequenceEnabledPartitions += topicIdPartition
+          if (isGlobalSequenceEnabledTopic(topicIdPartition.topic)) {
+            val recordCount = memoryRecords.batches.iterator().next().countOrNull().intValue()
+            globalSequenceRecordCounts += topicIdPartition -> recordCount
+          }
         } catch {
           case e: ApiException =>
             invalidRequestResponses += topicIdPartition -> new PartitionResponse(Errors.forException(e))
@@ -537,6 +540,45 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
     }
 
+    def sendResponseAfterGlobalSequenceIndex(responseStatus: Map[TopicIdPartition, PartitionResponse]): Unit = {
+      val indexFutures = responseStatus.iterator.flatMap { case (topicIdPartition, partitionResponse) =>
+        if (partitionResponse.error != Errors.NONE) {
+          None
+        } else globalSequenceRecordCounts.get(topicIdPartition).map { recordCount =>
+          val appendFuture: CompletableFuture[GlobalSequenceAppendResult] = try {
+            // TODO: Forward this request when the target index shard is led by another broker.
+            globalSequenceCoordinator.appendIndex(new GlobalSequenceAppendRequest(
+              topicIdPartition.topicId(),
+              topicIdPartition.partition(),
+              partitionResponse.baseOffset,
+              recordCount
+            ))
+          } catch {
+            case exception: Throwable => CompletableFuture.failedFuture(exception)
+          }
+
+          appendFuture.handle[(TopicIdPartition, PartitionResponse)] { (_, exception) =>
+            if (exception == null) {
+              topicIdPartition -> partitionResponse
+            } else {
+              val cause = Errors.maybeUnwrapException(exception)
+              error(s"Failed to append the global sequence index for $topicIdPartition at physical offset " +
+                s"${partitionResponse.baseOffset}.", cause)
+              topicIdPartition -> new PartitionResponse(Errors.forException(cause))
+            }
+          }
+        }
+      }.toSeq
+
+      if (indexFutures.isEmpty) {
+        sendResponseCallback(responseStatus)
+      } else {
+        CompletableFuture.allOf(indexFutures.toArray: _*).thenRun { () =>
+          sendResponseCallback(responseStatus ++ indexFutures.map(_.join()).toMap)
+        }
+      }
+    }
+
     if (authorizedRequestInfo.isEmpty)
       sendResponseCallback(Map.empty)
     else {
@@ -549,7 +591,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         internalTopicsAllowed = internalTopicsAllowed,
         transactionalId = produceRequest.transactionalId,
         entriesPerPartition = authorizedRequestInfo,
-        responseCallback = sendResponseCallback,
+        responseCallback = sendResponseAfterGlobalSequenceIndex,
         recordValidationStatsCallback = processingStatsCallback,
         requestLocal = requestLocal,
         transactionSupportedOperation = transactionSupportedOperation)

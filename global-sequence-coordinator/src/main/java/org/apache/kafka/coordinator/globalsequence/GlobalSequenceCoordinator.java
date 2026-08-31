@@ -42,6 +42,7 @@ import org.slf4j.Logger;
 
 import java.time.Duration;
 import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntSupplier;
@@ -137,7 +138,7 @@ public class GlobalSequenceCoordinator {
                             .withPartitionWriter(writer)
                             .withLoader(loader)
                             .withCoordinatorShardBuilderSupplier(supplier)
-                            .withDefaultWriteTimeOut(Duration.ofMillis(1000)) // TODO: make configurable
+                            .withDefaultWriteTimeOut(Duration.ofMillis(config.commitTimeoutMs()))
                             .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
                             .withCoordinatorMetrics(coordinatorMetrics)
                             .withSerializer(new GlobalSequenceCoordinatorRecordSerde())
@@ -203,22 +204,44 @@ public class GlobalSequenceCoordinator {
         return Utils.abs(topicId.hashCode()) % numPartitions;
     }
 
+    /**
+     * Allocates a global offset range for a physical record batch.
+     *
+     * <p>The request is routed by data topic ID so that all allocations for the same topic are
+     * serialized by one global sequence coordinator shard.</p>
+     */
+    public CompletableFuture<GlobalSequenceAppendResult> appendIndex(
+            GlobalSequenceAppendRequest request
+    ) {
+        throwIfNotActive();
+        return runtime.scheduleWriteOperation(
+            "append-global-sequence-index",
+            topicPartitionFor(request.topicId()),
+            Duration.ofMillis(config.commitTimeoutMs()),
+            coordinator -> coordinator.appendIndex(request)
+        );
+    }
+
     public void onElection(
             int indexMetadataPartitionIndex,
             int indexMetadataPartitionLeaderEpoch
     ) {
         throwIfNotActive();
         runtime.scheduleLoadOperation(
-                new TopicPartition(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, indexMetadataPartitionIndex),
-                indexMetadataPartitionLeaderEpoch
+            new TopicPartition(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, indexMetadataPartitionIndex),
+            indexMetadataPartitionLeaderEpoch
         );
     }
 
     public void onResignation(
-            int groupMetadataPartitionIndex,
-            OptionalInt groupMetadataPartitionLeaderEpoch
+            int indexMetadataPartitionIndex,
+            OptionalInt indexMetadataPartitionLeaderEpoch
     ) {
-        // TODO: Implement here
+        throwIfNotActive();
+        runtime.scheduleUnloadOperation(
+            new TopicPartition(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, indexMetadataPartitionIndex),
+            indexMetadataPartitionLeaderEpoch
+        );
     }
 
     public void onNewMetadataImage(

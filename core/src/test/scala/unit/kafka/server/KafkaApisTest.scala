@@ -29,7 +29,7 @@ import org.apache.kafka.clients.admin.{AlterConfigOp, ConfigEntry}
 import org.apache.kafka.common._
 import org.apache.kafka.common.acl.AclOperation
 import org.apache.kafka.common.compress.Compression
-import org.apache.kafka.common.config.ConfigResource
+import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, BROKER_LOGGER}
 import org.apache.kafka.common.errors.{ClusterAuthorizationException, UnsupportedVersionException}
 import org.apache.kafka.common.internals.{Plugin, Topic}
@@ -75,7 +75,7 @@ import org.apache.kafka.common.resource.{PatternType, Resource, ResourcePattern,
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, KafkaPrincipalSerde, SecurityProtocol}
 import org.apache.kafka.common.utils.annotation.ApiKeyVersionsSource
 import org.apache.kafka.common.utils.{ImplicitLinkedHashCollection, ProducerIdAndEpoch, SecurityUtils, Utils}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator}
 import org.apache.kafka.coordinator.group.GroupConfig.{CONSUMER_HEARTBEAT_INTERVAL_MS_CONFIG, CONSUMER_SESSION_TIMEOUT_MS_CONFIG, SHARE_AUTO_OFFSET_RESET_CONFIG, SHARE_HEARTBEAT_INTERVAL_MS_CONFIG, SHARE_ISOLATION_LEVEL_CONFIG, SHARE_RECORD_LOCK_DURATION_MS_CONFIG, SHARE_SESSION_TIMEOUT_MS_CONFIG, STREAMS_HEARTBEAT_INTERVAL_MS_CONFIG, STREAMS_NUM_STANDBY_REPLICAS_CONFIG, STREAMS_SESSION_TIMEOUT_MS_CONFIG}
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig
 import org.apache.kafka.coordinator.group.{GroupConfig, GroupConfigManager, GroupCoordinator, GroupCoordinatorConfig}
@@ -2355,6 +2355,138 @@ class KafkaApisTest extends Logging {
         kafkaApis.close()
       }
     }
+  }
+
+  @Test
+  def testProduceToGlobalSequenceEnabledTopicWaitsForIndexCommit(): Unit = {
+    val topic = "global-topic"
+    val topicId = Uuid.fromString("d2Gg8tgzJa2JYK2eTHUapg")
+    val topicIdPartition = new TopicIdPartition(topicId, 2, topic)
+    val records = MemoryRecords.withRecords(
+      Compression.NONE,
+      new SimpleRecord("one".getBytes),
+      new SimpleRecord("two".getBytes),
+      new SimpleRecord("three".getBytes)
+    )
+    val request = buildProduceRequest(topicIdPartition, records)
+    val indexFuture = new CompletableFuture[GlobalSequenceAppendResult]()
+    val configRepository = MockConfigRepository.forTopic(
+      topic,
+      TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG,
+      "true"
+    )
+
+    addTopicToMetadataCache(topic, numPartitions = 3, topicId = topicId)
+    mockProduceAppendResponse(Map(
+      topicIdPartition -> new PartitionResponse(Errors.NONE, 42L, RecordBatch.NO_TIMESTAMP, 0L)
+    ))
+    when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]())).thenReturn(indexFuture)
+    kafkaApis = createKafkaApis(configRepository = configRepository)
+
+    kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
+
+    val appendRequest = ArgumentCaptor.forClass(classOf[GlobalSequenceAppendRequest])
+    verify(globalSequenceCoordinator).appendIndex(appendRequest.capture())
+    assertEquals(new GlobalSequenceAppendRequest(topicId, 2, 42L, 3), appendRequest.getValue)
+    verifyNoInteractions(requestChannel)
+
+    indexFuture.complete(new GlobalSequenceAppendResult(10L, 3, false))
+
+    val response = verifyNoThrottling[ProduceResponse](request)
+    val partitionResponse = response.data.responses.asScala.head.partitionResponses.asScala.head
+    assertEquals(Errors.NONE.code, partitionResponse.errorCode)
+    assertEquals(42L, partitionResponse.baseOffset)
+  }
+
+  @Test
+  def testProduceToRegularTopicDoesNotAppendGlobalSequenceIndex(): Unit = {
+    val topic = "regular-topic"
+    val topicId = Uuid.fromString("d2Gg8tgzJa2JYK2eTHUapg")
+    val topicIdPartition = new TopicIdPartition(topicId, 0, topic)
+    val request = buildProduceRequest(
+      topicIdPartition,
+      MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("value".getBytes))
+    )
+
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    mockProduceAppendResponse(Map(
+      topicIdPartition -> new PartitionResponse(Errors.NONE, 5L, RecordBatch.NO_TIMESTAMP, 0L)
+    ))
+    kafkaApis = createKafkaApis()
+
+    kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
+
+    verify(globalSequenceCoordinator, never()).appendIndex(any[GlobalSequenceAppendRequest]())
+    val response = verifyNoThrottling[ProduceResponse](request)
+    assertEquals(Errors.NONE.code, response.data.responses.asScala.head.partitionResponses.asScala.head.errorCode)
+  }
+
+  @Test
+  def testFailedDataProduceDoesNotAppendGlobalSequenceIndex(): Unit = {
+    val topic = "global-topic"
+    val topicId = Uuid.fromString("d2Gg8tgzJa2JYK2eTHUapg")
+    val topicIdPartition = new TopicIdPartition(topicId, 0, topic)
+    val request = buildProduceRequest(
+      topicIdPartition,
+      MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("value".getBytes))
+    )
+    val configRepository = MockConfigRepository.forTopic(
+      topic,
+      TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG,
+      "true"
+    )
+
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    mockProduceAppendResponse(Map(
+      topicIdPartition -> new PartitionResponse(Errors.REQUEST_TIMED_OUT)
+    ))
+    kafkaApis = createKafkaApis(configRepository = configRepository)
+
+    kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
+
+    verify(globalSequenceCoordinator, never()).appendIndex(any[GlobalSequenceAppendRequest]())
+    val response = verifyNoThrottling[ProduceResponse](request)
+    assertEquals(
+      Errors.REQUEST_TIMED_OUT.code,
+      response.data.responses.asScala.head.partitionResponses.asScala.head.errorCode
+    )
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = Array(true, false))
+  def testGlobalSequenceIndexFailureFailsProduceResponse(failSynchronously: Boolean): Unit = {
+    val topic = "global-topic"
+    val topicId = Uuid.fromString("d2Gg8tgzJa2JYK2eTHUapg")
+    val topicIdPartition = new TopicIdPartition(topicId, 0, topic)
+    val request = buildProduceRequest(
+      topicIdPartition,
+      MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("value".getBytes))
+    )
+    val configRepository = MockConfigRepository.forTopic(
+      topic,
+      TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG,
+      "true"
+    )
+
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    mockProduceAppendResponse(Map(
+      topicIdPartition -> new PartitionResponse(Errors.NONE, 5L, RecordBatch.NO_TIMESTAMP, 0L)
+    ))
+    if (failSynchronously) {
+      when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]()))
+        .thenThrow(Errors.COORDINATOR_NOT_AVAILABLE.exception())
+    } else {
+      when(globalSequenceCoordinator.appendIndex(any[GlobalSequenceAppendRequest]()))
+        .thenReturn(CompletableFuture.failedFuture(Errors.COORDINATOR_NOT_AVAILABLE.exception()))
+    }
+    kafkaApis = createKafkaApis(configRepository = configRepository)
+
+    kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
+
+    val response = verifyNoThrottling[ProduceResponse](request)
+    val partitionResponse = response.data.responses.asScala.head.partitionResponses.asScala.head
+    assertEquals(Errors.COORDINATOR_NOT_AVAILABLE.code, partitionResponse.errorCode)
+    assertEquals(ProduceResponse.INVALID_OFFSET, partitionResponse.baseOffset)
   }
 
   @Test
@@ -9591,6 +9723,49 @@ class KafkaApisTest extends Logging {
   private def setupBasicMetadataCache(topic: String, numPartitions: Int, numBrokers: Int, topicId: Uuid): Unit = {
     val updateMetadata = createBasicMetadata(topic, numPartitions, 0, numBrokers, topicId)
     MetadataCacheTest.updateCache(metadataCache, updateMetadata)
+  }
+
+  private def buildProduceRequest(
+    topicIdPartition: TopicIdPartition,
+    records: MemoryRecords
+  ): RequestChannel.Request = {
+    val topicData = new ProduceRequestData.TopicProduceData()
+      .setTopicId(topicIdPartition.topicId())
+      .setPartitionData(util.List.of(
+        new ProduceRequestData.PartitionProduceData()
+          .setIndex(topicIdPartition.partition())
+          .setRecords(records)
+      ))
+    val produceRequest = ProduceRequest.builder(new ProduceRequestData()
+      .setTopicData(new ProduceRequestData.TopicProduceDataCollection(util.List.of(topicData).iterator()))
+      .setAcks(1.toShort)
+      .setTimeoutMs(5000))
+      .build(ApiKeys.PRODUCE.latestVersion())
+    buildRequest(produceRequest)
+  }
+
+  private def mockProduceAppendResponse(
+    responseStatus: Map[TopicIdPartition, PartitionResponse]
+  ): Unit = {
+    val responseCallback = ArgumentCaptor.forClass(classOf[Map[TopicIdPartition, PartitionResponse] => Unit])
+    when(replicaManager.handleProduceAppend(
+      anyLong(),
+      anyShort(),
+      ArgumentMatchers.eq(false),
+      any(),
+      any(),
+      responseCallback.capture(),
+      any(),
+      any(),
+      any()
+    )).thenAnswer(_ => responseCallback.getValue.apply(responseStatus))
+    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](), any[Long]()))
+      .thenReturn(0)
+    when(clientQuotaManager.maybeRecordAndGetThrottleTimeMs(
+      any[RequestChannel.Request](),
+      anyDouble(),
+      anyLong()
+    )).thenReturn(0)
   }
 
   private def addTopicToMetadataCache(topic: String, numPartitions: Int, numBrokers: Int = 1, topicId: Uuid = Uuid.ZERO_UUID): Unit = {
