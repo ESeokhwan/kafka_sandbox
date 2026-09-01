@@ -57,7 +57,7 @@ import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.security.token.delegation.{DelegationToken, TokenInformation}
 import org.apache.kafka.common.utils.{ProducerIdAndEpoch, Time}
 import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
-import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator, GlobalSequenceLookupRequest, GlobalSequenceLookupResult}
 import org.apache.kafka.coordinator.group.{Group, GroupConfig, GroupConfigManager, GroupCoordinator}
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
@@ -242,6 +242,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.READ_SHARE_GROUP_STATE => handleReadShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.WRITE_SHARE_GROUP_STATE => handleWriteShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.WRITE_GLOBAL_SEQUENCE_INDEX => handleWriteGlobalSequenceIndexRequest(request).exceptionally(handleError)
+        case ApiKeys.LOOKUP_GLOBAL_SEQUENCE_INDEX => handleLookupGlobalSequenceIndexRequest(request).exceptionally(handleError)
         case ApiKeys.DELETE_SHARE_GROUP_STATE => handleDeleteShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.READ_SHARE_GROUP_STATE_SUMMARY => handleReadShareGroupStateSummaryRequest(request).exceptionally(handleError)
         case ApiKeys.DESCRIBE_SHARE_GROUP_OFFSETS => handleDescribeShareGroupOffsetsRequest(request).exceptionally(handleError)
@@ -3677,6 +3678,68 @@ class KafkaApis(val requestChannel: RequestChannel,
             .setGlobalBaseOffset(result.globalBaseOffset)
             .setRecordCount(result.recordCount)
             .setDuplicateBatch(result.duplicate)
+        ))
+      }
+    }
+  }
+
+  def handleLookupGlobalSequenceIndexRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    val lookupRequest = request.body[LookupGlobalSequenceIndexRequest]
+    val data = lookupRequest.data
+
+    if (data.internalRequest) {
+      if (!authorizeClusterOperation(request, CLUSTER_ACTION)) {
+        requestHelper.sendMaybeThrottle(request, lookupRequest.getErrorResponse(
+          0,
+          Errors.CLUSTER_AUTHORIZATION_FAILED.exception()
+        ))
+        return CompletableFuture.completedFuture[Unit](())
+      }
+    } else {
+      val topicName = metadataCache.getTopicName(data.topicId)
+      if (topicName.isEmpty) {
+        requestHelper.sendMaybeThrottle(request, lookupRequest.getErrorResponse(
+          0,
+          Errors.UNKNOWN_TOPIC_ID.exception(s"Unknown topic ID ${data.topicId}")
+        ))
+        return CompletableFuture.completedFuture[Unit](())
+      }
+      if (!authHelper.authorize(request.context, READ, TOPIC, topicName.get())) {
+        requestHelper.sendMaybeThrottle(request, lookupRequest.getErrorResponse(
+          0,
+          Errors.TOPIC_AUTHORIZATION_FAILED.exception()
+        ))
+        return CompletableFuture.completedFuture[Unit](())
+      }
+    }
+
+    val lookupFuture = try {
+      globalSequenceIndexRoutingManager.lookup(new GlobalSequenceLookupRequest(
+        data.topicId,
+        data.globalStartOffset,
+        data.globalEndOffsetExclusive
+      ))
+    } catch {
+      case exception: IllegalArgumentException =>
+        CompletableFuture.failedFuture[GlobalSequenceLookupResult](
+          new InvalidRequestException(exception.getMessage, exception)
+        )
+      case exception: Throwable => CompletableFuture.failedFuture[GlobalSequenceLookupResult](exception)
+    }
+
+    lookupFuture.handle[Unit] { (result, exception) =>
+      if (exception != null) {
+        requestHelper.sendMaybeThrottle(request, lookupRequest.getErrorResponse(0, exception))
+      } else {
+        val entries = result.indexRecords.asScala.map { indexRecord =>
+          new LookupGlobalSequenceIndexResponseData.GlobalSequenceIndexEntry()
+            .setGlobalBaseOffset(indexRecord.globalBaseOffset)
+            .setRecordCount(indexRecord.recordCount)
+            .setPhysicalPartition(indexRecord.partitionIndex)
+            .setPhysicalBaseOffset(indexRecord.partitionBaseOffset)
+        }.asJava
+        requestHelper.sendMaybeThrottle(request, new LookupGlobalSequenceIndexResponse(
+          new LookupGlobalSequenceIndexResponseData().setIndexEntries(entries)
         ))
       }
     }

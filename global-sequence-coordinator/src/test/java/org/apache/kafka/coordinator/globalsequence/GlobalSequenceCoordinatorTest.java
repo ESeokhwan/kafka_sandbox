@@ -144,6 +144,47 @@ class GlobalSequenceCoordinatorTest {
     }
 
     @Test
+    void testLookupRoutesAndDelegatesToReadOperation() {
+        GlobalSequenceLookupRequest request = new GlobalSequenceLookupRequest(
+            Uuid.randomUuid(),
+            2L,
+            5L
+        );
+        GlobalSequenceLookupResult expectedResult = new GlobalSequenceLookupResult(List.of(
+            new GlobalSequenceIndexRecord(request.topicId(), 0L, 5, 1, 10L)
+        ));
+        CompletableFuture<GlobalSequenceLookupResult> expectedFuture =
+            CompletableFuture.completedFuture(expectedResult);
+        TopicPartition expectedTopicPartition = new TopicPartition(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            Utils.abs(request.topicId().hashCode()) % NUM_PARTITIONS
+        );
+
+        when(runtime.<GlobalSequenceLookupResult>scheduleReadOperation(
+            eq("lookup-global-sequence-index"),
+            eq(expectedTopicPartition),
+            any()
+        )).thenReturn(expectedFuture);
+
+        coordinator.startup(() -> NUM_PARTITIONS);
+        assertSame(expectedFuture, coordinator.lookupIndex(request));
+
+        ArgumentCaptor<CoordinatorRuntime.CoordinatorReadOperation<
+            GlobalSequenceCoordinatorShard,
+            GlobalSequenceLookupResult
+            >> operationCaptor = readOperationCaptor();
+        verify(runtime).scheduleReadOperation(
+            eq("lookup-global-sequence-index"),
+            eq(expectedTopicPartition),
+            operationCaptor.capture()
+        );
+
+        GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
+        when(shard.lookupIndex(request, 10L)).thenReturn(expectedResult);
+        assertSame(expectedResult, operationCaptor.getValue().generateResponse(shard, 10L));
+    }
+
+    @Test
     void testGlobalSequenceIndexTopicConfigs() {
         assertEquals(
             TopicConfig.CLEANUP_POLICY_COMPACT,
@@ -195,5 +236,13 @@ class GlobalSequenceCoordinatorTest {
         CoordinatorRecord
         >> writeOperationCaptor() {
         return ArgumentCaptor.forClass(CoordinatorRuntime.CoordinatorWriteOperation.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<CoordinatorRuntime.CoordinatorReadOperation<
+        GlobalSequenceCoordinatorShard,
+        GlobalSequenceLookupResult
+        >> readOperationCaptor() {
+        return ArgumentCaptor.forClass(CoordinatorRuntime.CoordinatorReadOperation.class);
     }
 }

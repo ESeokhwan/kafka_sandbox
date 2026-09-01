@@ -140,6 +140,8 @@ import org.apache.kafka.common.message.ListPartitionReassignmentsRequestDataJson
 import org.apache.kafka.common.message.ListPartitionReassignmentsResponseDataJsonConverter;
 import org.apache.kafka.common.message.ListTransactionsRequestDataJsonConverter;
 import org.apache.kafka.common.message.ListTransactionsResponseDataJsonConverter;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestDataJsonConverter;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseDataJsonConverter;
 import org.apache.kafka.common.message.MetadataRequestDataJsonConverter;
 import org.apache.kafka.common.message.MetadataResponseDataJsonConverter;
 import org.apache.kafka.common.message.OffsetCommitRequestDataJsonConverter;
@@ -324,6 +326,8 @@ import org.apache.kafka.common.requests.ListPartitionReassignmentsRequest;
 import org.apache.kafka.common.requests.ListPartitionReassignmentsResponse;
 import org.apache.kafka.common.requests.ListTransactionsRequest;
 import org.apache.kafka.common.requests.ListTransactionsResponse;
+import org.apache.kafka.common.requests.LookupGlobalSequenceIndexRequest;
+import org.apache.kafka.common.requests.LookupGlobalSequenceIndexResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.OffsetCommitRequest;
@@ -575,6 +579,8 @@ public class RequestConvertToJson {
                 return WriteShareGroupStateRequestDataJsonConverter.write(((WriteShareGroupStateRequest) request).data(), request.version());
             case WRITE_GLOBAL_SEQUENCE_INDEX:
                 return WriteGlobalSequenceIndexRequestDataJsonConverter.write(((WriteGlobalSequenceIndexRequest) request).data(), request.version());
+            case LOOKUP_GLOBAL_SEQUENCE_INDEX:
+                return LookupGlobalSequenceIndexRequestDataJsonConverter.write(((LookupGlobalSequenceIndexRequest) request).data(), request.version());
             case WRITE_TXN_MARKERS:
                 return WriteTxnMarkersRequestDataJsonConverter.write(((WriteTxnMarkersRequest) request).data(), request.version());
             default:
@@ -763,6 +769,8 @@ public class RequestConvertToJson {
                 return WriteShareGroupStateResponseDataJsonConverter.write(((WriteShareGroupStateResponse) response).data(), version);
             case WRITE_GLOBAL_SEQUENCE_INDEX:
                 return WriteGlobalSequenceIndexResponseDataJsonConverter.write(((WriteGlobalSequenceIndexResponse) response).data(), version);
+            case LOOKUP_GLOBAL_SEQUENCE_INDEX:
+                return LookupGlobalSequenceIndexResponseDataJsonConverter.write(((LookupGlobalSequenceIndexResponse) response).data(), version);
             case WRITE_TXN_MARKERS:
                 return WriteTxnMarkersResponseDataJsonConverter.write(((WriteTxnMarkersResponse) response).data(), version);
             default:

@@ -34,6 +34,7 @@ import org.apache.kafka.timeline.SnapshotRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -240,6 +241,22 @@ class GlobalSequenceCoordinatorShardTest {
 
         assertEquals(0L, first.response().globalBaseOffset());
         assertEquals(0L, other.response().globalBaseOffset());
+    }
+
+    @Test
+    void testLookupIndexUsesReplayedState() {
+        GlobalSequenceIndexRecord first = new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 3, 1, 20L);
+        GlobalSequenceIndexRecord second = new GlobalSequenceIndexRecord(TOPIC_ID, 3L, 2, 0, 8L);
+        replay(coordinatorRecord(first));
+        replay(coordinatorRecord(second));
+
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(first, second)),
+            shard.lookupIndex(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 1L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
     }
 
     private void replay(CoordinatorRecord record) {

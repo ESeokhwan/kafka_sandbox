@@ -31,7 +31,7 @@ import org.apache.kafka.common.acl.AclOperation
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, BROKER_LOGGER}
-import org.apache.kafka.common.errors.{ClusterAuthorizationException, UnsupportedVersionException}
+import org.apache.kafka.common.errors.{ClusterAuthorizationException, OffsetOutOfRangeException, UnsupportedVersionException}
 import org.apache.kafka.common.internals.{Plugin, Topic}
 import org.apache.kafka.common.internals.Topic.SHARE_GROUP_STATE_TOPIC_NAME
 import org.apache.kafka.common.memory.MemoryPool
@@ -75,7 +75,7 @@ import org.apache.kafka.common.resource.{PatternType, Resource, ResourcePattern,
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, KafkaPrincipalSerde, SecurityProtocol}
 import org.apache.kafka.common.utils.annotation.ApiKeyVersionsSource
 import org.apache.kafka.common.utils.{ImplicitLinkedHashCollection, ProducerIdAndEpoch, SecurityUtils, Utils}
-import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator, GlobalSequenceIndexRecord, GlobalSequenceLookupRequest, GlobalSequenceLookupResult}
 import org.apache.kafka.coordinator.group.GroupConfig.{CONSUMER_HEARTBEAT_INTERVAL_MS_CONFIG, CONSUMER_SESSION_TIMEOUT_MS_CONFIG, SHARE_AUTO_OFFSET_RESET_CONFIG, SHARE_HEARTBEAT_INTERVAL_MS_CONFIG, SHARE_ISOLATION_LEVEL_CONFIG, SHARE_RECORD_LOCK_DURATION_MS_CONFIG, SHARE_SESSION_TIMEOUT_MS_CONFIG, STREAMS_HEARTBEAT_INTERVAL_MS_CONFIG, STREAMS_NUM_STANDBY_REPLICAS_CONFIG, STREAMS_SESSION_TIMEOUT_MS_CONFIG}
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig
 import org.apache.kafka.coordinator.group.{GroupConfig, GroupConfigManager, GroupCoordinator, GroupCoordinatorConfig}
@@ -2555,6 +2555,144 @@ class KafkaApisTest extends Logging {
 
     verify(globalSequenceCoordinator, never()).appendIndex(any[GlobalSequenceAppendRequest]())
     val response = verifyNoThrottling[WriteGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.CLUSTER_AUTHORIZATION_FAILED.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleLookupGlobalSequenceIndexRequest(): Unit = {
+    val topic = "global-sequence-lookup"
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache(topic, numPartitions = 2, topicId = topicId)
+    val wireData = new LookupGlobalSequenceIndexRequestData()
+      .setTopicId(topicId)
+      .setGlobalStartOffset(2L)
+      .setGlobalEndOffsetExclusive(6L)
+    val request = buildRequest(new LookupGlobalSequenceIndexRequest.Builder(wireData).build())
+    val lookupFuture = new CompletableFuture[GlobalSequenceLookupResult]()
+    when(globalSequenceIndexRoutingManager.lookup(any[GlobalSequenceLookupRequest]()))
+      .thenReturn(lookupFuture)
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val lookupRequest = ArgumentCaptor.forClass(classOf[GlobalSequenceLookupRequest])
+    verify(globalSequenceIndexRoutingManager).lookup(lookupRequest.capture())
+    assertEquals(new GlobalSequenceLookupRequest(topicId, 2L, 6L), lookupRequest.getValue)
+
+    lookupFuture.complete(new GlobalSequenceLookupResult(util.List.of(
+      new GlobalSequenceIndexRecord(topicId, 0L, 4, 1, 10L),
+      new GlobalSequenceIndexRecord(topicId, 4L, 3, 0, 20L)
+    )))
+    val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.NONE.code, response.data.errorCode)
+    assertEquals(2, response.data.indexEntries.size)
+    assertEquals(0L, response.data.indexEntries.get(0).globalBaseOffset)
+    assertEquals(4, response.data.indexEntries.get(0).recordCount)
+    assertEquals(1, response.data.indexEntries.get(0).physicalPartition)
+    assertEquals(10L, response.data.indexEntries.get(0).physicalBaseOffset)
+    assertEquals(4L, response.data.indexEntries.get(1).globalBaseOffset)
+  }
+
+  @Test
+  def testHandleLookupGlobalSequenceIndexRequestRejectsUnknownTopicId(): Unit = {
+    val request = buildRequest(new LookupGlobalSequenceIndexRequest.Builder(
+      new LookupGlobalSequenceIndexRequestData()
+        .setTopicId(Uuid.randomUuid())
+        .setGlobalStartOffset(0L)
+        .setGlobalEndOffsetExclusive(1L)
+    ).build())
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never()).lookup(any[GlobalSequenceLookupRequest]())
+    val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.UNKNOWN_TOPIC_ID.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleLookupGlobalSequenceIndexRequestRejectsUnindexedOffset(): Unit = {
+    val topic = "global-sequence-lookup-out-of-range"
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    val request = buildRequest(new LookupGlobalSequenceIndexRequest.Builder(
+      new LookupGlobalSequenceIndexRequestData()
+        .setTopicId(topicId)
+        .setGlobalStartOffset(10L)
+        .setGlobalEndOffsetExclusive(11L)
+    ).build())
+    when(globalSequenceIndexRoutingManager.lookup(any[GlobalSequenceLookupRequest]()))
+      .thenReturn(CompletableFuture.failedFuture(new OffsetOutOfRangeException("not indexed")))
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.OFFSET_OUT_OF_RANGE.code, response.data.errorCode)
+    assertTrue(response.data.indexEntries.isEmpty)
+  }
+
+  @Test
+  def testHandleLookupGlobalSequenceIndexRequestAuthorizationFailure(): Unit = {
+    val topic = "global-sequence-lookup-unauthorized"
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    val request = buildRequest(new LookupGlobalSequenceIndexRequest.Builder(
+      new LookupGlobalSequenceIndexRequestData()
+        .setTopicId(topicId)
+        .setGlobalStartOffset(0L)
+        .setGlobalEndOffsetExclusive(1L)
+    ).build())
+    val authorizer = mock(classOf[Authorizer])
+    when(authorizer.authorize(any[RequestContext], any[util.List[Action]]))
+      .thenReturn(util.List.of(AuthorizationResult.DENIED))
+
+    kafkaApis = createKafkaApis(authorizer = Some(authorizer))
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never()).lookup(any[GlobalSequenceLookupRequest]())
+    val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.TOPIC_AUTHORIZATION_FAILED.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleLookupGlobalSequenceIndexRequestRejectsInvalidRange(): Unit = {
+    val topic = "global-sequence-lookup-invalid-range"
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    val request = buildRequest(new LookupGlobalSequenceIndexRequest.Builder(
+      new LookupGlobalSequenceIndexRequestData()
+        .setTopicId(topicId)
+        .setGlobalStartOffset(5L)
+        .setGlobalEndOffsetExclusive(5L)
+    ).build())
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never()).lookup(any[GlobalSequenceLookupRequest]())
+    val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.INVALID_REQUEST.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleInternalLookupGlobalSequenceIndexRequestRequiresClusterAction(): Unit = {
+    val request = buildRequest(new LookupGlobalSequenceIndexRequest.Builder(
+      new LookupGlobalSequenceIndexRequestData()
+        .setTopicId(Uuid.randomUuid())
+        .setGlobalStartOffset(0L)
+        .setGlobalEndOffsetExclusive(1L)
+        .setInternalRequest(true)
+    ).build())
+    val authorizer = mock(classOf[Authorizer])
+    when(authorizer.authorize(any[RequestContext], any[util.List[Action]]))
+      .thenReturn(util.List.of(AuthorizationResult.DENIED))
+
+    kafkaApis = createKafkaApis(authorizer = Some(authorizer))
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never()).lookup(any[GlobalSequenceLookupRequest]())
+    val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
     assertEquals(Errors.CLUSTER_AUTHORIZATION_FAILED.code, response.data.errorCode)
   }
 

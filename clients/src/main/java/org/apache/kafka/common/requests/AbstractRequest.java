@@ -356,6 +356,8 @@ public abstract class AbstractRequest implements AbstractRequestResponse {
                 return DeleteShareGroupOffsetsRequest.parse(readable, apiVersion);
             case WRITE_GLOBAL_SEQUENCE_INDEX:
                 return WriteGlobalSequenceIndexRequest.parse(readable, apiVersion);
+            case LOOKUP_GLOBAL_SEQUENCE_INDEX:
+                return LookupGlobalSequenceIndexRequest.parse(readable, apiVersion);
             default:
                 throw new AssertionError(String.format("ApiKey %s is not currently handled in `parseRequest`, the " +
                         "code should be updated to do so.", apiKey));

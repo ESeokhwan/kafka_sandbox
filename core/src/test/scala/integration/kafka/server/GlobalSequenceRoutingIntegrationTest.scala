@@ -16,12 +16,16 @@
  */
 package kafka.server
 
+import kafka.server.IntegrationTestUtils.connectAndReceive
 import org.apache.kafka.clients.admin.NewTopic
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.internals.Topic
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestData
+import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.common.requests.{LookupGlobalSequenceIndexRequest, LookupGlobalSequenceIndexResponse}
 import org.apache.kafka.common.test.api.{ClusterConfigProperty, ClusterTest, Type}
 import org.apache.kafka.common.test.{ClusterInstance, TestUtils}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
@@ -128,12 +132,17 @@ class GlobalSequenceRoutingIntegrationTest {
       .configs(util.Map.of(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT))
 
     val admin = cluster.admin()
-    try {
+    val dataTopicId = try {
       admin.createTopics(util.List.of(dataTopicDefinition, indexTopicDefinition))
         .all()
         .get(30, TimeUnit.SECONDS)
       cluster.waitForTopic(dataTopic, 1)
       cluster.waitForTopic(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 1)
+      admin.describeTopics(util.List.of(dataTopic))
+        .allTopicNames()
+        .get(30, TimeUnit.SECONDS)
+        .get(dataTopic)
+        .topicId()
     } finally {
       admin.close()
     }
@@ -165,5 +174,26 @@ class GlobalSequenceRoutingIntegrationTest {
       () => indexLeader.replicaManager.localLog(indexTopicPartition).exists(_.logEndOffset >= 2L),
       "The remote index leader did not append both global sequence allocations"
     )
+
+    val lookupRequest = new LookupGlobalSequenceIndexRequest.Builder(
+      new LookupGlobalSequenceIndexRequestData()
+        .setTopicId(dataTopicId)
+        .setGlobalStartOffset(0L)
+        .setGlobalEndOffsetExclusive(2L)
+    ).build()
+    val lookupResponse = connectAndReceive[LookupGlobalSequenceIndexResponse](
+      lookupRequest,
+      cluster.brokers().get(dataLeaderId).socketServer,
+      cluster.clientListener()
+    )
+
+    assertEquals(Errors.NONE.code, lookupResponse.data.errorCode)
+    assertEquals(2, lookupResponse.data.indexEntries.size)
+    assertEquals(0L, lookupResponse.data.indexEntries.get(0).globalBaseOffset)
+    assertEquals(1, lookupResponse.data.indexEntries.get(0).recordCount)
+    assertEquals(dataPartition, lookupResponse.data.indexEntries.get(0).physicalPartition)
+    assertEquals(0L, lookupResponse.data.indexEntries.get(0).physicalBaseOffset)
+    assertEquals(1L, lookupResponse.data.indexEntries.get(1).globalBaseOffset)
+    assertEquals(1L, lookupResponse.data.indexEntries.get(1).physicalBaseOffset)
   }
 }

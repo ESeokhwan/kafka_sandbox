@@ -19,19 +19,27 @@ package kafka.server;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.KafkaClient;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.internals.Topic;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestData;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.message.WriteGlobalSequenceIndexRequestData;
 import org.apache.kafka.common.message.WriteGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.LookupGlobalSequenceIndexRequest;
+import org.apache.kafka.common.requests.LookupGlobalSequenceIndexResponse;
 import org.apache.kafka.common.requests.WriteGlobalSequenceIndexRequest;
 import org.apache.kafka.common.requests.WriteGlobalSequenceIndexResponse;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceAppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceAppendResult;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceIndexRecord;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookupRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookupResult;
 import org.apache.kafka.metadata.MetadataCache;
 import org.apache.kafka.server.util.InterBrokerSendThread;
 import org.apache.kafka.server.util.RequestAndCompletionHandler;
@@ -48,7 +56,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Routes global sequence index allocations to the broker leading the target index partition.
+ * Routes global sequence index operations to the broker leading the target index partition.
  */
 public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
     public static final long DEFAULT_RETRY_BACKOFF_MS = 100L;
@@ -71,11 +79,13 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
     private final Time time;
     private final int requestTimeoutMs;
     private final long retryBackoffMs;
-    private final ConcurrentLinkedQueue<PendingAppend> queue = new ConcurrentLinkedQueue<>();
-    private final Set<PendingAppend> pendingAppends = ConcurrentHashMap.newKeySet();
+    private final ConcurrentLinkedQueue<PendingOperation<?>> queue = new ConcurrentLinkedQueue<>();
+    private final Set<PendingOperation<?>> pendingOperations = ConcurrentHashMap.newKeySet();
     private final SendThread sender;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    private final Object lifecycleLock = new Object();
 
     public GlobalSequenceIndexRoutingManager(
         int brokerId,
@@ -100,16 +110,25 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
     }
 
     public void start() {
-        if (started.compareAndSet(false, true)) {
-            sender.start();
+        synchronized (lifecycleLock) {
+            if (closed.get()) {
+                throw closedException();
+            }
+
+            if (started.compareAndSet(false, true)) {
+                try {
+                    sender.start();
+                } catch (Throwable exception) {
+                    started.set(false);
+                    throw exception;
+                }
+            }
         }
     }
 
     public CompletableFuture<GlobalSequenceAppendResult> appendIndex(GlobalSequenceAppendRequest request) {
         if (closed.get()) {
-            return CompletableFuture.failedFuture(new IllegalStateException(
-                "The global sequence index routing manager is closed."
-            ));
+            return CompletableFuture.failedFuture(closedException());
         }
 
         long createdTimeMs = time.milliseconds();
@@ -118,9 +137,40 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
             createdTimeMs,
             createdTimeMs + requestTimeoutMs
         );
-        pendingAppends.add(pending);
+        pendingOperations.add(pending);
         queue.add(pending);
-        sender.wakeup();
+
+        if (closed.get()) {
+            queue.remove(pending);
+            completeExceptionally(pending, closedException());
+        } else {
+            sender.wakeup();
+        }
+
+        return pending.result;
+    }
+
+    public CompletableFuture<GlobalSequenceLookupResult> lookup(GlobalSequenceLookupRequest request) {
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(closedException());
+        }
+
+        long createdTimeMs = time.milliseconds();
+        PendingLookup pending = new PendingLookup(
+            request,
+            createdTimeMs,
+            createdTimeMs + requestTimeoutMs
+        );
+        pendingOperations.add(pending);
+        queue.add(pending);
+
+        if (closed.get()) {
+            queue.remove(pending);
+            completeExceptionally(pending, closedException());
+        } else {
+            sender.wakeup();
+        }
+
         return pending.result;
     }
 
@@ -130,22 +180,22 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         List<RequestAndCompletionHandler> requests = new ArrayList<>(queued);
 
         for (int i = 0; i < queued; i++) {
-            PendingAppend pending = queue.poll();
+            PendingOperation<?> pending = queue.poll();
             if (pending == null) {
                 break;
             }
             if (pending.result.isDone()) {
-                pendingAppends.remove(pending);
+                pendingOperations.remove(pending);
                 continue;
             }
             if (now >= pending.deadlineMs) {
                 completeExceptionally(pending, new TimeoutException(
-                    "Timed out routing the global sequence index append."
+                    "Timed out routing a global sequence index operation."
                 ));
                 continue;
             }
             if (now < pending.nextAttemptMs) {
-                queue.add(pending);
+                requeueForBackoff(pending);
                 continue;
             }
 
@@ -159,7 +209,7 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
             try {
                 leader = metadataCache.getPartitionLeaderEndpoint(
                     Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
-                    coordinator.partitionFor(pending.request.topicId()),
+                    coordinator.partitionFor(pending.topicId()),
                     interBrokerListenerName
                 );
             } catch (Throwable exception) {
@@ -169,12 +219,35 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
             if (leader.isEmpty() || leader.get().isEmpty()) {
                 retry(pending);
             } else if (leader.get().id() == brokerId) {
-                appendLocally(pending);
+                executeLocally(pending);
             } else {
                 requests.add(remoteRequest(leader.get(), pending));
             }
         }
         return requests;
+    }
+
+    private void requeueForBackoff(PendingOperation<?> pending) {
+        queue.add(pending);
+        if (pending.result.isDone()) {
+            queue.remove(pending);
+            pendingOperations.remove(pending);
+        } else if (closed.get()) {
+            queue.remove(pending);
+            completeExceptionally(pending, closedException());
+        }
+    }
+
+    private void executeLocally(PendingOperation<?> pending) {
+        if (pending instanceof PendingAppend append) {
+            appendLocally(append);
+        } else if (pending instanceof PendingLookup lookup) {
+            lookupLocally(lookup);
+        } else {
+            completeExceptionally(pending, new IllegalStateException(
+                "Unknown global sequence index operation " + pending
+            ));
+        }
     }
 
     private void appendLocally(PendingAppend pending) {
@@ -194,7 +267,33 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         });
     }
 
-    private RequestAndCompletionHandler remoteRequest(Node leader, PendingAppend pending) {
+    private void lookupLocally(PendingLookup pending) {
+        final CompletableFuture<GlobalSequenceLookupResult> localLookup;
+        try {
+            localLookup = coordinator.lookupIndex(pending.request);
+        } catch (Throwable exception) {
+            handleFailure(pending, exception);
+            return;
+        }
+        localLookup.whenComplete((result, exception) -> {
+            if (exception == null) {
+                complete(pending, result);
+            } else {
+                handleFailure(pending, exception);
+            }
+        });
+    }
+
+    private RequestAndCompletionHandler remoteRequest(Node leader, PendingOperation<?> pending) {
+        if (pending instanceof PendingAppend append) {
+            return remoteAppendRequest(leader, append);
+        } else if (pending instanceof PendingLookup lookup) {
+            return remoteLookupRequest(leader, lookup);
+        }
+        throw new IllegalStateException("Unknown global sequence index operation " + pending);
+    }
+
+    private RequestAndCompletionHandler remoteAppendRequest(Node leader, PendingAppend pending) {
         GlobalSequenceAppendRequest request = pending.request;
         WriteGlobalSequenceIndexRequestData data = new WriteGlobalSequenceIndexRequestData()
             .setTopicId(request.topicId())
@@ -206,11 +305,27 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
             pending.createdTimeMs,
             leader,
             new WriteGlobalSequenceIndexRequest.Builder(data),
-            response -> handleRemoteResponse(pending, response)
+            response -> handleRemoteAppendResponse(pending, response)
         );
     }
 
-    private void handleRemoteResponse(PendingAppend pending, ClientResponse clientResponse) {
+    private RequestAndCompletionHandler remoteLookupRequest(Node leader, PendingLookup pending) {
+        GlobalSequenceLookupRequest request = pending.request;
+        LookupGlobalSequenceIndexRequestData data = new LookupGlobalSequenceIndexRequestData()
+            .setTopicId(request.topicId())
+            .setGlobalStartOffset(request.globalStartOffset())
+            .setGlobalEndOffsetExclusive(request.globalEndOffsetExclusive())
+            .setInternalRequest(true);
+
+        return new RequestAndCompletionHandler(
+            pending.createdTimeMs,
+            leader,
+            new LookupGlobalSequenceIndexRequest.Builder(data),
+            response -> handleRemoteLookupResponse(pending, response)
+        );
+    }
+
+    private void handleRemoteAppendResponse(PendingAppend pending, ClientResponse clientResponse) {
         if (clientResponse.authenticationException() != null) {
             completeExceptionally(pending, clientResponse.authenticationException());
         } else if (clientResponse.versionMismatch() != null) {
@@ -243,9 +358,47 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         sender.wakeup();
     }
 
-    private void handleFailure(PendingAppend pending, Throwable exception) {
+    private void handleRemoteLookupResponse(PendingLookup pending, ClientResponse clientResponse) {
+        if (clientResponse.authenticationException() != null) {
+            completeExceptionally(pending, clientResponse.authenticationException());
+        } else if (clientResponse.versionMismatch() != null) {
+            completeExceptionally(pending, clientResponse.versionMismatch());
+        } else if (!clientResponse.hasResponse()) {
+            if (clientResponse.wasTimedOut()) {
+                handleFailure(pending, new TimeoutException("The global sequence index lookup timed out."));
+            } else {
+                handleFailure(pending, new DisconnectException(
+                    "The broker leading the global sequence index partition disconnected."
+                ));
+            }
+        } else if (!(clientResponse.responseBody() instanceof LookupGlobalSequenceIndexResponse response)) {
+            completeExceptionally(pending, new IllegalStateException(
+                "Unexpected response for a global sequence index lookup: " + clientResponse.responseBody()
+            ));
+        } else {
+            LookupGlobalSequenceIndexResponseData data = response.data();
+            Errors error = Errors.forCode(data.errorCode());
+            if (error == Errors.NONE) {
+                List<GlobalSequenceIndexRecord> records = data.indexEntries().stream()
+                    .map(entry -> new GlobalSequenceIndexRecord(
+                        pending.topicId(),
+                        entry.globalBaseOffset(),
+                        entry.recordCount(),
+                        entry.physicalPartition(),
+                        entry.physicalBaseOffset()
+                    ))
+                    .toList();
+                complete(pending, new GlobalSequenceLookupResult(records));
+            } else {
+                handleFailure(pending, error.exception(data.errorMessage()));
+            }
+        }
+        sender.wakeup();
+    }
+
+    private void handleFailure(PendingOperation<?> pending, Throwable exception) {
         if (pending.result.isDone()) {
-            pendingAppends.remove(pending);
+            pendingOperations.remove(pending);
             return;
         }
         Throwable cause = unwrapCompletionException(exception);
@@ -256,14 +409,30 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         }
     }
 
-    private void retry(PendingAppend pending) {
-        if (closed.get() || pending.result.isDone()) {
-            pendingAppends.remove(pending);
+    private void retry(PendingOperation<?> pending) {
+        if (pending.result.isDone()) {
+            pendingOperations.remove(pending);
+            return;
+        } else if (closed.get()) {
+            completeExceptionally(pending, closedException());
             return;
         }
+
         pending.nextAttemptMs = time.milliseconds() + retryBackoffMs;
         queue.add(pending);
-        sender.wakeup();
+
+        if (closed.get()) {
+            queue.remove(pending);
+            completeExceptionally(pending, closedException());
+        } else {
+            sender.wakeup();
+        }
+    }
+
+    private static IllegalStateException closedException() {
+        return new IllegalStateException(
+            "The global sequence index routing manager is closed."
+        );
     }
 
     private static boolean isRetriable(Errors error) {
@@ -279,13 +448,13 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
         return exception;
     }
 
-    private void complete(PendingAppend pending, GlobalSequenceAppendResult result) {
-        pendingAppends.remove(pending);
+    private <T> void complete(PendingOperation<T> pending, T result) {
+        pendingOperations.remove(pending);
         pending.result.complete(result);
     }
 
-    private void completeExceptionally(PendingAppend pending, Throwable exception) {
-        pendingAppends.remove(pending);
+    private void completeExceptionally(PendingOperation<?> pending, Throwable exception) {
+        pendingOperations.remove(pending);
         pending.result.completeExceptionally(exception);
     }
 
@@ -295,32 +464,65 @@ public class GlobalSequenceIndexRoutingManager implements AutoCloseable {
 
     @Override
     public void close() throws InterruptedException {
-        if (!closed.compareAndSet(false, true)) {
-            return;
+        final boolean needShutdownSender;
+
+        synchronized (lifecycleLock) {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+
+            needShutdownSender = started.compareAndSet(true, false);
         }
-        IllegalStateException exception = new IllegalStateException(
-            "The global sequence index routing manager is closed."
-        );
-        pendingAppends.forEach(pending -> pending.result.completeExceptionally(exception));
-        pendingAppends.clear();
+        IllegalStateException exception = closedException();
+        pendingOperations.forEach(pending -> pending.result.completeExceptionally(exception));
+        pendingOperations.clear();
         queue.clear();
-        if (started.compareAndSet(true, false)) {
+
+        if (needShutdownSender) {
             sender.shutdown();
         }
     }
 
-    private static final class PendingAppend {
-        private final GlobalSequenceAppendRequest request;
-        private final long createdTimeMs;
-        private final long deadlineMs;
-        private final CompletableFuture<GlobalSequenceAppendResult> result = new CompletableFuture<>();
-        private volatile long nextAttemptMs;
+    private abstract static class PendingOperation<T> {
+        final long createdTimeMs;
+        final long deadlineMs;
+        final CompletableFuture<T> result = new CompletableFuture<>();
+        volatile long nextAttemptMs;
 
-        private PendingAppend(GlobalSequenceAppendRequest request, long createdTimeMs, long deadlineMs) {
-            this.request = request;
+        private PendingOperation(long createdTimeMs, long deadlineMs) {
             this.createdTimeMs = createdTimeMs;
             this.deadlineMs = deadlineMs;
             this.nextAttemptMs = 0L;
+        }
+
+        abstract Uuid topicId();
+    }
+
+    private static final class PendingAppend extends PendingOperation<GlobalSequenceAppendResult> {
+        private final GlobalSequenceAppendRequest request;
+
+        private PendingAppend(GlobalSequenceAppendRequest request, long createdTimeMs, long deadlineMs) {
+            super(createdTimeMs, deadlineMs);
+            this.request = request;
+        }
+
+        @Override
+        Uuid topicId() {
+            return request.topicId();
+        }
+    }
+
+    private static final class PendingLookup extends PendingOperation<GlobalSequenceLookupResult> {
+        private final GlobalSequenceLookupRequest request;
+
+        private PendingLookup(GlobalSequenceLookupRequest request, long createdTimeMs, long deadlineMs) {
+            super(createdTimeMs, deadlineMs);
+            this.request = request;
+        }
+
+        @Override
+        Uuid topicId() {
+            return request.topicId();
         }
     }
 

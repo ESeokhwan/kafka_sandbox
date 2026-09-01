@@ -188,6 +188,8 @@ import org.apache.kafka.common.message.ListPartitionReassignmentsRequestData;
 import org.apache.kafka.common.message.ListPartitionReassignmentsResponseData;
 import org.apache.kafka.common.message.ListTransactionsRequestData;
 import org.apache.kafka.common.message.ListTransactionsResponseData;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestData;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.message.OffsetCommitRequestData;
 import org.apache.kafka.common.message.OffsetCommitResponseData;
 import org.apache.kafka.common.message.OffsetDeleteRequestData;
@@ -1083,6 +1085,7 @@ public class RequestResponseTest {
             case ALTER_SHARE_GROUP_OFFSETS: return createAlterShareGroupOffsetsRequest(version);
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsRequest(version);
             case WRITE_GLOBAL_SEQUENCE_INDEX: return createWriteGlobalSequenceIndexRequest(version);
+            case LOOKUP_GLOBAL_SEQUENCE_INDEX: return createLookupGlobalSequenceIndexRequest(version);
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
     }
@@ -1179,6 +1182,7 @@ public class RequestResponseTest {
             case ALTER_SHARE_GROUP_OFFSETS: return createAlterShareGroupOffsetsResponse();
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsResponse();
             case WRITE_GLOBAL_SEQUENCE_INDEX: return createWriteGlobalSequenceIndexResponse();
+            case LOOKUP_GLOBAL_SEQUENCE_INDEX: return createLookupGlobalSequenceIndexResponse();
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
     }
@@ -3777,6 +3781,25 @@ public class RequestResponseTest {
             .setGlobalBaseOffset(10L)
             .setRecordCount(3)
             .setDuplicateBatch(true));
+    }
+
+    private LookupGlobalSequenceIndexRequest createLookupGlobalSequenceIndexRequest(short version) {
+        return new LookupGlobalSequenceIndexRequest.Builder(new LookupGlobalSequenceIndexRequestData()
+            .setTopicId(TOPIC_ID)
+            .setGlobalStartOffset(2L)
+            .setGlobalEndOffsetExclusive(5L))
+            .build(version);
+    }
+
+    private LookupGlobalSequenceIndexResponse createLookupGlobalSequenceIndexResponse() {
+        return new LookupGlobalSequenceIndexResponse(new LookupGlobalSequenceIndexResponseData()
+            .setIndexEntries(Collections.singletonList(
+                new LookupGlobalSequenceIndexResponseData.GlobalSequenceIndexEntry()
+                    .setGlobalBaseOffset(0L)
+                    .setRecordCount(5)
+                    .setPhysicalPartition(2)
+                    .setPhysicalBaseOffset(42L)
+            )));
     }
 
     private DeleteShareGroupStateRequest createDeleteShareGroupStateRequest(short version) {

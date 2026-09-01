@@ -17,11 +17,14 @@
 package org.apache.kafka.coordinator.globalsequence;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.OffsetOutOfRangeException;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -84,6 +87,26 @@ public class GlobalSequenceStateRegistry {
         }
     }
 
+    GlobalSequenceLookupResult lookup(GlobalSequenceLookupRequest request, long indexLogHighWatermark) {
+        Objects.requireNonNull(request, "request");
+        GlobalSequenceState state = stateMap.get(request.topicId(), indexLogHighWatermark);
+        if (state == null) {
+            throw outOfRange(request, request.globalStartOffset());
+        }
+        return state.lookup(request, indexLogHighWatermark);
+    }
+
+    private static OffsetOutOfRangeException outOfRange(
+        GlobalSequenceLookupRequest request,
+        long missingOffset
+    ) {
+        return new OffsetOutOfRangeException(
+            "Global offset " + missingOffset + " is not indexed for topic ID " + request.topicId() +
+                " in requested range [" + request.globalStartOffset() + ", " +
+                request.globalEndOffsetExclusive() + ")"
+        );
+    }
+
     private static void validateTopicId(Uuid topicId) {
         Objects.requireNonNull(topicId, "topicId");
         if (Uuid.ZERO_UUID.equals(topicId)) {
@@ -105,7 +128,11 @@ public class GlobalSequenceStateRegistry {
         }
 
         public GlobalSequenceIndexRecord[] getSequenceIndexAsArray() {
-            GlobalSequenceIndexRecord[] records = sequenceByGlobalBaseOffset.values().toArray(
+            return getSequenceIndexAsArray(SnapshotRegistry.LATEST_EPOCH);
+        }
+
+        private GlobalSequenceIndexRecord[] getSequenceIndexAsArray(long indexLogHighWatermark) {
+            GlobalSequenceIndexRecord[] records = sequenceByGlobalBaseOffset.values(indexLogHighWatermark).toArray(
                 new GlobalSequenceIndexRecord[0]
             );
             Arrays.sort(records, Comparator.comparingLong(GlobalSequenceIndexRecord::globalBaseOffset));
@@ -193,6 +220,31 @@ public class GlobalSequenceStateRegistry {
             // otherwise compaction could make the in-memory next offset unrecoverable on restart.
             sequenceByGlobalBaseOffset.remove(globalBaseOffset);
             sequenceByPhysicalBatch.remove(physicalBatchId);
+        }
+
+        GlobalSequenceLookupResult lookup(GlobalSequenceLookupRequest request, long indexLogHighWatermark) {
+            List<GlobalSequenceIndexRecord> matches = new ArrayList<>();
+            long nextOffsetToCover = request.globalStartOffset();
+
+            for (GlobalSequenceIndexRecord indexRecord : getSequenceIndexAsArray(indexLogHighWatermark)) {
+                if (indexRecord.globalEndOffsetExclusive() <= nextOffsetToCover) {
+                    continue;
+                }
+                if (indexRecord.globalBaseOffset() > nextOffsetToCover) {
+                    throw outOfRange(request, nextOffsetToCover);
+                }
+
+                matches.add(indexRecord);
+                nextOffsetToCover = Math.min(
+                    indexRecord.globalEndOffsetExclusive(),
+                    request.globalEndOffsetExclusive()
+                );
+                if (nextOffsetToCover == request.globalEndOffsetExclusive()) {
+                    return new GlobalSequenceLookupResult(matches);
+                }
+            }
+
+            throw outOfRange(request, nextOffsetToCover);
         }
 
         private void validateReplayOrder(GlobalSequenceIndexRecord candidate) {

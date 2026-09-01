@@ -23,25 +23,33 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.NotCoordinatorException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.internals.Topic;
+import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.message.WriteGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.WriteGlobalSequenceIndexRequest;
 import org.apache.kafka.common.requests.WriteGlobalSequenceIndexResponse;
+import org.apache.kafka.common.requests.LookupGlobalSequenceIndexRequest;
+import org.apache.kafka.common.requests.LookupGlobalSequenceIndexResponse;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceAppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceAppendResult;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceIndexRecord;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookupRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookupResult;
 import org.apache.kafka.metadata.MetadataCache;
 import org.apache.kafka.server.util.RequestAndCompletionHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -61,6 +69,8 @@ class GlobalSequenceIndexRoutingManagerTest {
     private static final ListenerName LISTENER_NAME = ListenerName.normalised("PLAINTEXT");
     private static final GlobalSequenceAppendRequest APPEND_REQUEST =
         new GlobalSequenceAppendRequest(TOPIC_ID, 3, 42L, 4);
+    private static final GlobalSequenceLookupRequest LOOKUP_REQUEST =
+        new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 6L);
 
     private final GlobalSequenceCoordinator coordinator = mock(GlobalSequenceCoordinator.class);
     private final MetadataCache metadataCache = mock(MetadataCache.class);
@@ -157,6 +167,67 @@ class GlobalSequenceIndexRoutingManagerTest {
     }
 
     @Test
+    void testExecutesLookupLocallyWhenThisBrokerIsLeader() {
+        GlobalSequenceLookupResult expected = new GlobalSequenceLookupResult(List.of(
+            new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 4, 3, 42L),
+            new GlobalSequenceIndexRecord(TOPIC_ID, 4L, 4, 1, 10L)
+        ));
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(new Node(LOCAL_BROKER_ID, "localhost", 9092)));
+        when(coordinator.lookupIndex(LOOKUP_REQUEST)).thenReturn(CompletableFuture.completedFuture(expected));
+
+        CompletableFuture<GlobalSequenceLookupResult> result = manager.lookup(LOOKUP_REQUEST);
+
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertEquals(expected, result.join());
+        verify(coordinator).lookupIndex(LOOKUP_REQUEST);
+    }
+
+    @Test
+    void testBuildsRemoteLookupRequestAndMapsResponse() {
+        Node remoteLeader = new Node(2, "remote", 9093);
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(remoteLeader));
+
+        CompletableFuture<GlobalSequenceLookupResult> result = manager.lookup(LOOKUP_REQUEST);
+        RequestAndCompletionHandler request = onlyRequest(manager.generateRequestsForTest());
+        LookupGlobalSequenceIndexRequest wireRequest =
+            (LookupGlobalSequenceIndexRequest) request.request.build();
+
+        assertEquals(remoteLeader, request.destination);
+        assertEquals(TOPIC_ID, wireRequest.data().topicId());
+        assertEquals(2L, wireRequest.data().globalStartOffset());
+        assertEquals(6L, wireRequest.data().globalEndOffsetExclusive());
+        assertTrue(wireRequest.data().internalRequest());
+        verify(coordinator, never()).lookupIndex(LOOKUP_REQUEST);
+
+        request.handler.onComplete(response(new LookupGlobalSequenceIndexResponseData()
+            .setIndexEntries(List.of(
+                new LookupGlobalSequenceIndexResponseData.GlobalSequenceIndexEntry()
+                    .setGlobalBaseOffset(0L)
+                    .setRecordCount(4)
+                    .setPhysicalPartition(3)
+                    .setPhysicalBaseOffset(42L),
+                new LookupGlobalSequenceIndexResponseData.GlobalSequenceIndexEntry()
+                    .setGlobalBaseOffset(4L)
+                    .setRecordCount(4)
+                    .setPhysicalPartition(1)
+                    .setPhysicalBaseOffset(10L)
+            ))));
+
+        assertEquals(new GlobalSequenceLookupResult(List.of(
+            new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 4, 3, 42L),
+            new GlobalSequenceIndexRecord(TOPIC_ID, 4L, 4, 1, 10L)
+        )), result.join());
+    }
+
+    @Test
     void testRediscoversLeaderAfterNotCoordinator() {
         Node staleLeader = new Node(2, "stale", 9093);
         when(metadataCache.getPartitionLeaderEndpoint(
@@ -238,6 +309,134 @@ class GlobalSequenceIndexRoutingManagerTest {
         assertEquals(new GlobalSequenceAppendResult(40L, 4, false), result.join());
     }
 
+    @Test
+    void testCloseCompletesQueuedOperationsExceptionally() throws InterruptedException {
+        CompletableFuture<GlobalSequenceAppendResult> append = manager.appendIndex(APPEND_REQUEST);
+        CompletableFuture<GlobalSequenceLookupResult> lookup = manager.lookup(LOOKUP_REQUEST);
+
+        manager.close();
+
+        assertClosed(append);
+        assertClosed(lookup);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        verify(coordinator, never()).appendIndex(APPEND_REQUEST);
+        verify(coordinator, never()).lookupIndex(LOOKUP_REQUEST);
+    }
+
+    @Test
+    void testRejectsOperationsAfterClose() throws InterruptedException {
+        manager.close();
+
+        CompletableFuture<GlobalSequenceAppendResult> append = manager.appendIndex(APPEND_REQUEST);
+        CompletableFuture<GlobalSequenceLookupResult> lookup = manager.lookup(LOOKUP_REQUEST);
+
+        assertClosed(append);
+        assertClosed(lookup);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        verify(coordinator, never()).appendIndex(APPEND_REQUEST);
+        verify(coordinator, never()).lookupIndex(LOOKUP_REQUEST);
+    }
+
+    @Test
+    void testCloseCompletesOperationWaitingForRetryBackoff() throws InterruptedException {
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.empty());
+
+        CompletableFuture<GlobalSequenceAppendResult> result = manager.appendIndex(APPEND_REQUEST);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertFalse(result.isDone());
+
+        // The retry backoff has not elapsed, so this exercises the backoff requeue path.
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertFalse(result.isDone());
+
+        manager.close();
+
+        assertClosed(result);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        verify(coordinator, never()).appendIndex(APPEND_REQUEST);
+    }
+
+    @Test
+    void testCloseCompletesInFlightLocalOperation() throws InterruptedException {
+        CompletableFuture<GlobalSequenceAppendResult> coordinatorResult = new CompletableFuture<>();
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(new Node(LOCAL_BROKER_ID, "localhost", 9092)));
+        when(coordinator.appendIndex(APPEND_REQUEST)).thenReturn(coordinatorResult);
+
+        CompletableFuture<GlobalSequenceAppendResult> result = manager.appendIndex(APPEND_REQUEST);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertFalse(result.isDone());
+
+        manager.close();
+
+        assertClosed(result);
+        coordinatorResult.complete(new GlobalSequenceAppendResult(50L, 4, false));
+        assertClosed(result);
+    }
+
+    @Test
+    void testLateRemoteResponseAfterCloseDoesNotChangeResult() throws InterruptedException {
+        Node remoteLeader = new Node(2, "remote", 9093);
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(remoteLeader));
+
+        CompletableFuture<GlobalSequenceAppendResult> result = manager.appendIndex(APPEND_REQUEST);
+        RequestAndCompletionHandler request = onlyRequest(manager.generateRequestsForTest());
+
+        manager.close();
+        assertClosed(result);
+
+        request.handler.onComplete(response(new WriteGlobalSequenceIndexResponseData()
+            .setGlobalBaseOffset(60L)
+            .setRecordCount(4)));
+
+        assertClosed(result);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+    }
+
+    @Test
+    void testCloseIsIdempotent() {
+        assertDoesNotThrow(manager::close);
+        assertDoesNotThrow(manager::close);
+    }
+
+    @Test
+    void testStartAfterCloseThrows() throws InterruptedException {
+        manager.close();
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, manager::start);
+        assertEquals("The global sequence index routing manager is closed.", exception.getMessage());
+    }
+
+    @Test
+    void testStartIsIdempotent() throws InterruptedException {
+        manager.start();
+        try {
+            assertDoesNotThrow(manager::start);
+        } finally {
+            manager.close();
+        }
+    }
+
+    @Test
+    void testCannotRestartAfterClose() throws InterruptedException {
+        manager.start();
+        manager.close();
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class, manager::start);
+        assertEquals("The global sequence index routing manager is closed.", exception.getMessage());
+    }
+
     private static RequestAndCompletionHandler onlyRequest(Collection<RequestAndCompletionHandler> requests) {
         assertEquals(1, requests.size());
         return requests.iterator().next();
@@ -248,5 +447,18 @@ class GlobalSequenceIndexRoutingManagerTest {
         when(response.hasResponse()).thenReturn(true);
         when(response.responseBody()).thenReturn(new WriteGlobalSequenceIndexResponse(data));
         return response;
+    }
+
+    private static ClientResponse response(LookupGlobalSequenceIndexResponseData data) {
+        ClientResponse response = mock(ClientResponse.class);
+        when(response.hasResponse()).thenReturn(true);
+        when(response.responseBody()).thenReturn(new LookupGlobalSequenceIndexResponse(data));
+        return response;
+    }
+
+    private static void assertClosed(CompletableFuture<?> future) {
+        CompletionException exception = assertThrows(CompletionException.class, future::join);
+        IllegalStateException cause = assertInstanceOf(IllegalStateException.class, exception.getCause());
+        assertEquals("The global sequence index routing manager is closed.", cause.getMessage());
     }
 }

@@ -235,6 +235,20 @@ public class GlobalSequenceCoordinator {
         );
     }
 
+    /**
+     * Resolves a committed global offset range to physical record batches.
+     */
+    public CompletableFuture<GlobalSequenceLookupResult> lookupIndex(
+            GlobalSequenceLookupRequest request
+    ) {
+        throwIfNotActive();
+        return runtime.scheduleReadOperation(
+            "lookup-global-sequence-index",
+            topicPartitionFor(request.topicId()),
+            (coordinator, indexLogHighWatermark) -> coordinator.lookupIndex(request, indexLogHighWatermark)
+        );
+    }
+
     public void onElection(
             int indexMetadataPartitionIndex,
             int indexMetadataPartitionLeaderEpoch

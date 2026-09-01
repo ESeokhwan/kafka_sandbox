@@ -17,6 +17,7 @@
 package org.apache.kafka.coordinator.globalsequence;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.OffsetOutOfRangeException;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.timeline.SnapshotRegistry;
 
@@ -217,6 +218,99 @@ class GlobalSequenceStateRegistryTest {
             registry.getState(TOPIC_ID).getSequenceIndexAsArray()
         );
         assertEquals(Long.MAX_VALUE, registry.getState(TOPIC_ID).nextGlobalOffset());
+    }
+
+    @Test
+    void testLookupReturnsEveryBatchIntersectingRange() {
+        GlobalSequenceStateRegistry registry = newRegistry();
+        GlobalSequenceIndexRecord first = record(TOPIC_ID, 0L, 3, 0, 10L);
+        GlobalSequenceIndexRecord second = record(TOPIC_ID, 3L, 2, 1, 20L);
+        GlobalSequenceIndexRecord third = record(TOPIC_ID, 5L, 4, 0, 13L);
+        registry.replay(first);
+        registry.replay(second);
+        registry.replay(third);
+
+        assertEquals(
+            new GlobalSequenceLookupResult(java.util.List.of(first, second, third)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 7L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+        assertEquals(
+            new GlobalSequenceLookupResult(java.util.List.of(second)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 3L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+    }
+
+    @Test
+    void testLookupRejectsUnknownUnallocatedAndTombstonedOffsets() {
+        GlobalSequenceStateRegistry registry = newRegistry();
+        GlobalSequenceIndexRecord first = record(TOPIC_ID, 0L, 3, 0, 10L);
+        GlobalSequenceIndexRecord second = record(TOPIC_ID, 3L, 2, 1, 20L);
+        registry.replay(first);
+        registry.replay(second);
+
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(
+                new GlobalSequenceLookupRequest(OTHER_TOPIC_ID, 0L, 1L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 4L, 6L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+
+        registry.replayTombstone(TOPIC_ID, first.globalBaseOffset());
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 4L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+        assertEquals(
+            new GlobalSequenceLookupResult(java.util.List.of(second)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 3L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+    }
+
+    @Test
+    void testLookupReadsOnlyTheCommittedSnapshot() {
+        SnapshotRegistry snapshotRegistry = new SnapshotRegistry(new LogContext());
+        GlobalSequenceStateRegistry registry = new GlobalSequenceStateRegistry(snapshotRegistry);
+        GlobalSequenceIndexRecord committed = record(TOPIC_ID, 0L, 2, 0, 10L);
+        GlobalSequenceIndexRecord uncommitted = record(TOPIC_ID, 2L, 3, 1, 20L);
+        registry.replay(committed);
+        snapshotRegistry.idempotentCreateSnapshot(0L);
+        registry.replay(uncommitted);
+
+        assertEquals(
+            new GlobalSequenceLookupResult(java.util.List.of(committed)),
+            registry.lookup(new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 2L), 0L)
+        );
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 5L), 0L)
+        );
+        assertEquals(
+            new GlobalSequenceLookupResult(java.util.List.of(committed, uncommitted)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
     }
 
     private static GlobalSequenceStateRegistry newRegistry() {

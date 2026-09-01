@@ -187,6 +187,10 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         );
     }
 
+    GlobalSequenceLookupResult lookupIndex(GlobalSequenceLookupRequest request, long indexLogHighWatermark) {
+        return stateRegistry.lookup(request, indexLogHighWatermark);
+    }
+
     private CoordinatorRecord toCoordinatorRecord(GlobalSequenceIndexRecord indexRecord) {
         GlobalSequenceIndexLogKey key = new GlobalSequenceIndexLogKey();
         key.setTopicId(indexRecord.topicId());
