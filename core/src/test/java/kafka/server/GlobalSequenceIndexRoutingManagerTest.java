@@ -18,15 +18,22 @@ package kafka.server;
 
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.KafkaClient;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.NotCoordinatorException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseData;
+import org.apache.kafka.common.message.ReadGlobalSequenceDataResponseData;
 import org.apache.kafka.common.message.WriteGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.SimpleRecord;
+import org.apache.kafka.common.requests.ReadGlobalSequenceDataRequest;
+import org.apache.kafka.common.requests.ReadGlobalSequenceDataResponse;
 import org.apache.kafka.common.requests.WriteGlobalSequenceIndexRequest;
 import org.apache.kafka.common.requests.WriteGlobalSequenceIndexResponse;
 import org.apache.kafka.common.requests.LookupGlobalSequenceIndexRequest;
@@ -35,9 +42,13 @@ import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceAppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceAppendResult;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceFetchRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceFetchResult;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceIndexRecord;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookupRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookupResult;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequencePhysicalFetchRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequencePhysicalFetchResult;
 import org.apache.kafka.metadata.MetadataCache;
 import org.apache.kafka.server.util.RequestAndCompletionHandler;
 import org.junit.jupiter.api.BeforeEach;
@@ -71,8 +82,16 @@ class GlobalSequenceIndexRoutingManagerTest {
         new GlobalSequenceAppendRequest(TOPIC_ID, 3, 42L, 4);
     private static final GlobalSequenceLookupRequest LOOKUP_REQUEST =
         new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 6L);
+    private static final GlobalSequenceFetchRequest FETCH_REQUEST = new GlobalSequenceFetchRequest(
+        TOPIC_ID,
+        2L,
+        6L,
+        1024,
+        IsolationLevel.READ_UNCOMMITTED
+    );
 
     private final GlobalSequenceCoordinator coordinator = mock(GlobalSequenceCoordinator.class);
+    private final GlobalSequenceDataReader dataReader = mock(GlobalSequenceDataReader.class);
     private final MetadataCache metadataCache = mock(MetadataCache.class);
     private final AutoTopicCreationManager autoTopicCreationManager = mock(AutoTopicCreationManager.class);
     private final KafkaClient networkClient = mock(KafkaClient.class);
@@ -86,6 +105,7 @@ class GlobalSequenceIndexRoutingManagerTest {
         manager = new GlobalSequenceIndexRoutingManager(
             LOCAL_BROKER_ID,
             coordinator,
+            dataReader,
             metadataCache,
             autoTopicCreationManager,
             LISTENER_NAME,
@@ -225,6 +245,124 @@ class GlobalSequenceIndexRoutingManagerTest {
             new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 4, 3, 42L),
             new GlobalSequenceIndexRecord(TOPIC_ID, 4L, 4, 1, 10L)
         )), result.join());
+    }
+
+    @Test
+    void testFetchesPhysicalBatchesLocallyAndPreservesGlobalOrder() {
+        GlobalSequenceIndexRecord firstIndex = new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 4, 3, 42L);
+        GlobalSequenceIndexRecord secondIndex = new GlobalSequenceIndexRecord(TOPIC_ID, 4L, 3, 1, 10L);
+        MemoryRecords firstRecords = records(42L, "a", "b", "c", "d");
+        MemoryRecords secondRecords = records(10L, "e", "f", "g");
+        GlobalSequencePhysicalFetchRequest firstPhysical = new GlobalSequencePhysicalFetchRequest(
+            TOPIC_ID, 3, 42L, 4, 1024, IsolationLevel.READ_UNCOMMITTED
+        );
+        GlobalSequencePhysicalFetchRequest secondPhysical = new GlobalSequencePhysicalFetchRequest(
+            TOPIC_ID, 1, 10L, 3, 1024, IsolationLevel.READ_UNCOMMITTED
+        );
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(new Node(LOCAL_BROKER_ID, "localhost", 9092)));
+        when(metadataCache.getTopicName(TOPIC_ID)).thenReturn(Optional.of("data-topic"));
+        when(metadataCache.getPartitionLeaderEndpoint("data-topic", 3, LISTENER_NAME))
+            .thenReturn(Optional.of(new Node(LOCAL_BROKER_ID, "localhost", 9092)));
+        when(metadataCache.getPartitionLeaderEndpoint("data-topic", 1, LISTENER_NAME))
+            .thenReturn(Optional.of(new Node(LOCAL_BROKER_ID, "localhost", 9092)));
+        when(coordinator.lookupIndex(new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 6L)))
+            .thenReturn(CompletableFuture.completedFuture(new GlobalSequenceLookupResult(List.of(
+                firstIndex,
+                secondIndex
+            ))));
+        when(dataReader.fetch(firstPhysical)).thenReturn(CompletableFuture.completedFuture(
+            new GlobalSequencePhysicalFetchResult(firstRecords, List.of())
+        ));
+        when(dataReader.fetch(secondPhysical)).thenReturn(CompletableFuture.completedFuture(
+            new GlobalSequencePhysicalFetchResult(secondRecords, List.of())
+        ));
+
+        CompletableFuture<GlobalSequenceFetchResult> result = manager.fetch(FETCH_REQUEST);
+
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        GlobalSequenceFetchResult fetched = result.join();
+        assertEquals(2, fetched.batches().size());
+        assertEquals(2, fetched.batches().get(0).firstRecordIndex());
+        assertEquals(4, fetched.batches().get(0).lastRecordIndexExclusive());
+        assertEquals(firstRecords, fetched.batches().get(0).records());
+        assertEquals(0, fetched.batches().get(1).firstRecordIndex());
+        assertEquals(2, fetched.batches().get(1).lastRecordIndexExclusive());
+        assertEquals(secondRecords, fetched.batches().get(1).records());
+        assertEquals(6L, fetched.nextGlobalOffset());
+
+        GlobalSequenceFetchRequest pagedRequest = new GlobalSequenceFetchRequest(
+            TOPIC_ID, 2L, 6L, 1, IsolationLevel.READ_UNCOMMITTED
+        );
+        when(dataReader.fetch(new GlobalSequencePhysicalFetchRequest(
+            TOPIC_ID, 3, 42L, 4, 1, IsolationLevel.READ_UNCOMMITTED
+        ))).thenReturn(CompletableFuture.completedFuture(
+            new GlobalSequencePhysicalFetchResult(firstRecords, List.of())
+        ));
+        when(dataReader.fetch(new GlobalSequencePhysicalFetchRequest(
+            TOPIC_ID, 1, 10L, 3, 1, IsolationLevel.READ_UNCOMMITTED
+        ))).thenReturn(CompletableFuture.completedFuture(
+            new GlobalSequencePhysicalFetchResult(secondRecords, List.of())
+        ));
+
+        CompletableFuture<GlobalSequenceFetchResult> pagedResult = manager.fetch(pagedRequest);
+
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        assertEquals(1, pagedResult.join().batches().size());
+        assertEquals(4L, pagedResult.join().nextGlobalOffset());
+    }
+
+    @Test
+    void testBuildsRemotePhysicalFetchRequestAndMapsResponse() {
+        Node localLeader = new Node(LOCAL_BROKER_ID, "localhost", 9092);
+        Node remoteLeader = new Node(2, "remote", 9093);
+        GlobalSequenceIndexRecord indexRecord = new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 4, 3, 42L);
+        when(metadataCache.getPartitionLeaderEndpoint(
+            Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME,
+            INDEX_PARTITION,
+            LISTENER_NAME
+        )).thenReturn(Optional.of(localLeader));
+        when(metadataCache.getTopicName(TOPIC_ID)).thenReturn(Optional.of("data-topic"));
+        when(metadataCache.getPartitionLeaderEndpoint("data-topic", 3, LISTENER_NAME))
+            .thenReturn(Optional.of(remoteLeader));
+        when(coordinator.lookupIndex(new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 4L)))
+            .thenReturn(CompletableFuture.completedFuture(new GlobalSequenceLookupResult(List.of(indexRecord))));
+        GlobalSequenceFetchRequest fetchRequest = new GlobalSequenceFetchRequest(
+            TOPIC_ID, 2L, 4L, 1024, IsolationLevel.READ_COMMITTED
+        );
+
+        CompletableFuture<GlobalSequenceFetchResult> result = manager.fetch(fetchRequest);
+        assertTrue(manager.generateRequestsForTest().isEmpty());
+        RequestAndCompletionHandler request = onlyRequest(manager.generateRequestsForTest());
+        ReadGlobalSequenceDataRequest wireRequest = (ReadGlobalSequenceDataRequest) request.request.build();
+
+        assertEquals(remoteLeader, request.destination);
+        assertEquals(TOPIC_ID, wireRequest.data().topicId());
+        assertEquals(3, wireRequest.data().physicalPartition());
+        assertEquals(42L, wireRequest.data().physicalBaseOffset());
+        assertEquals(4, wireRequest.data().recordCount());
+        assertEquals(IsolationLevel.READ_COMMITTED.id(), wireRequest.data().isolationLevel());
+
+        MemoryRecords physicalRecords = records(42L, "a", "b", "c", "d");
+        request.handler.onComplete(response(new ReadGlobalSequenceDataResponseData()
+            .setAbortedTransactions(List.of(
+                new ReadGlobalSequenceDataResponseData.AbortedTransaction()
+                    .setProducerId(7L)
+                    .setFirstOffset(42L)
+            ))
+            .setRecords(physicalRecords)));
+
+        GlobalSequenceFetchResult fetched = result.join();
+        assertEquals(1, fetched.batches().size());
+        assertEquals(2, fetched.batches().get(0).firstRecordIndex());
+        assertEquals(4, fetched.batches().get(0).lastRecordIndexExclusive());
+        assertEquals(7L, fetched.batches().get(0).abortedTransactions().get(0).producerId());
+        assertEquals(4L, fetched.nextGlobalOffset());
     }
 
     @Test
@@ -454,6 +592,20 @@ class GlobalSequenceIndexRoutingManagerTest {
         when(response.hasResponse()).thenReturn(true);
         when(response.responseBody()).thenReturn(new LookupGlobalSequenceIndexResponse(data));
         return response;
+    }
+
+    private static ClientResponse response(ReadGlobalSequenceDataResponseData data) {
+        ClientResponse response = mock(ClientResponse.class);
+        when(response.hasResponse()).thenReturn(true);
+        when(response.responseBody()).thenReturn(new ReadGlobalSequenceDataResponse(data));
+        return response;
+    }
+
+    private static MemoryRecords records(long baseOffset, String... values) {
+        SimpleRecord[] records = java.util.Arrays.stream(values)
+            .map(value -> new SimpleRecord(value.getBytes()))
+            .toArray(SimpleRecord[]::new);
+        return MemoryRecords.withRecords(baseOffset, Compression.NONE, records);
     }
 
     private static void assertClosed(CompletableFuture<?> future) {

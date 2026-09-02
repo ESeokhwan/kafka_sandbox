@@ -75,7 +75,7 @@ import org.apache.kafka.common.resource.{PatternType, Resource, ResourcePattern,
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, KafkaPrincipalSerde, SecurityProtocol}
 import org.apache.kafka.common.utils.annotation.ApiKeyVersionsSource
 import org.apache.kafka.common.utils.{ImplicitLinkedHashCollection, ProducerIdAndEpoch, SecurityUtils, Utils}
-import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator, GlobalSequenceIndexRecord, GlobalSequenceLookupRequest, GlobalSequenceLookupResult}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAbortedTransaction, GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator, GlobalSequenceFetchBatch, GlobalSequenceFetchRequest, GlobalSequenceFetchResult, GlobalSequenceIndexRecord, GlobalSequenceLookupRequest, GlobalSequenceLookupResult, GlobalSequencePhysicalFetchRequest, GlobalSequencePhysicalFetchResult}
 import org.apache.kafka.coordinator.group.GroupConfig.{CONSUMER_HEARTBEAT_INTERVAL_MS_CONFIG, CONSUMER_SESSION_TIMEOUT_MS_CONFIG, SHARE_AUTO_OFFSET_RESET_CONFIG, SHARE_HEARTBEAT_INTERVAL_MS_CONFIG, SHARE_ISOLATION_LEVEL_CONFIG, SHARE_RECORD_LOCK_DURATION_MS_CONFIG, SHARE_SESSION_TIMEOUT_MS_CONFIG, STREAMS_HEARTBEAT_INTERVAL_MS_CONFIG, STREAMS_NUM_STANDBY_REPLICAS_CONFIG, STREAMS_SESSION_TIMEOUT_MS_CONFIG}
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig
 import org.apache.kafka.coordinator.group.{GroupConfig, GroupConfigManager, GroupCoordinator, GroupCoordinatorConfig}
@@ -2693,6 +2693,200 @@ class KafkaApisTest extends Logging {
 
     verify(globalSequenceIndexRoutingManager, never()).lookup(any[GlobalSequenceLookupRequest]())
     val response = verifyNoThrottling[LookupGlobalSequenceIndexResponse](request)
+    assertEquals(Errors.CLUSTER_AUTHORIZATION_FAILED.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleFetchGlobalSequenceRequest(): Unit = {
+    val topic = "global-sequence-fetch"
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache(topic, numPartitions = 2, topicId = topicId)
+    val wireData = new FetchGlobalSequenceRequestData()
+      .setTopicId(topicId)
+      .setGlobalStartOffset(2L)
+      .setGlobalEndOffsetExclusive(6L)
+      .setMaxBytes(1024)
+      .setIsolationLevel(IsolationLevel.READ_COMMITTED.id)
+    val request = buildRequest(new FetchGlobalSequenceRequest.Builder(wireData).build())
+    val fetchFuture = new CompletableFuture[GlobalSequenceFetchResult]()
+    when(globalSequenceIndexRoutingManager.fetch(any[GlobalSequenceFetchRequest]()))
+      .thenReturn(fetchFuture)
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val fetchRequest = ArgumentCaptor.forClass(classOf[GlobalSequenceFetchRequest])
+    verify(globalSequenceIndexRoutingManager).fetch(fetchRequest.capture())
+    assertEquals(
+      new GlobalSequenceFetchRequest(topicId, 2L, 6L, 1024, IsolationLevel.READ_COMMITTED),
+      fetchRequest.getValue
+    )
+
+    val records = MemoryRecords.withRecords(
+      20L,
+      Compression.NONE,
+      new SimpleRecord("one".getBytes),
+      new SimpleRecord("two".getBytes),
+      new SimpleRecord("three".getBytes),
+      new SimpleRecord("four".getBytes)
+    )
+    fetchFuture.complete(new GlobalSequenceFetchResult(util.List.of(
+      new GlobalSequenceFetchBatch(
+        0L,
+        4,
+        2,
+        4,
+        1,
+        20L,
+        records,
+        util.List.of(new GlobalSequenceAbortedTransaction(7L, 20L))
+      )
+    ), 4L))
+
+    val response = verifyNoThrottling[FetchGlobalSequenceResponse](request)
+    assertEquals(Errors.NONE.code, response.data.errorCode)
+    assertEquals(4L, response.data.nextGlobalOffset)
+    assertEquals(1, response.data.batches.size)
+    val batch = response.data.batches.get(0)
+    assertEquals(2, batch.firstRecordIndex)
+    assertEquals(4, batch.lastRecordIndexExclusive)
+    assertEquals(1, batch.physicalPartition)
+    assertEquals(20L, batch.physicalBaseOffset)
+    assertEquals(records.sizeInBytes, batch.records.sizeInBytes)
+    assertEquals(7L, batch.abortedTransactions.get(0).producerId)
+  }
+
+  @Test
+  def testHandleFetchGlobalSequenceRequestAuthorizationFailure(): Unit = {
+    val topic = "global-sequence-fetch-unauthorized"
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+    val request = buildRequest(new FetchGlobalSequenceRequest.Builder(
+      new FetchGlobalSequenceRequestData()
+        .setTopicId(topicId)
+        .setGlobalStartOffset(0L)
+        .setGlobalEndOffsetExclusive(1L)
+        .setMaxBytes(1024)
+    ).build())
+    val authorizer = mock(classOf[Authorizer])
+    when(authorizer.authorize(any[RequestContext], any[util.List[Action]]))
+      .thenReturn(util.List.of(AuthorizationResult.DENIED))
+
+    kafkaApis = createKafkaApis(authorizer = Some(authorizer))
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never()).fetch(any[GlobalSequenceFetchRequest]())
+    val response = verifyNoThrottling[FetchGlobalSequenceResponse](request)
+    assertEquals(Errors.TOPIC_AUTHORIZATION_FAILED.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleFetchGlobalSequenceRequestRejectsInvalidRange(): Unit = {
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache("global-sequence-fetch-invalid", numPartitions = 1, topicId = topicId)
+    val request = buildRequest(new FetchGlobalSequenceRequest.Builder(
+      new FetchGlobalSequenceRequestData()
+        .setTopicId(topicId)
+        .setGlobalStartOffset(5L)
+        .setGlobalEndOffsetExclusive(5L)
+        .setMaxBytes(1024)
+    ).build())
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never()).fetch(any[GlobalSequenceFetchRequest]())
+    val response = verifyNoThrottling[FetchGlobalSequenceResponse](request)
+    assertEquals(Errors.INVALID_REQUEST.code, response.data.errorCode)
+  }
+
+  @Test
+  def testHandleFetchGlobalSequenceRequestRejectsUnindexedOffset(): Unit = {
+    val topicId = Uuid.randomUuid()
+    addTopicToMetadataCache("global-sequence-fetch-out-of-range", numPartitions = 1, topicId = topicId)
+    val request = buildRequest(new FetchGlobalSequenceRequest.Builder(
+      new FetchGlobalSequenceRequestData()
+        .setTopicId(topicId)
+        .setGlobalStartOffset(10L)
+        .setGlobalEndOffsetExclusive(11L)
+        .setMaxBytes(1024)
+    ).build())
+    when(globalSequenceIndexRoutingManager.fetch(any[GlobalSequenceFetchRequest]()))
+      .thenReturn(CompletableFuture.failedFuture(new OffsetOutOfRangeException("not indexed")))
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val response = verifyNoThrottling[FetchGlobalSequenceResponse](request)
+    assertEquals(Errors.OFFSET_OUT_OF_RANGE.code, response.data.errorCode)
+    assertTrue(response.data.batches.isEmpty)
+  }
+
+  @Test
+  def testHandleReadGlobalSequenceDataRequest(): Unit = {
+    val topicId = Uuid.randomUuid()
+    val wireData = new ReadGlobalSequenceDataRequestData()
+      .setTopicId(topicId)
+      .setPhysicalPartition(2)
+      .setPhysicalBaseOffset(42L)
+      .setRecordCount(2)
+      .setMaxBytes(1024)
+      .setIsolationLevel(IsolationLevel.READ_UNCOMMITTED.id)
+    val request = buildRequest(new ReadGlobalSequenceDataRequest.Builder(wireData).build())
+    val readFuture = new CompletableFuture[GlobalSequencePhysicalFetchResult]()
+    when(globalSequenceIndexRoutingManager.readPhysicalLocally(any[GlobalSequencePhysicalFetchRequest]()))
+      .thenReturn(readFuture)
+
+    kafkaApis = createKafkaApis()
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val physicalRequest = ArgumentCaptor.forClass(classOf[GlobalSequencePhysicalFetchRequest])
+    verify(globalSequenceIndexRoutingManager).readPhysicalLocally(physicalRequest.capture())
+    assertEquals(
+      new GlobalSequencePhysicalFetchRequest(
+        topicId,
+        2,
+        42L,
+        2,
+        1024,
+        IsolationLevel.READ_UNCOMMITTED
+      ),
+      physicalRequest.getValue
+    )
+
+    val records = MemoryRecords.withRecords(
+      42L,
+      Compression.NONE,
+      new SimpleRecord("one".getBytes),
+      new SimpleRecord("two".getBytes)
+    )
+    readFuture.complete(new GlobalSequencePhysicalFetchResult(records, util.List.of()))
+
+    val response = verifyNoThrottling[ReadGlobalSequenceDataResponse](request)
+    assertEquals(Errors.NONE.code, response.data.errorCode)
+    assertEquals(records.sizeInBytes, response.data.records.sizeInBytes)
+  }
+
+  @Test
+  def testHandleReadGlobalSequenceDataRequestRequiresClusterAction(): Unit = {
+    val request = buildRequest(new ReadGlobalSequenceDataRequest.Builder(
+      new ReadGlobalSequenceDataRequestData()
+        .setTopicId(Uuid.randomUuid())
+        .setPhysicalPartition(0)
+        .setPhysicalBaseOffset(0L)
+        .setRecordCount(1)
+        .setMaxBytes(1024)
+    ).build())
+    val authorizer = mock(classOf[Authorizer])
+    when(authorizer.authorize(any[RequestContext], any[util.List[Action]]))
+      .thenReturn(util.List.of(AuthorizationResult.DENIED))
+
+    kafkaApis = createKafkaApis(authorizer = Some(authorizer))
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    verify(globalSequenceIndexRoutingManager, never())
+      .readPhysicalLocally(any[GlobalSequencePhysicalFetchRequest]())
+    val response = verifyNoThrottling[ReadGlobalSequenceDataResponse](request)
     assertEquals(Errors.CLUSTER_AUTHORIZATION_FAILED.code, response.data.errorCode)
   }
 

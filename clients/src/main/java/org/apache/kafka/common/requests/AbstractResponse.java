@@ -295,6 +295,10 @@ public abstract class AbstractResponse implements AbstractRequestResponse {
                 return WriteGlobalSequenceIndexResponse.parse(readable, version);
             case LOOKUP_GLOBAL_SEQUENCE_INDEX:
                 return LookupGlobalSequenceIndexResponse.parse(readable, version);
+            case FETCH_GLOBAL_SEQUENCE:
+                return FetchGlobalSequenceResponse.parse(readable, version);
+            case READ_GLOBAL_SEQUENCE_DATA:
+                return ReadGlobalSequenceDataResponse.parse(readable, version);
             default:
                 throw new AssertionError(String.format("ApiKey %s is not currently handled in `parseResponse`, the " +
                         "code should be updated to do so.", apiKey));

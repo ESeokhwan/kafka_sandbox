@@ -56,8 +56,8 @@ import org.apache.kafka.common.resource.{Resource, ResourceType}
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.security.token.delegation.{DelegationToken, TokenInformation}
 import org.apache.kafka.common.utils.{ProducerIdAndEpoch, Time}
-import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
-import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator, GlobalSequenceLookupRequest, GlobalSequenceLookupResult}
+import org.apache.kafka.common.{IsolationLevel, Node, TopicIdPartition, TopicPartition, Uuid}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceAppendRequest, GlobalSequenceAppendResult, GlobalSequenceCoordinator, GlobalSequenceFetchRequest, GlobalSequenceFetchResult, GlobalSequenceLookupRequest, GlobalSequenceLookupResult, GlobalSequencePhysicalFetchRequest, GlobalSequencePhysicalFetchResult}
 import org.apache.kafka.coordinator.group.{Group, GroupConfig, GroupConfigManager, GroupCoordinator}
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
@@ -243,6 +243,8 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.WRITE_SHARE_GROUP_STATE => handleWriteShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.WRITE_GLOBAL_SEQUENCE_INDEX => handleWriteGlobalSequenceIndexRequest(request).exceptionally(handleError)
         case ApiKeys.LOOKUP_GLOBAL_SEQUENCE_INDEX => handleLookupGlobalSequenceIndexRequest(request).exceptionally(handleError)
+        case ApiKeys.FETCH_GLOBAL_SEQUENCE => handleFetchGlobalSequenceRequest(request).exceptionally(handleError)
+        case ApiKeys.READ_GLOBAL_SEQUENCE_DATA => handleReadGlobalSequenceDataRequest(request).exceptionally(handleError)
         case ApiKeys.DELETE_SHARE_GROUP_STATE => handleDeleteShareGroupStateRequest(request).exceptionally(handleError)
         case ApiKeys.READ_SHARE_GROUP_STATE_SUMMARY => handleReadShareGroupStateSummaryRequest(request).exceptionally(handleError)
         case ApiKeys.DESCRIBE_SHARE_GROUP_OFFSETS => handleDescribeShareGroupOffsetsRequest(request).exceptionally(handleError)
@@ -3740,6 +3742,116 @@ class KafkaApis(val requestChannel: RequestChannel,
         }.asJava
         requestHelper.sendMaybeThrottle(request, new LookupGlobalSequenceIndexResponse(
           new LookupGlobalSequenceIndexResponseData().setIndexEntries(entries)
+        ))
+      }
+    }
+  }
+
+  def handleFetchGlobalSequenceRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    val fetchRequest = request.body[FetchGlobalSequenceRequest]
+    val data = fetchRequest.data
+    val topicName = metadataCache.getTopicName(data.topicId)
+    if (topicName.isEmpty) {
+      requestHelper.sendMaybeThrottle(request, fetchRequest.getErrorResponse(
+        0,
+        Errors.UNKNOWN_TOPIC_ID.exception(s"Unknown topic ID ${data.topicId}")
+      ))
+      return CompletableFuture.completedFuture[Unit](())
+    }
+    if (!authHelper.authorize(request.context, READ, TOPIC, topicName.get())) {
+      requestHelper.sendMaybeThrottle(request, fetchRequest.getErrorResponse(
+        0,
+        Errors.TOPIC_AUTHORIZATION_FAILED.exception()
+      ))
+      return CompletableFuture.completedFuture[Unit](())
+    }
+
+    val fetchFuture = try {
+      globalSequenceIndexRoutingManager.fetch(new GlobalSequenceFetchRequest(
+        data.topicId,
+        data.globalStartOffset,
+        data.globalEndOffsetExclusive,
+        data.maxBytes,
+        IsolationLevel.forId(data.isolationLevel)
+      ))
+    } catch {
+      case exception: IllegalArgumentException =>
+        CompletableFuture.failedFuture[GlobalSequenceFetchResult](
+          new InvalidRequestException(exception.getMessage, exception)
+        )
+      case exception: Throwable => CompletableFuture.failedFuture[GlobalSequenceFetchResult](exception)
+    }
+
+    fetchFuture.handle[Unit] { (result, exception) =>
+      if (exception != null) {
+        requestHelper.sendMaybeThrottle(request, fetchRequest.getErrorResponse(0, exception))
+      } else {
+        val batches = result.batches.asScala.map { batch =>
+          val abortedTransactions = batch.abortedTransactions.asScala.map { transaction =>
+            new FetchGlobalSequenceResponseData.AbortedTransaction()
+              .setProducerId(transaction.producerId)
+              .setFirstOffset(transaction.firstOffset)
+          }.asJava
+          new FetchGlobalSequenceResponseData.GlobalSequenceFetchBatch()
+            .setGlobalBaseOffset(batch.globalBaseOffset)
+            .setRecordCount(batch.recordCount)
+            .setFirstRecordIndex(batch.firstRecordIndex)
+            .setLastRecordIndexExclusive(batch.lastRecordIndexExclusive)
+            .setPhysicalPartition(batch.partitionIndex)
+            .setPhysicalBaseOffset(batch.partitionBaseOffset)
+            .setAbortedTransactions(abortedTransactions)
+            .setRecords(batch.records)
+        }.asJava
+        requestHelper.sendMaybeThrottle(request, new FetchGlobalSequenceResponse(
+          new FetchGlobalSequenceResponseData()
+            .setNextGlobalOffset(result.nextGlobalOffset)
+            .setBatches(batches)
+        ))
+      }
+    }
+  }
+
+  def handleReadGlobalSequenceDataRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    val readRequest = request.body[ReadGlobalSequenceDataRequest]
+    if (!authorizeClusterOperation(request, CLUSTER_ACTION)) {
+      requestHelper.sendMaybeThrottle(request, readRequest.getErrorResponse(
+        0,
+        Errors.CLUSTER_AUTHORIZATION_FAILED.exception()
+      ))
+      return CompletableFuture.completedFuture[Unit](())
+    }
+
+    val data = readRequest.data
+    val readFuture = try {
+      globalSequenceIndexRoutingManager.readPhysicalLocally(new GlobalSequencePhysicalFetchRequest(
+        data.topicId,
+        data.physicalPartition,
+        data.physicalBaseOffset,
+        data.recordCount,
+        data.maxBytes,
+        IsolationLevel.forId(data.isolationLevel)
+      ))
+    } catch {
+      case exception: IllegalArgumentException =>
+        CompletableFuture.failedFuture[GlobalSequencePhysicalFetchResult](
+          new InvalidRequestException(exception.getMessage, exception)
+        )
+      case exception: Throwable => CompletableFuture.failedFuture[GlobalSequencePhysicalFetchResult](exception)
+    }
+
+    readFuture.handle[Unit] { (result, exception) =>
+      if (exception != null) {
+        requestHelper.sendMaybeThrottle(request, readRequest.getErrorResponse(0, exception))
+      } else {
+        val abortedTransactions = result.abortedTransactions.asScala.map { transaction =>
+          new ReadGlobalSequenceDataResponseData.AbortedTransaction()
+            .setProducerId(transaction.producerId)
+            .setFirstOffset(transaction.firstOffset)
+        }.asJava
+        requestHelper.sendMaybeThrottle(request, new ReadGlobalSequenceDataResponse(
+          new ReadGlobalSequenceDataResponseData()
+            .setAbortedTransactions(abortedTransactions)
+            .setRecords(result.records)
         ))
       }
     }

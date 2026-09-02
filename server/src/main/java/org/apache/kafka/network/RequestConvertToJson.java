@@ -112,6 +112,8 @@ import org.apache.kafka.common.message.ExpireDelegationTokenRequestDataJsonConve
 import org.apache.kafka.common.message.ExpireDelegationTokenResponseDataJsonConverter;
 import org.apache.kafka.common.message.FetchRequestDataJsonConverter;
 import org.apache.kafka.common.message.FetchResponseDataJsonConverter;
+import org.apache.kafka.common.message.FetchGlobalSequenceRequestDataJsonConverter;
+import org.apache.kafka.common.message.FetchGlobalSequenceResponseDataJsonConverter;
 import org.apache.kafka.common.message.FetchSnapshotRequestDataJsonConverter;
 import org.apache.kafka.common.message.FetchSnapshotResponseDataJsonConverter;
 import org.apache.kafka.common.message.FindCoordinatorRequestDataJsonConverter;
@@ -142,6 +144,8 @@ import org.apache.kafka.common.message.ListTransactionsRequestDataJsonConverter;
 import org.apache.kafka.common.message.ListTransactionsResponseDataJsonConverter;
 import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestDataJsonConverter;
 import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseDataJsonConverter;
+import org.apache.kafka.common.message.ReadGlobalSequenceDataRequestDataJsonConverter;
+import org.apache.kafka.common.message.ReadGlobalSequenceDataResponseDataJsonConverter;
 import org.apache.kafka.common.message.MetadataRequestDataJsonConverter;
 import org.apache.kafka.common.message.MetadataResponseDataJsonConverter;
 import org.apache.kafka.common.message.OffsetCommitRequestDataJsonConverter;
@@ -298,6 +302,8 @@ import org.apache.kafka.common.requests.ExpireDelegationTokenRequest;
 import org.apache.kafka.common.requests.ExpireDelegationTokenResponse;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.FetchResponse;
+import org.apache.kafka.common.requests.FetchGlobalSequenceRequest;
+import org.apache.kafka.common.requests.FetchGlobalSequenceResponse;
 import org.apache.kafka.common.requests.FetchSnapshotRequest;
 import org.apache.kafka.common.requests.FetchSnapshotResponse;
 import org.apache.kafka.common.requests.FindCoordinatorRequest;
@@ -328,6 +334,8 @@ import org.apache.kafka.common.requests.ListTransactionsRequest;
 import org.apache.kafka.common.requests.ListTransactionsResponse;
 import org.apache.kafka.common.requests.LookupGlobalSequenceIndexRequest;
 import org.apache.kafka.common.requests.LookupGlobalSequenceIndexResponse;
+import org.apache.kafka.common.requests.ReadGlobalSequenceDataRequest;
+import org.apache.kafka.common.requests.ReadGlobalSequenceDataResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.OffsetCommitRequest;
@@ -581,6 +589,10 @@ public class RequestConvertToJson {
                 return WriteGlobalSequenceIndexRequestDataJsonConverter.write(((WriteGlobalSequenceIndexRequest) request).data(), request.version());
             case LOOKUP_GLOBAL_SEQUENCE_INDEX:
                 return LookupGlobalSequenceIndexRequestDataJsonConverter.write(((LookupGlobalSequenceIndexRequest) request).data(), request.version());
+            case FETCH_GLOBAL_SEQUENCE:
+                return FetchGlobalSequenceRequestDataJsonConverter.write(((FetchGlobalSequenceRequest) request).data(), request.version());
+            case READ_GLOBAL_SEQUENCE_DATA:
+                return ReadGlobalSequenceDataRequestDataJsonConverter.write(((ReadGlobalSequenceDataRequest) request).data(), request.version());
             case WRITE_TXN_MARKERS:
                 return WriteTxnMarkersRequestDataJsonConverter.write(((WriteTxnMarkersRequest) request).data(), request.version());
             default:
@@ -771,6 +783,10 @@ public class RequestConvertToJson {
                 return WriteGlobalSequenceIndexResponseDataJsonConverter.write(((WriteGlobalSequenceIndexResponse) response).data(), version);
             case LOOKUP_GLOBAL_SEQUENCE_INDEX:
                 return LookupGlobalSequenceIndexResponseDataJsonConverter.write(((LookupGlobalSequenceIndexResponse) response).data(), version);
+            case FETCH_GLOBAL_SEQUENCE:
+                return FetchGlobalSequenceResponseDataJsonConverter.write(((FetchGlobalSequenceResponse) response).data(), version);
+            case READ_GLOBAL_SEQUENCE_DATA:
+                return ReadGlobalSequenceDataResponseDataJsonConverter.write(((ReadGlobalSequenceDataResponse) response).data(), version);
             case WRITE_TXN_MARKERS:
                 return WriteTxnMarkersResponseDataJsonConverter.write(((WriteTxnMarkersResponse) response).data(), version);
             default:

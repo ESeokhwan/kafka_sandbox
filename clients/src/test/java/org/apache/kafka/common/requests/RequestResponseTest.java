@@ -154,6 +154,8 @@ import org.apache.kafka.common.message.EnvelopeResponseData;
 import org.apache.kafka.common.message.ExpireDelegationTokenRequestData;
 import org.apache.kafka.common.message.ExpireDelegationTokenResponseData;
 import org.apache.kafka.common.message.FetchResponseData;
+import org.apache.kafka.common.message.FetchGlobalSequenceRequestData;
+import org.apache.kafka.common.message.FetchGlobalSequenceResponseData;
 import org.apache.kafka.common.message.FetchSnapshotRequestData;
 import org.apache.kafka.common.message.FetchSnapshotResponseData;
 import org.apache.kafka.common.message.FindCoordinatorRequestData;
@@ -190,6 +192,8 @@ import org.apache.kafka.common.message.ListTransactionsRequestData;
 import org.apache.kafka.common.message.ListTransactionsResponseData;
 import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestData;
 import org.apache.kafka.common.message.LookupGlobalSequenceIndexResponseData;
+import org.apache.kafka.common.message.ReadGlobalSequenceDataRequestData;
+import org.apache.kafka.common.message.ReadGlobalSequenceDataResponseData;
 import org.apache.kafka.common.message.OffsetCommitRequestData;
 import org.apache.kafka.common.message.OffsetCommitResponseData;
 import org.apache.kafka.common.message.OffsetDeleteRequestData;
@@ -1086,6 +1090,8 @@ public class RequestResponseTest {
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsRequest(version);
             case WRITE_GLOBAL_SEQUENCE_INDEX: return createWriteGlobalSequenceIndexRequest(version);
             case LOOKUP_GLOBAL_SEQUENCE_INDEX: return createLookupGlobalSequenceIndexRequest(version);
+            case FETCH_GLOBAL_SEQUENCE: return createFetchGlobalSequenceRequest(version);
+            case READ_GLOBAL_SEQUENCE_DATA: return createReadGlobalSequenceDataRequest(version);
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
     }
@@ -1183,6 +1189,8 @@ public class RequestResponseTest {
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsResponse();
             case WRITE_GLOBAL_SEQUENCE_INDEX: return createWriteGlobalSequenceIndexResponse();
             case LOOKUP_GLOBAL_SEQUENCE_INDEX: return createLookupGlobalSequenceIndexResponse();
+            case FETCH_GLOBAL_SEQUENCE: return createFetchGlobalSequenceResponse();
+            case READ_GLOBAL_SEQUENCE_DATA: return createReadGlobalSequenceDataResponse();
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
     }
@@ -3799,6 +3807,61 @@ public class RequestResponseTest {
                     .setRecordCount(5)
                     .setPhysicalPartition(2)
                     .setPhysicalBaseOffset(42L)
+            )));
+    }
+
+    private FetchGlobalSequenceRequest createFetchGlobalSequenceRequest(short version) {
+        return new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData()
+            .setTopicId(TOPIC_ID)
+            .setGlobalStartOffset(2L)
+            .setGlobalEndOffsetExclusive(5L)
+            .setMaxBytes(1024)
+            .setIsolationLevel(IsolationLevel.READ_COMMITTED.id()))
+            .build(version);
+    }
+
+    private FetchGlobalSequenceResponse createFetchGlobalSequenceResponse() {
+        return new FetchGlobalSequenceResponse(new FetchGlobalSequenceResponseData()
+            .setNextGlobalOffset(5L)
+            .setBatches(Collections.singletonList(
+                new FetchGlobalSequenceResponseData.GlobalSequenceFetchBatch()
+                    .setGlobalBaseOffset(0L)
+                    .setRecordCount(5)
+                    .setFirstRecordIndex(2)
+                    .setLastRecordIndexExclusive(5)
+                    .setPhysicalPartition(2)
+                    .setPhysicalBaseOffset(42L)
+                    .setAbortedTransactions(Collections.singletonList(
+                        new FetchGlobalSequenceResponseData.AbortedTransaction()
+                            .setProducerId(3L)
+                            .setFirstOffset(42L)
+                    ))
+                    .setRecords(MemoryRecords.withRecords(
+                        42L,
+                        Compression.NONE,
+                        new SimpleRecord("global".getBytes())
+                    ))
+            )));
+    }
+
+    private ReadGlobalSequenceDataRequest createReadGlobalSequenceDataRequest(short version) {
+        return new ReadGlobalSequenceDataRequest.Builder(new ReadGlobalSequenceDataRequestData()
+            .setTopicId(TOPIC_ID)
+            .setPhysicalPartition(2)
+            .setPhysicalBaseOffset(42L)
+            .setRecordCount(1)
+            .setMaxBytes(1024)
+            .setIsolationLevel(IsolationLevel.READ_UNCOMMITTED.id()))
+            .build(version);
+    }
+
+    private ReadGlobalSequenceDataResponse createReadGlobalSequenceDataResponse() {
+        return new ReadGlobalSequenceDataResponse(new ReadGlobalSequenceDataResponseData()
+            .setAbortedTransactions(Collections.emptyList())
+            .setRecords(MemoryRecords.withRecords(
+                42L,
+                Compression.NONE,
+                new SimpleRecord("physical".getBytes())
             )));
     }
 

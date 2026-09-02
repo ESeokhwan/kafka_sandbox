@@ -741,6 +741,7 @@ class BrokerServer(
     new GlobalSequenceIndexRoutingManager(
       config.brokerId,
       globalSequenceCoordinator,
+      new GlobalSequenceDataReader(replicaManager, metadataCache),
       metadataCache,
       autoTopicCreationManager,
       config.interBrokerListenerName,

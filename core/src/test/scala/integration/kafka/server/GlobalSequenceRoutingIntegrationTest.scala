@@ -23,9 +23,10 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.internals.Topic
-import org.apache.kafka.common.message.LookupGlobalSequenceIndexRequestData
+import org.apache.kafka.common.message.{FetchGlobalSequenceRequestData, LookupGlobalSequenceIndexRequestData}
 import org.apache.kafka.common.protocol.Errors
-import org.apache.kafka.common.requests.{LookupGlobalSequenceIndexRequest, LookupGlobalSequenceIndexResponse}
+import org.apache.kafka.common.record.Records
+import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, FetchGlobalSequenceResponse, LookupGlobalSequenceIndexRequest, LookupGlobalSequenceIndexResponse}
 import org.apache.kafka.common.test.api.{ClusterConfigProperty, ClusterTest, Type}
 import org.apache.kafka.common.test.{ClusterInstance, TestUtils}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
@@ -195,5 +196,35 @@ class GlobalSequenceRoutingIntegrationTest {
     assertEquals(0L, lookupResponse.data.indexEntries.get(0).physicalBaseOffset)
     assertEquals(1L, lookupResponse.data.indexEntries.get(1).globalBaseOffset)
     assertEquals(1L, lookupResponse.data.indexEntries.get(1).physicalBaseOffset)
+
+    val fetchRequest = new FetchGlobalSequenceRequest.Builder(
+      new FetchGlobalSequenceRequestData()
+        .setTopicId(dataTopicId)
+        .setGlobalStartOffset(0L)
+        .setGlobalEndOffsetExclusive(2L)
+        .setMaxBytes(1024 * 1024)
+    ).build()
+    val fetchResponse = connectAndReceive[FetchGlobalSequenceResponse](
+      fetchRequest,
+      cluster.brokers().get(indexLeaderId).socketServer,
+      cluster.clientListener()
+    )
+
+    assertEquals(Errors.NONE.code, fetchResponse.data.errorCode)
+    assertEquals(2L, fetchResponse.data.nextGlobalOffset)
+    assertEquals(2, fetchResponse.data.batches.size)
+    assertEquals(0L, fetchResponse.data.batches.get(0).globalBaseOffset)
+    assertEquals(0, fetchResponse.data.batches.get(0).firstRecordIndex)
+    assertEquals(1, fetchResponse.data.batches.get(0).lastRecordIndexExclusive)
+    assertEquals("first", firstValue(fetchResponse.data.batches.get(0).records.asInstanceOf[Records]))
+    assertEquals(1L, fetchResponse.data.batches.get(1).globalBaseOffset)
+    assertEquals("second", firstValue(fetchResponse.data.batches.get(1).records.asInstanceOf[Records]))
+  }
+
+  private def firstValue(records: Records): String = {
+    val record = records.records().iterator().next()
+    val value = new Array[Byte](record.valueSize())
+    record.value().get(value)
+    new String(value, StandardCharsets.UTF_8)
   }
 }
