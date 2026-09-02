@@ -20,10 +20,9 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.OffsetOutOfRangeException;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
+import org.apache.kafka.timeline.TimelineLong;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -118,25 +117,19 @@ public class GlobalSequenceStateRegistry {
 
     public static class GlobalSequenceState {
         private final TimelineHashMap<Long, GlobalSequenceIndexRecord> sequenceByGlobalBaseOffset;
+        // Allocations are replayed in increasing global-offset order, so their dense ordinals provide
+        // a snapshot-aware binary-search index without rebuilding and sorting every lookup.
+        private final TimelineHashMap<Long, GlobalSequenceIndexRecord> sequenceByAllocationOrdinal;
         private final TimelineHashMap<PhysicalBatchId, GlobalSequenceIndexRecord> sequenceByPhysicalBatch;
         private final GlobalOffsetSequencer offsetSequencer;
+        private final TimelineLong allocationCount;
 
         GlobalSequenceState(SnapshotRegistry snapshotRegistry) {
             this.sequenceByGlobalBaseOffset = new TimelineHashMap<>(snapshotRegistry, 0);
+            this.sequenceByAllocationOrdinal = new TimelineHashMap<>(snapshotRegistry, 0);
             this.sequenceByPhysicalBatch = new TimelineHashMap<>(snapshotRegistry, 0);
             this.offsetSequencer = new BasicGlobalOffsetSequencer(snapshotRegistry);
-        }
-
-        public GlobalSequenceIndexRecord[] getSequenceIndexAsArray() {
-            return getSequenceIndexAsArray(SnapshotRegistry.LATEST_EPOCH);
-        }
-
-        private GlobalSequenceIndexRecord[] getSequenceIndexAsArray(long indexLogHighWatermark) {
-            GlobalSequenceIndexRecord[] records = sequenceByGlobalBaseOffset.values(indexLogHighWatermark).toArray(
-                new GlobalSequenceIndexRecord[0]
-            );
-            Arrays.sort(records, Comparator.comparingLong(GlobalSequenceIndexRecord::globalBaseOffset));
-            return records;
+            this.allocationCount = new TimelineLong(snapshotRegistry);
         }
 
         long nextGlobalOffset() {
@@ -195,9 +188,21 @@ public class GlobalSequenceStateRegistry {
             }
 
             validateReplayOrder(indexRecord);
+            long allocationOrdinal = allocationCount.get();
+            long nextAllocationCount = Math.addExact(allocationOrdinal, 1L);
+            GlobalSequenceIndexRecord byAllocationOrdinal = sequenceByAllocationOrdinal.get(allocationOrdinal);
+            if (byAllocationOrdinal != null) {
+                throw new IllegalStateException(
+                    "Conflicting allocation at ordinal " + allocationOrdinal + ": existing=" +
+                        byAllocationOrdinal + ", replayed=" + indexRecord
+                );
+            }
+
             sequenceByGlobalBaseOffset.put(indexRecord.globalBaseOffset(), indexRecord);
             sequenceByPhysicalBatch.put(physicalBatchId, indexRecord);
+            sequenceByAllocationOrdinal.put(allocationOrdinal, indexRecord);
             offsetSequencer.replayAllocation(indexRecord.globalBaseOffset(), indexRecord.recordCount());
+            allocationCount.set(nextAllocationCount);
         }
 
         void replayTombstone(long globalBaseOffset) {
@@ -218,6 +223,7 @@ public class GlobalSequenceStateRegistry {
             // Tombstones define the end of the retry-safety window for this physical batch. They
             // must not be emitted until a durable per-topic watermark is added to the log schema;
             // otherwise compaction could make the in-memory next offset unrecoverable on restart.
+            // The ordinal entry remains so lookups can locate and reject the deleted global range.
             sequenceByGlobalBaseOffset.remove(globalBaseOffset);
             sequenceByPhysicalBatch.remove(physicalBatchId);
         }
@@ -225,12 +231,22 @@ public class GlobalSequenceStateRegistry {
         GlobalSequenceLookupResult lookup(GlobalSequenceLookupRequest request, long indexLogHighWatermark) {
             List<GlobalSequenceIndexRecord> matches = new ArrayList<>();
             long nextOffsetToCover = request.globalStartOffset();
+            long count = allocationCount.get(indexLogHighWatermark);
+            long firstOrdinal = findFirstCandidateOrdinal(
+                request.globalStartOffset(),
+                count,
+                indexLogHighWatermark
+            );
 
-            for (GlobalSequenceIndexRecord indexRecord : getSequenceIndexAsArray(indexLogHighWatermark)) {
+            for (long ordinal = firstOrdinal; ordinal < count; ordinal++) {
+                GlobalSequenceIndexRecord indexRecord = indexRecordAt(ordinal, indexLogHighWatermark);
                 if (indexRecord.globalEndOffsetExclusive() <= nextOffsetToCover) {
                     continue;
                 }
                 if (indexRecord.globalBaseOffset() > nextOffsetToCover) {
+                    throw outOfRange(request, nextOffsetToCover);
+                }
+                if (!isActive(indexRecord, indexLogHighWatermark)) {
                     throw outOfRange(request, nextOffsetToCover);
                 }
 
@@ -245,6 +261,49 @@ public class GlobalSequenceStateRegistry {
             }
 
             throw outOfRange(request, nextOffsetToCover);
+        }
+
+        private long findFirstCandidateOrdinal(long globalStartOffset, long count, long indexLogHighWatermark) {
+            long low = 0L;
+            long high = count;
+            while (low < high) {
+                long middle = low + ((high - low) >>> 1);
+                GlobalSequenceIndexRecord indexRecord = indexRecordAt(middle, indexLogHighWatermark);
+                if (indexRecord.globalBaseOffset() <= globalStartOffset) {
+                    low = middle + 1L;
+                } else {
+                    high = middle;
+                }
+            }
+            return low == 0L ? 0L : low - 1L;
+        }
+
+        private GlobalSequenceIndexRecord indexRecordAt(long ordinal, long indexLogHighWatermark) {
+            GlobalSequenceIndexRecord indexRecord = sequenceByAllocationOrdinal.get(
+                ordinal,
+                indexLogHighWatermark
+            );
+            if (indexRecord == null) {
+                throw new IllegalStateException("Missing global sequence allocation at ordinal " + ordinal);
+            }
+            return indexRecord;
+        }
+
+        private boolean isActive(GlobalSequenceIndexRecord indexRecord, long indexLogHighWatermark) {
+            GlobalSequenceIndexRecord active = sequenceByGlobalBaseOffset.get(
+                indexRecord.globalBaseOffset(),
+                indexLogHighWatermark
+            );
+            if (active == null) {
+                return false;
+            }
+            if (!active.equals(indexRecord)) {
+                throw new IllegalStateException(
+                    "Global sequence indexes are inconsistent at global base offset " +
+                        indexRecord.globalBaseOffset() + ": ordered=" + indexRecord + ", active=" + active
+                );
+            }
+            return true;
         }
 
         private void validateReplayOrder(GlobalSequenceIndexRecord candidate) {

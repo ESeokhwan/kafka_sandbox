@@ -18,6 +18,7 @@ package org.apache.kafka.coordinator.globalsequence;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.errors.OffsetOutOfRangeException;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
@@ -37,7 +38,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -103,11 +103,14 @@ class GlobalSequenceCoordinatorShardTest {
 
         replay(expectedRecord);
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(
                 new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 3, 1, 20L)
-            },
-            stateRegistry.getState(TOPIC_ID).getSequenceIndexAsArray()
+            )),
+            shard.lookupIndex(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
     }
 
@@ -127,12 +130,15 @@ class GlobalSequenceCoordinatorShardTest {
         assertEquals(new GlobalSequenceAppendResult(3L, 2, false), second.response());
         replay(second.records().get(0));
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(
                 new GlobalSequenceIndexRecord(TOPIC_ID, 0L, 3, 1, 20L),
                 new GlobalSequenceIndexRecord(TOPIC_ID, 3L, 2, 0, 8L)
-            },
-            stateRegistry.getState(TOPIC_ID).getSequenceIndexAsArray()
+            )),
+            shard.lookupIndex(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
     }
 
@@ -181,9 +187,12 @@ class GlobalSequenceCoordinatorShardTest {
         replay(record);
         replay(record);
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {existing},
-            stateRegistry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(existing)),
+            shard.lookupIndex(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         assertThrows(
             IllegalStateException.class,
@@ -197,9 +206,12 @@ class GlobalSequenceCoordinatorShardTest {
             IllegalStateException.class,
             () -> replay(coordinatorRecord(new GlobalSequenceIndexRecord(TOPIC_ID, 2L, 2, 3, 60L)))
         );
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {existing},
-            stateRegistry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(existing)),
+            shard.lookupIndex(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
     }
 
@@ -218,9 +230,12 @@ class GlobalSequenceCoordinatorShardTest {
                 .setGlobalOffset(0L)
         ));
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[0],
-            stateRegistry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> shard.lookupIndex(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         CoordinatorResult<GlobalSequenceAppendResult, CoordinatorRecord> replacement = shard.appendIndex(
             request(TOPIC_ID, 1, 20L, 3)

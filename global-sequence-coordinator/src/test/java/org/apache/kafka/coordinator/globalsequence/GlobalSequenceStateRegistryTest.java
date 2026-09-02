@@ -23,7 +23,9 @@ import org.apache.kafka.timeline.SnapshotRegistry;
 
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -55,9 +57,12 @@ class GlobalSequenceStateRegistryTest {
 
         registry.replay(first);
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {first},
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(first)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         assertEquals(3L, registry.getState(TOPIC_ID).nextGlobalOffset());
 
@@ -79,9 +84,12 @@ class GlobalSequenceStateRegistryTest {
 
         GlobalSequenceStateRegistry.PreparedAppend duplicate = registry.prepareAppend(request);
         assertEquals(new GlobalSequenceStateRegistry.PreparedAppend(indexRecord, true), duplicate);
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {indexRecord},
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(indexRecord)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
 
         assertThrows(
@@ -108,13 +116,19 @@ class GlobalSequenceStateRegistryTest {
 
         registry.replay(otherTopicAppend.indexRecord());
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {firstTopicRecord},
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(firstTopicRecord)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {otherTopicAppend.indexRecord()},
-            registry.getState(OTHER_TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(otherTopicAppend.indexRecord())),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(OTHER_TOPIC_ID, 0L, 2L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         assertEquals(3L, registry.getState(TOPIC_ID).nextGlobalOffset());
         assertEquals(2L, registry.getState(OTHER_TOPIC_ID).nextGlobalOffset());
@@ -129,9 +143,12 @@ class GlobalSequenceStateRegistryTest {
 
         registry.replayTombstone(TOPIC_ID, indexRecord.globalBaseOffset());
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[0],
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 3L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         assertEquals(3L, registry.getState(TOPIC_ID).nextGlobalOffset());
 
@@ -162,9 +179,12 @@ class GlobalSequenceStateRegistryTest {
             () -> registry.replay(record(TOPIC_ID, 9L, 2, 1, 20L))
         );
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {existing},
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(existing)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 5L, 10L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         assertEquals(10L, registry.getState(TOPIC_ID).nextGlobalOffset());
     }
@@ -183,13 +203,27 @@ class GlobalSequenceStateRegistryTest {
 
         snapshotRegistry.revertToSnapshot(0L);
 
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {first},
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
-        );
         assertEquals(2L, registry.getState(TOPIC_ID).nextGlobalOffset());
         assertTrue(registry.prepareAppend(request(TOPIC_ID, 0, 10L, 2)).duplicate());
         assertFalse(registry.contains(OTHER_TOPIC_ID));
+
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(first)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 2L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+
+        GlobalSequenceIndexRecord replacement = record(TOPIC_ID, 2L, 2, 1, 40L);
+        registry.replay(replacement);
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(first, replacement)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 4L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
     }
 
     @Test
@@ -213,9 +247,12 @@ class GlobalSequenceStateRegistryTest {
             ArithmeticException.class,
             () -> registry.prepareAppend(request(TOPIC_ID, 0, 11L, 1))
         );
-        assertArrayEquals(
-            new GlobalSequenceIndexRecord[] {finalAllocation},
-            registry.getState(TOPIC_ID).getSequenceIndexAsArray()
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(finalAllocation)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, Long.MAX_VALUE - 1, Long.MAX_VALUE),
+                SnapshotRegistry.LATEST_EPOCH
+            )
         );
         assertEquals(Long.MAX_VALUE, registry.getState(TOPIC_ID).nextGlobalOffset());
     }
@@ -308,6 +345,97 @@ class GlobalSequenceStateRegistryTest {
             new GlobalSequenceLookupResult(java.util.List.of(committed, uncommitted)),
             registry.lookup(
                 new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+    }
+
+    @Test
+    void testLookupFindsRangeNearEndOfLargeIndex() {
+        GlobalSequenceStateRegistry registry = newRegistry();
+        List<GlobalSequenceIndexRecord> records = new ArrayList<>();
+        long globalBaseOffset = 0L;
+
+        for (int ordinal = 0; ordinal < 128; ordinal++) {
+            int recordCount = ordinal % 3 + 1;
+            GlobalSequenceIndexRecord indexRecord = record(
+                TOPIC_ID,
+                globalBaseOffset,
+                recordCount,
+                ordinal % 4,
+                ordinal * 10L
+            );
+            records.add(indexRecord);
+            registry.replay(indexRecord);
+            globalBaseOffset = indexRecord.globalEndOffsetExclusive();
+        }
+
+        GlobalSequenceIndexRecord firstExpected = records.get(125);
+        GlobalSequenceIndexRecord lastExpected = records.get(127);
+        assertEquals(
+            new GlobalSequenceLookupResult(records.subList(125, 128)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(
+                    TOPIC_ID,
+                    firstExpected.globalBaseOffset() + 1L,
+                    lastExpected.globalEndOffsetExclusive()
+                ),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+    }
+
+    @Test
+    void testLookupRejectsGapBetweenAllocations() {
+        GlobalSequenceStateRegistry registry = newRegistry();
+        GlobalSequenceIndexRecord first = record(TOPIC_ID, 0L, 2, 0, 10L);
+        GlobalSequenceIndexRecord second = record(TOPIC_ID, 4L, 2, 1, 20L);
+        registry.replay(first);
+        registry.replay(second);
+
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 1L, 5L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(second)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 4L, 6L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+    }
+
+    @Test
+    void testLookupUsesTombstoneStateAtRequestedSnapshot() {
+        SnapshotRegistry snapshotRegistry = new SnapshotRegistry(new LogContext());
+        GlobalSequenceStateRegistry registry = new GlobalSequenceStateRegistry(snapshotRegistry);
+        GlobalSequenceIndexRecord first = record(TOPIC_ID, 0L, 2, 0, 10L);
+        GlobalSequenceIndexRecord second = record(TOPIC_ID, 2L, 2, 1, 20L);
+        registry.replay(first);
+        registry.replay(second);
+        snapshotRegistry.idempotentCreateSnapshot(0L);
+
+        registry.replayTombstone(TOPIC_ID, first.globalBaseOffset());
+
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(first)),
+            registry.lookup(new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 2L), 0L)
+        );
+        assertThrows(
+            OffsetOutOfRangeException.class,
+            () -> registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 0L, 2L),
+                SnapshotRegistry.LATEST_EPOCH
+            )
+        );
+        assertEquals(
+            new GlobalSequenceLookupResult(List.of(second)),
+            registry.lookup(
+                new GlobalSequenceLookupRequest(TOPIC_ID, 2L, 4L),
                 SnapshotRegistry.LATEST_EPOCH
             )
         );
