@@ -24,6 +24,7 @@ import kafka.server.KafkaRequestHandler.{threadCurrentRequest, threadRequestChan
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 import com.yammer.metrics.core.Meter
+import kafka.interceptor.BrokerInterceptors
 import org.apache.kafka.common.internals.FatalExitError
 import org.apache.kafka.common.utils.{Exit, KafkaThread, Time}
 import org.apache.kafka.server.common.RequestLocal
@@ -93,7 +94,8 @@ class KafkaRequestHandler(
   val requestChannel: RequestChannel,
   apis: ApiRequestHandler,
   time: Time,
-  nodeName: String = "broker"
+  nodeName: String = "broker",
+  val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
 ) extends Runnable with Logging {
   this.logIdent = s"[Kafka Request Handler $id on ${nodeName.capitalize} $brokerId] "
   private val shutdownComplete = new CountDownLatch(1)
@@ -155,6 +157,7 @@ class KafkaRequestHandler(
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
             threadCurrentRequest.set(request)
+            brokerInterceptors.beforeHandleRequest(request)
             apis.handle(request, requestLocal)
           } catch {
             case e: FatalExitError =>
@@ -199,7 +202,8 @@ class KafkaRequestHandlerPool(
   time: Time,
   numThreads: Int,
   requestHandlerAvgIdleMetricName: String,
-  nodeName: String = "broker"
+  nodeName: String = "broker",
+  val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
 ) extends Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
@@ -214,7 +218,7 @@ class KafkaRequestHandlerPool(
   }
 
   def createHandler(id: Int): Unit = synchronized {
-    runnables += new KafkaRequestHandler(id, brokerId, aggregateIdleMeter, threadPoolSize, requestChannel, apis, time, nodeName)
+    runnables += new KafkaRequestHandler(id, brokerId, aggregateIdleMeter, threadPoolSize, requestChannel, apis, time, nodeName, brokerInterceptors)
     KafkaThread.daemon("data-plane-kafka-request-handler-" + id, runnables(id)).start()
   }
 

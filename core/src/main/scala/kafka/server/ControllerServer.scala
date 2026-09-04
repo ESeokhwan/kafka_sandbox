@@ -17,11 +17,12 @@
 
 package kafka.server
 
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.QuotaFactory.QuotaManagers
 
-import scala.collection.immutable
+import scala.collection.{Seq, immutable}
 import kafka.server.metadata.{ClientQuotaMetadataManager, DelegationTokenPublisher, DynamicClientQuotaPublisher, DynamicConfigPublisher, DynamicTopicClusterQuotaPublisher, KRaftMetadataCache, KRaftMetadataCachePublisher, ScramPublisher}
 import kafka.utils.{CoreUtils, Logging}
 import org.apache.kafka.common.internals.Plugin
@@ -86,6 +87,8 @@ class ControllerServer(
   @volatile var authorizerPlugin: Option[Plugin[Authorizer]] = None
   var tokenCache: DelegationTokenCache = _
   var credentialProvider: CredentialProvider = _
+  var unusedBrokerInterceptors: BrokerInterceptors = _
+  var brokerInterceptors: BrokerInterceptors = _
   var socketServer: SocketServer = _
   val socketServerFirstBoundPortFuture = new CompletableFuture[Integer]()
   var createTopicPolicy: Option[CreateTopicPolicy] = None
@@ -164,6 +167,17 @@ class ControllerServer(
         sharedServer.metrics = new Metrics()
       }
 
+      // For testing purposes, backdoor for unused imports
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext)
+      ))
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
+
+      brokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext),
+      ))
+      brokerInterceptors.init()
+
       tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)
       credentialProvider = new CredentialProvider(ScramMechanism.mechanismNames, tokenCache)
       socketServer = new SocketServer(config,
@@ -171,7 +185,10 @@ class ControllerServer(
         time,
         credentialProvider,
         apiVersionManager,
-        sharedServer.socketFactory)
+        sharedServer.socketFactory,
+        Seq.empty,
+        brokerInterceptors
+      )
 
       val listenerInfo = ListenerInfo
         .create(config.effectiveAdvertisedControllerListeners.asJava)
@@ -288,7 +305,9 @@ class ControllerServer(
         time,
         config.numIoThreads,
         "RequestHandlerAvgIdlePercent",
-        "controller")
+        "controller",
+        brokerInterceptors
+      )
 
       // Set up the metadata cache publisher.
       metadataPublishers.add(metadataCachePublisher)
@@ -467,6 +486,8 @@ class ControllerServer(
         CoreUtils.swallow(controllerApis.close(), this)
       if (quotaManagers != null)
         CoreUtils.swallow(quotaManagers.shutdown(), this)
+      if (brokerInterceptors != null)
+        CoreUtils.swallow(brokerInterceptors.shutdown(), this)
       Utils.closeQuietly(controller, "controller")
       Utils.closeQuietly(quorumControllerMetrics, "quorum controller metrics")
       authorizerPlugin.foreach(Utils.closeQuietly(_, "authorizer plugin"))
