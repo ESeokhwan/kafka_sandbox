@@ -19,6 +19,7 @@ package kafka.server
 
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter}
 import kafka.coordinator.transaction.TransactionCoordinator
+import kafka.interceptor.{BrokerInterceptors, MonitorLoggingBrokerInterceptor}
 import kafka.log.LogManager
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
@@ -105,6 +106,9 @@ class BrokerServer(
   var status: ProcessStatus = SHUTDOWN
 
   @volatile var dataPlaneRequestProcessor: KafkaApis = _
+
+  var unusedBrokerInterceptors: BrokerInterceptors = _
+  var brokerInterceptors: BrokerInterceptors = _
 
   var authorizerPlugin: Option[Plugin[Authorizer]] = None
   @volatile var socketServer: SocketServer = _
@@ -274,6 +278,17 @@ class BrokerServer(
         shareFetchSessionCache.connectionDisconnectListener()
       )
 
+      // For testing purposes, backdoor for unused imports
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext)
+      ))
+      unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
+
+      brokerInterceptors = new BrokerInterceptors(Vector(
+        new MonitorLoggingBrokerInterceptor(logContext)
+      ))
+      brokerInterceptors.init()
+
       // Create and start the socket server acceptor threads so that the bound port is known.
       // Delay starting processors until the end of the initialization sequence to ensure
       // that credentials have been loaded before processing authentications.
@@ -283,7 +298,9 @@ class BrokerServer(
         credentialProvider,
         apiVersionManager,
         sharedServer.socketFactory,
-        connectionDisconnectListeners)
+        connectionDisconnectListeners,
+        brokerInterceptors
+      )
 
       clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
 
@@ -485,7 +502,7 @@ class BrokerServer(
 
       dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
-        config.numIoThreads, "RequestHandlerAvgIdlePercent")
+        config.numIoThreads, "RequestHandlerAvgIdlePercent", "broker", brokerInterceptors)
 
       metadataPublishers.add(new MetadataVersionConfigValidator(config, sharedServer.metadataPublishingFaultHandler))
       brokerMetadataPublisher = new BrokerMetadataPublisher(config,
@@ -891,6 +908,9 @@ class BrokerServer(
 
       if (lifecycleManager != null)
         CoreUtils.swallow(lifecycleManager.close(), this)
+
+      if (brokerInterceptors != null)
+        CoreUtils.swallow(brokerInterceptors.shutdown(), this)
 
       CoreUtils.swallow(config.dynamicConfig.clear(), this)
       Utils.closeQuietly(clientMetricsManager, "client metrics manager")

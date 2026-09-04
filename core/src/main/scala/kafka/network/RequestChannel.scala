@@ -21,6 +21,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent._
 import com.fasterxml.jackson.databind.JsonNode
 import com.typesafe.scalalogging.Logger
+import kafka.interceptor.BrokerInterceptors
 import kafka.network
 import kafka.server.KafkaConfig
 import kafka.utils.Logging
@@ -343,7 +344,8 @@ object RequestChannel extends Logging {
 
 class RequestChannel(val queueSize: Int,
                      time: Time,
-                     val metrics: RequestChannelMetrics) {
+                     val metrics: RequestChannelMetrics,
+                     val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)) {
   import RequestChannel._
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -416,6 +418,7 @@ class RequestChannel(val queueSize: Int,
 
   /** Send a response back to the socket server to be sent over the network */
   private[network] def sendResponse(response: RequestChannel.Response): Unit = {
+    brokerInterceptors.beforeSendResponseToQueue(response)
     if (isTraceEnabled) {
       val requestHeader = response.request.headerForLoggingOrThrottling()
       val message = response match {

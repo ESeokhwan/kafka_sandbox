@@ -17,6 +17,8 @@
 
 package kafka.network
 
+import kafka.interceptor.BrokerInterceptors
+
 import java.io.IOException
 import java.net._
 import java.nio.ByteBuffer
@@ -76,7 +78,8 @@ class SocketServer(
   val credentialProvider: CredentialProvider,
   val apiVersionManager: ApiVersionManager,
   val socketFactory: ServerSocketFactory = ServerSocketFactory.INSTANCE,
-  val connectionDisconnectListeners: Seq[ConnectionDisconnectListener] = Seq.empty
+  val connectionDisconnectListeners: Seq[ConnectionDisconnectListener] = Seq.empty,
+  val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
 ) extends Logging with BrokerReconfigurable {
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -96,7 +99,7 @@ class SocketServer(
   private val memoryPool = if (config.queuedMaxBytes > 0) new SimpleMemoryPool(config.queuedMaxBytes, config.socketRequestMaxBytes, false, memoryPoolSensor) else MemoryPool.NONE
   // data-plane
   private[network] val dataPlaneAcceptors = new ConcurrentHashMap[Endpoint, DataPlaneAcceptor]()
-  val dataPlaneRequestChannel = new RequestChannel(maxQueuedRequests, time, apiVersionManager.newRequestMetrics)
+  val dataPlaneRequestChannel = new RequestChannel(maxQueuedRequests, time, apiVersionManager.newRequestMetrics, brokerInterceptors)
 
   private[this] val nextProcessorId: AtomicInteger = new AtomicInteger(0)
   val connectionQuotas = new ConnectionQuotas(config, time, metrics)
@@ -385,7 +388,8 @@ class DataPlaneAcceptor(socketServer: SocketServer,
                         credentialProvider: CredentialProvider,
                         logContext: LogContext,
                         memoryPool: MemoryPool,
-                        apiVersionManager: ApiVersionManager)
+                        apiVersionManager: ApiVersionManager,
+                        brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty))
   extends Acceptor(socketServer,
                    endPoint,
                    config,
@@ -398,7 +402,8 @@ class DataPlaneAcceptor(socketServer: SocketServer,
                    credentialProvider,
                    logContext,
                    memoryPool,
-                   apiVersionManager) with ListenerReconfigurable {
+                   apiVersionManager,
+                   brokerInterceptors) with ListenerReconfigurable {
 
   /**
    * Returns the listener name associated with this reconfigurable. Listener-specific
@@ -483,7 +488,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
                                        credentialProvider: CredentialProvider,
                                        logContext: LogContext,
                                        memoryPool: MemoryPool,
-                                       apiVersionManager: ApiVersionManager)
+                                       apiVersionManager: ApiVersionManager,
+                                       brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty))
   extends Runnable with Logging {
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -781,7 +787,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
                   isPrivilegedListener,
                   apiVersionManager,
                   name,
-                  connectionDisconnectListeners)
+                  connectionDisconnectListeners,
+                  brokerInterceptors)
   }
 }
 
@@ -832,7 +839,8 @@ private[kafka] class Processor(
   isPrivilegedListener: Boolean,
   apiVersionManager: ApiVersionManager,
   threadName: String,
-  connectionDisconnectListeners: Seq[ConnectionDisconnectListener]
+  connectionDisconnectListeners: Seq[ConnectionDisconnectListener],
+  brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)
 ) extends Runnable with Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
@@ -1051,6 +1059,8 @@ private[kafka] class Processor(
                       apiVersionsRequest.data.clientSoftwareVersion))
                   }
                 }
+
+                brokerInterceptors.beforeSendRequestToQueue(req, connectionId)
                 requestChannel.sendRequest(req)
                 selector.mute(connectionId)
                 handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
@@ -1087,6 +1097,7 @@ private[kafka] class Processor(
         // delay has already passed by now.
         handleChannelMuteEvent(send.destinationId, ChannelMuteEvent.RESPONSE_SENT)
         tryUnmuteChannel(send.destinationId)
+        brokerInterceptors.afterProcessResponse(response, send.destinationId())
       } catch {
         case e: Throwable => processChannelException(send.destinationId,
           s"Exception while processing completed send to ${send.destinationId}", e)
