@@ -181,7 +181,7 @@ Indexer는 데이터 파티션 리더에서 실행한다. 파티션마다 전용
 데이터 파티션 수는 늘릴 수 있지만 인덱스 파티션 수의 변경으로 기존 토픽의 배정이
 바뀌어서는 안 된다. 1차 버전에서는 내부 인덱스 토픽의 파티션 수 변경을 지원하지 않는다.
 
-저장 레코드의 의미는 다음과 같다. 실제 JSON 필드명, 버전, API 번호는 후속 커밋에서 정한다.
+저장 레코드의 의미는 다음과 같다.
 
 | 레코드 | Key | Value의 주요 내용 |
 |---|---|---|
@@ -200,6 +200,34 @@ prefix와 남은 tail을 구분한다. 진행 상태의 크기는 전체 인덱�
 
 과거 global 매핑용 cache는 선택적인 조회 최적화다. Cache eviction이 신규 할당 여부를
 바꾸어서는 안 된다. 전체 과거 배치 ID를 무제한 메모리 맵에 보관하는 방식에 의존하지 않는다.
+
+### 저장 형식 v0
+
+스키마는 [모듈의 JSON 정의](../../global-sequence-coordinator/src/main/resources/common/message)에
+저장하며 Kafka MessageGenerator로 Java 메시지, JSON converter와 record type enum을 생성한다.
+아래 type ID는 내부 인덱스 로그의 record type이며 네트워크 RPC의 API key와 별개다.
+
+| Type ID | Key 필드 순서 | Value v0 필드 순서 |
+|---|---|---|
+| 0: BatchIndex | TopicId: uuid, GlobalBaseOffset: int64 | PhysicalPartition: int32, PhysicalBaseOffset: int64, PhysicalLastOffset: int64, RecordCount: int32 |
+| 1: TopicMetadata | TopicId: uuid | NextGlobalOffset: int64 |
+| 2: IndexerFence | TopicId: uuid, PhysicalPartition: int32 | SourceBrokerId: int32, SourceLeaderEpoch: int32, IndexerGeneration: int64, RegistrationId: uuid |
+
+공통 CoordinatorRecordSerde 형식에 따라 key는 int16 type ID로 시작하고, value는 int16
+version으로 시작한다. Key는 비-flexible 고정 형식, value v0는 flexible 형식이다.
+배치 key에 global base offset을 포함하므로 서로 다른 배치가 compaction key를 공유하지 않는다.
+RegistrationId는 재시도하는 등록 작업의 UUID이며 topic ID 및 등록 UUID의 zero 값은 사용하지 않는다.
+Coordinator leader epoch는 현재 리더의 실행 context이므로 영속 배치 식별자에 넣지 않는다.
+
+직렬화 계층은 null value를 tombstone으로 표현한다. 이는 인덱스 GC를 허용한다는 뜻이 아니며,
+어떤 tombstone을 수락·적용할지는 shard의 lifecycle 계약에서 검증한다. 알 수 없는 type이나
+value version 및 잘린 레코드는 로딩 오류로 처리한다. Flexible value의 알 수 없는 tagged field는
+보존한다. v0의 type ID·필드 순서·바이트 배치는 고정 fixture 테스트로 검증하며, 이후 형식 변경은
+명시적인 버전 호환성 작업을 거친다.
+
+레코드 생성 helper는 UUID, 음수, 배치 개수·범위 일치 및 end offset overflow를 검사한다.
+원본 순서, 현재 소유권, 중복 및 replay한 상태의 유효성은 coordinator shard가 별도로 검증한다.
+하나의 신규 할당에 대한 BatchIndex와 TopicMetadata를 atomic write로 묶는 책임도 shard에 있다.
 
 ## 6. 소유권 등록과 fencing
 

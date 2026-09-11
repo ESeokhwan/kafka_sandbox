@@ -25,8 +25,16 @@
     <allow pkg="org.apache.kafka.common" exact-match="true" />
     <allow pkg="org.apache.kafka.common.config" />
     <allow pkg="org.apache.kafka.common.internals" />
+    <allow pkg="org.apache.kafka.common.errors" />
+    <allow pkg="org.apache.kafka.common.protocol" />
     <subpackage name="coordinator">
         <subpackage name="globalsequence">
+            <allow pkg="org.apache.kafka.coordinator.common.runtime" />
+            <allow pkg="org.apache.kafka.coordinator.globalsequence" />
+            <allow pkg="org.apache.kafka.server.common" />
+            <subpackage name="generated">
+                <allow pkg="com.fasterxml.jackson" />
+            </subpackage>
         </subpackage>
     </subpackage>
 </import-control>
