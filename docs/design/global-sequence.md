@@ -17,7 +17,9 @@
 
 # Ordered global sequence topic
 
-상태: 1차 구현을 위한 설계 계약. 이 문서의 기능은 아직 구현되지 않았다.
+상태: 1차 구현을 위한 설계 계약. 모듈·설정, 저장 형식, Runtime context/hook,
+Coordinator shard의 할당·진행 상태까지 구현했다. 브로커 서비스·내부 RPC·Indexer·
+Produce 연동 및 global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -258,6 +260,50 @@ context가 자동으로 최신 값으로 바뀌지는 않는다.
 등록했던 HW listener에서 늦게 도착한 알림은 새 shard의 커밋이나 Future 완료에 적용하지 않는다.
 빈 레코드를 반환하는 write도 앞선 buffer 또는 로컬 로그의 pending write가 커밋될 때까지
 기다린다. 이 경로는 timeout된 물리 배치 재시도에 새로운 대기를 연결할 때 사용한다.
+
+### 할당과 진행 상태 구현
+
+[GlobalSequenceCoordinatorShard](../../global-sequence-coordinator/src/main/java/org/apache/kafka/coordinator/globalsequence/GlobalSequenceCoordinatorShard.java)의
+`prepareAppend(request, context)`를 Runtime의 write callback 안에서 호출한다. 요청에는
+물리 배치, 직전 대상 배치의 base offset(최초에는 -1), 원본 data HW 및 Indexer identity를
+담는다. Identity는 source broker/leader epoch, generation, registration UUID로 구성한다.
+요청 범위 검증과 실제 원본 로그·metadata 검증은 별개다. 후자의 연결은 내부 RPC와
+순차 reader/Indexer 구현에서 수행한다.
+
+`prepareAppend`는 상태를 직접 변경하지 않는다. 신규 배치에는 `BatchIndex`와
+`TopicMetadata`를 atomic `CoordinatorResult`로 반환하며, Runtime이 이를 replay할 때
+speculative sequence와 진행 상태가 바뀐다. IndexerFence가 없거나 identity가 다르면
+`FENCED`, 현재 소유권 레코드가 아직 커밋되지 않았으면 `OWNER_NOT_COMMITTED`다.
+등록 API의 metadata 검증·조건부 generation 변경·등록 재시도 처리는 후속 단계다.
+
+상태의 보관 단위와 갱신 시점은 다음과 같다.
+
+| 상태 | 보관 범위 | 갱신 시점 |
+|---|---|---|
+| Speculative nextGlobalOffset·최신 배치·소유권 | 토픽/파티션별 최신 값, Timeline snapshot 포함 | 완전한 할당 쌍 또는 fence replay |
+| Committed nextGlobalOffset·최신 배치·소유권 | 토픽/파티션별 최신 값 | 해당 기록의 exclusive end까지 index HW 도달 |
+| Pending 할당·fence | 아직 커밋되지 않은 로그 tail | replay 시 추가, HW 반영 또는 실제 rollback 시 제거 |
+
+각 할당의 end는 `TopicMetadata` 다음 인덱스 로그 offset이다. HW callback은 이 end로
+정렬한 pending 기록만 순회해 커밋 상태를 전진시킨다. 과거 모든 매핑이나 모든 데이터
+파티션을 HW마다 scan하지 않는다. Rollback 시 Timeline이 speculative 상태를 먼저
+복원하고, shard hook이 남지 않은 tail의 pending 항목을 제거한다. Committed 상태는
+되돌리지 않으므로, snapshot 생성 후 커밋된 항목이 rollback 때문에 pending으로
+되살아나지 않는다.
+
+Replay는 BatchIndex 다음에 대응하는 TopicMetadata가 오는지, global 범위가 연속인지,
+같은 파티션의 physical 범위가 전진하는지 검사한다. 로딩 중에는 HW 통지가 늦어 같은
+파티션의 여러 배치가 pending으로 보일 수 있으므로 이 tail도 보관한다. `onLoaded`는
+불완전한 할당 쌍을 거절한다. V0에서는 인덱스 offset 0부터 연속된 이력이 필요하며,
+tombstone과 인덱스 로그 자체의 transaction은 거절한다. 원본 데이터의 transaction은
+이 제한과 별개다.
+
+`AppendResponse.indexedThrough`는 Runtime Future가 성공한 시점에 보장되는 물리 prefix다.
+신규/pending 요청의 `INDEXED` 응답을 Future 완료 전에 전송해서는 안 된다. Pending
+재시도는 기록을 추가하지 않고 같은 global base를 반환하며 Runtime에서 새로 기다린다.
+`ALREADY_INDEXED`는 현재 committed progress를 반환하고 과거 global base는 생략한다.
+빈 결과도 Runtime의 기존 대기 규칙을 따르므로 다른 선행 write 때문에 완료가 늦어질
+수 있다. 현재 committed progress 조회는 직렬화된 shard 호출 안에서 수행한다.
 
 ## 6. 소유권 등록과 fencing
 
@@ -512,8 +558,9 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 
 후속 구현 순서는 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC,
 순차 reader/Indexer, 장애 복구와 보존, Produce 대기, global 조회/읽기,
-트랜잭션 격리, 처리량 제어와 종합 검증이다. 이번 문서 커밋에는 구현이나 실행된
-기능 테스트가 포함되지 않는다.
+트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
+할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
+append 실패·rollback과 로그 replay를 검증한다. 클러스터 단위 장애 검증은 후속 단계다.
 
 프로토콜 API 번호·최종 wire 필드, 구체적인 설정 기본값, checkpoint 형식,
 배치 묶기 크기와 지표 이름은 해당 구현 커밋에서 확정한다. 이 선택들이 위의 순서,

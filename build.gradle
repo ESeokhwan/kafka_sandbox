@@ -1694,10 +1694,15 @@ project(':global-sequence-coordinator') {
   dependencies {
     implementation project(':clients')
     implementation project(':coordinator-common')
+    implementation project(':metadata')
     implementation project(':server-common')
     implementation libs.jacksonDatabind
 
+    testImplementation project(':clients').sourceSets.test.output
+    testImplementation project(':coordinator-common').sourceSets.test.output
+    testImplementation project(':server-common').sourceSets.test.output
     testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
     testImplementation testLog4j2Libs
     testRuntimeOnly runtimeTestLibs
 

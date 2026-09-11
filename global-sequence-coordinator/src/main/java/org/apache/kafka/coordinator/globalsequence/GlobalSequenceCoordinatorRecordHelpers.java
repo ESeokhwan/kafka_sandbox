@@ -46,16 +46,10 @@ public final class GlobalSequenceCoordinatorRecordHelpers {
         int recordCount,
         long globalBaseOffset
     ) {
-        requireNonZeroId(topicId, "topicId");
-        requireNonNegative(physicalPartition, "physicalPartition");
-        requireNonNegative(physicalBaseOffset, "physicalBaseOffset");
+        validatePhysicalBatch(topicId, physicalPartition, physicalBaseOffset, physicalLastOffset, recordCount);
         requireNonNegative(globalBaseOffset, "globalBaseOffset");
-        if (recordCount <= 0 || physicalLastOffset < physicalBaseOffset ||
-            physicalLastOffset - physicalBaseOffset != (long) recordCount - 1) {
-            throw new IllegalArgumentException("The physical range must contain exactly recordCount contiguous records");
-        }
-        if (physicalLastOffset == Long.MAX_VALUE || globalBaseOffset > Long.MAX_VALUE - recordCount) {
-            throw new IllegalArgumentException("The physical resume offset and global end offset must not overflow");
+        if (globalBaseOffset > Long.MAX_VALUE - recordCount) {
+            throw new IllegalArgumentException("The global end offset must not overflow");
         }
         return CoordinatorRecord.record(
             new BatchIndexKey().setTopicId(topicId).setGlobalBaseOffset(globalBaseOffset),
@@ -97,14 +91,26 @@ public final class GlobalSequenceCoordinatorRecordHelpers {
                 .setRegistrationId(registrationId), VALUE_VERSION));
     }
 
-    private static void requireNonZeroId(Uuid id, String name) {
+    static void validatePhysicalBatch(Uuid topicId, int partition, long baseOffset, long lastOffset, int recordCount) {
+        requireNonZeroId(topicId, "topicId");
+        requireNonNegative(partition, "physicalPartition");
+        requireNonNegative(baseOffset, "physicalBaseOffset");
+        if (recordCount <= 0 || lastOffset < baseOffset || lastOffset - baseOffset != (long) recordCount - 1) {
+            throw new IllegalArgumentException("The physical range must contain exactly recordCount contiguous records");
+        }
+        if (lastOffset == Long.MAX_VALUE) {
+            throw new IllegalArgumentException("The physical resume offset must not overflow");
+        }
+    }
+
+    static void requireNonZeroId(Uuid id, String name) {
         Objects.requireNonNull(id, name);
         if (Uuid.ZERO_UUID.equals(id)) {
             throw new IllegalArgumentException(name + " must not be the zero UUID");
         }
     }
 
-    private static void requireNonNegative(long value, String name) {
+    static void requireNonNegative(long value, String name) {
         if (value < 0) {
             throw new IllegalArgumentException(name + " must be non-negative");
         }
