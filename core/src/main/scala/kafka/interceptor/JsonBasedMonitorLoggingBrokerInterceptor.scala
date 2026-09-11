@@ -21,7 +21,7 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
     monitorLogWriter = new MonitorLogWriter(
-      monitorQueue, new KafkaLogWriteStrategy(logContext), BatchPolicy.fixedSize(1))
+      monitorQueue, new KafkaLogWriteStrategy(logContext), BatchPolicy.unbounded())
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
   }
@@ -36,9 +36,13 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
           batch.forEach(record => {
             val value = record.value()
             if (value != null) {
-              monitorLogWriter.submit(
-                new JsonBasedLatencyMonitorLog(messageAdapter, Utils.utf8(value), "NETWORK_PROCESSED", currentTime)
-              )
+              val message = Utils.utf8(value)
+              val coreMessage = messageAdapter.extractMessageId(message)
+              if (coreMessage.startsWith("R")) {
+                monitorLogWriter.submit(
+                  new JsonBasedLatencyMonitorLog(messageAdapter, Utils.utf8(value), "NETWORK_PROCESSED", currentTime)
+                )
+              }
             }
           })
         })
@@ -59,9 +63,13 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
           batch.forEach(record => {
             val value = record.value()
             if (value != null) {
-              monitorLogWriter.submit(
-                new JsonBasedLatencyMonitorLog(messageAdapter, Utils.utf8(value), "IO_COMMITED", currentTime)
-              )
+              val message = Utils.utf8(value)
+              val coreMessage = messageAdapter.extractMessageId(message)
+              if (coreMessage.startsWith("R")) {
+                monitorLogWriter.submit(
+                  new JsonBasedLatencyMonitorLog(messageAdapter, Utils.utf8(value), "IO_COMMITED", currentTime)
+                )
+              }
             }
           })
         })

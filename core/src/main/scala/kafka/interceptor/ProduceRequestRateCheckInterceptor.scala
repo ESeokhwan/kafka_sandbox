@@ -1,0 +1,52 @@
+package kafka.interceptor
+
+import kafka.interceptor.util.PrintableMessageCounter
+import kafka.network.RequestChannel
+import org.apache.kafka.common.protocol.ApiKeys
+import kafka.utils._
+
+class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging {
+
+  private val commitTerm = 1000
+
+  var onRequestQueueCounter: PrintableMessageCounter = _
+  var onResponseQueueCounter: PrintableMessageCounter = _
+
+  override def init(): Unit = {
+    onRequestQueueCounter = new PrintableMessageCounter(commitTerm)
+    onResponseQueueCounter = new PrintableMessageCounter(commitTerm)
+  }
+
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
+    if (request.header.apiKey() == ApiKeys.PRODUCE) {
+      onRequestQueueCounter.increaseCounter(1)
+      onRequestQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
+        val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
+        infoWithTag(
+          "produce-rate-check-enqueue",
+          f"Entered Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
+        )
+      })
+    }
+  }
+
+  override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
+
+  override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
+    if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
+      onResponseQueueCounter.increaseCounter(1)
+      onResponseQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
+        val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
+        infoWithTag(
+          "produce-rate-check",
+          f"Committed Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
+        )
+      })
+    }
+  }
+
+  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
+
+  override def shutdown(): Unit = {}
+
+}
