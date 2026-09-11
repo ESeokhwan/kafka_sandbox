@@ -20,15 +20,73 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.timeline.SnapshotRegistry;
+import org.apache.kafka.timeline.TimelineLong;
 
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 public class SnapshottableCoordinatorTest {
+
+    @Test
+    public void testCommitHookReadsCommittedSnapshotBeforeCleanup() {
+        SnapshotRegistry registry = new SnapshotRegistry(new LogContext());
+        TimelineLong value = new TimelineLong(registry);
+        MockCoordinatorShard shard = mock(MockCoordinatorShard.class);
+        SnapshottableCoordinator<MockCoordinatorShard, String> coordinator = new SnapshottableCoordinator<>(
+            new LogContext(), registry, shard, new TopicPartition("test-topic", 0));
+        value.set(10);
+        coordinator.updateLastWrittenOffset(1L);
+        value.set(20);
+        coordinator.updateLastWrittenOffset(2L);
+
+        List<Long> committedValues = new ArrayList<>();
+        doAnswer(invocation -> {
+            long offset = invocation.getArgument(0);
+            assertEquals(offset, coordinator.lastCommittedOffset());
+            assertEquals(20, value.get()); // Live state includes an uncommitted write.
+            assertTrue(registry.hasSnapshot(0)); // Cleanup must run after the hook.
+            committedValues.add(value.get(offset));
+            return null;
+        }).when(shard).onHighWatermarkUpdated(anyLong());
+
+        coordinator.updateLastCommittedOffset(1L);
+        coordinator.updateLastCommittedOffset(1L);
+        assertEquals(List.of(10L), committedValues);
+        assertFalse(registry.hasSnapshot(0));
+        assertTrue(registry.hasSnapshot(1));
+        assertTrue(registry.hasSnapshot(2));
+        verify(shard).onHighWatermarkUpdated(1);
+    }
+
+    @Test
+    public void testInvalidRollbackDoesNotChangeWrittenOffsetOrNotifyShard() {
+        SnapshotRegistry registry = new SnapshotRegistry(new LogContext());
+        MockCoordinatorShard shard = mock(MockCoordinatorShard.class);
+        SnapshottableCoordinator<MockCoordinatorShard, String> coordinator = new SnapshottableCoordinator<>(
+            new LogContext(), registry, shard, new TopicPartition("test-topic", 0));
+        coordinator.updateLastWrittenOffset(10L);
+        coordinator.updateLastCommittedOffset(10L);
+        coordinator.updateLastWrittenOffset(20L);
+
+        assertThrows(IllegalStateException.class, () -> coordinator.revertLastWrittenOffset(0));
+        assertThrows(RuntimeException.class, () -> coordinator.revertLastWrittenOffset(15));
+        assertEquals(20, coordinator.lastWrittenOffset());
+        assertEquals(10, coordinator.lastCommittedOffset());
+        assertTrue(registry.hasSnapshot(20));
+        verify(shard, never()).onRollback(anyLong());
+    }
 
     @Test
     public void testUpdateLastWrittenOffset() {

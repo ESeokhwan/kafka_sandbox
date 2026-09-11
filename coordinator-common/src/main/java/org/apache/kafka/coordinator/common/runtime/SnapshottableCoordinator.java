@@ -92,9 +92,15 @@ public class SnapshottableCoordinator<S extends CoordinatorShard<U>, U> implemen
                 " must be smaller than " + lastWrittenOffset + ".");
         }
 
+        if (offset < lastCommittedOffset) {
+            throw new IllegalStateException("New offset " + offset + " of " + tp +
+                " must be greater than or equal to committed offset " + lastCommittedOffset + ".");
+        }
+
         log.debug("Revert last written offset of {} to {}.", tp, offset);
-        lastWrittenOffset = offset;
         snapshotRegistry.revertToSnapshot(offset);
+        lastWrittenOffset = offset;
+        coordinator.onRollback(offset);
     }
 
     /**
@@ -150,9 +156,8 @@ public class SnapshottableCoordinator<S extends CoordinatorShard<U>, U> implemen
     }
 
     /**
-     * Updates the last committed offset. This completes all the deferred
-     * events waiting on this offset. This also cleanups all the snapshots
-     * prior to this offset.
+     * Updates the last committed offset and notifies the shard before cleaning up
+     * older snapshots. The runtime completes deferred events after this method returns.
      *
      * @param offset The new last committed offset.
      */
@@ -168,7 +173,10 @@ public class SnapshottableCoordinator<S extends CoordinatorShard<U>, U> implemen
                 " must be less than or equal to " + lastWrittenOffset + ".");
         }
 
-        lastCommittedOffset = offset;
+        if (offset > lastCommittedOffset) {
+            lastCommittedOffset = offset;
+            coordinator.onHighWatermarkUpdated(offset);
+        }
         snapshotRegistry.deleteSnapshotsUpTo(offset);
         log.debug("Updated committed offset of {} to {}.", tp, offset);
     }

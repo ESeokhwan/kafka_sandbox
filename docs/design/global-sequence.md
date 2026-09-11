@@ -229,6 +229,36 @@ value version 및 잘린 레코드는 로딩 오류로 처리한다. Flexible va
 원본 순서, 현재 소유권, 중복 및 replay한 상태의 유효성은 coordinator shard가 별도로 검증한다.
 하나의 신규 할당에 대한 BatchIndex와 TopicMetadata를 atomic write로 묶는 책임도 shard에 있다.
 
+### Runtime context와 상태 알림
+
+`CoordinatorRuntime.scheduleWriteOperationWithContext`는 `(shard, context)` callback에
+`CoordinatorWriteContext(highWatermark, leaderEpoch)`를 전달한다. 값은 요청을 큐에 넣을 때가
+아니라 active coordinator의 lock을 잡고 write 이벤트를 실행할 때 캡처한다. 기존의
+`scheduleWriteOperation`은 그대로 사용할 수 있다.
+
+여기서 highWatermark는 Runtime이 적용한 커밋 경계다. 원본 파티션의 HW가 아니며,
+인덱스 파티션의 실제 HW 알림이 큐에 대기 중이면 그보다 늦을 수 있다. Shard의 committed/
+pending 상태와 함께 사용해야 한다. Context는 immutable한 관측값이므로 callback 종료 후의
+리더 소유권까지 보장하지 않는다. 비동기 scan 결과를 반영할 때는 다음 write 이벤트에서
+epoch와 현재 진행 상태를 다시 검사한다. Write Future가 나중에 완료되어도 처음 전달한
+context가 자동으로 최신 값으로 바뀌지는 않는다.
+
+공통 shard에는 기존 구현에 영향을 주지 않는 기본 no-op hook 두 개가 있다.
+
+- `onHighWatermarkUpdated(hw)`: 커밋 경계가 증가할 때, 이전 snapshot 삭제 및 write Future
+  성공 처리 전에 호출한다. Loader의 replay 중 `onLoaded`보다 먼저 호출될 수도 있다.
+  현재 메모리에는 미커밋 tail도 있으므로 HW 기준 snapshot이나 로그 위치로 committed 상태를
+  구분한다. 동일 HW의 반복 알림은 hook을 다시 호출하지 않는다.
+- `onRollback(offset)`: snapshot을 복원한 직후, 해당 write 실패 응답 전에 호출한다.
+  아직 로컬 append되지 않은 replay를 취소할 때는 offset이 기존 lastWrittenOffset과 같을
+  수 있다. Timeout만으로 호출하지 않으며, HW보다 뒤로 되돌리는 요청은 거절한다.
+
+두 hook은 다른 shard callback과 직렬로 실행되며 blocking IO를 수행하지 않는다. Hook이
+실패하면 해당 shard의 추가 실행을 막고 재로딩이 필요한 실패 상태로 전환한다. 이전 shard에
+등록했던 HW listener에서 늦게 도착한 알림은 새 shard의 커밋이나 Future 완료에 적용하지 않는다.
+빈 레코드를 반환하는 write도 앞선 buffer 또는 로컬 로그의 pending write가 커밋될 때까지
+기다린다. 이 경로는 timeout된 물리 배치 재시도에 새로운 대기를 연결할 때 사용한다.
+
 ## 6. 소유권 등록과 fencing
 
 데이터 리더의 Indexer는 append 전 소유권을 등록한다. Coordinator는 source leader

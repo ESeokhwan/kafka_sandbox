@@ -50,6 +50,34 @@ public interface CoordinatorShard<U> {
     default void onUnloaded() {}
 
     /**
+     * The runtime has advanced its committed offset. Called before older snapshots are
+     * deleted and before write futures are completed. The current state may also contain
+     * uncommitted records, so implementations must use the supplied boundary when updating
+     * committed bookkeeping. Equal high watermark notifications do not invoke this hook.
+     *
+     * This may be called by the loader before {@link #onLoaded(MetadataImage)}. Like replay,
+     * it is serialized with other shard callbacks and must not block or perform external IO.
+     * An exception fails loading or causes the active shard to be unloaded.
+     *
+     * @param highWatermark The exclusive end offset of committed records.
+     */
+    default void onHighWatermarkUpdated(long highWatermark) {}
+
+    /**
+     * The runtime has restored the snapshot at the supplied offset. Called after snapshot
+     * restoration and before the affected write futures fail, to discard speculative
+     * bookkeeping that is not managed by the snapshot registry. The offset may equal the
+     * previous written offset when replayed records had not yet been appended locally.
+     *
+     * This hook is serialized with other shard callbacks and must not block or perform
+     * external IO. It is not invoked merely because a write future times out. An exception
+     * prevents further operations on this shard until it is reloaded.
+     *
+     * @param offset The exclusive end offset retained after rollback, at or above the HW.
+     */
+    default void onRollback(long offset) {}
+
+    /**
      * Replay a record to update the state machine.
      *
      * @param offset        The offset of the record in the log.

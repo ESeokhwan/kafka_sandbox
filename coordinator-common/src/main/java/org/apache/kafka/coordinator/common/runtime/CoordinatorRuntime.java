@@ -847,9 +847,27 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          */
         private void failCurrentBatch(Throwable t) {
             if (currentBatch != null) {
-                coordinator.revertLastWrittenOffset(currentBatch.baseOffset);
-                currentBatch.deferredEvents.complete(t);
+                boolean reverted = tryRevertLastWrittenOffset(currentBatch.baseOffset);
+                DeferredEventCollection events = currentBatch.deferredEvents;
                 freeCurrentBatch();
+                if (!reverted && state == CoordinatorState.ACTIVE) {
+                    transitionTo(CoordinatorState.FAILED);
+                }
+                events.complete(t);
+            }
+        }
+
+        /**
+         * Attempts to restore both snapshot state and shard bookkeeping. The caller must
+         * fail the shard after releasing its current batch if restoration fails.
+         */
+        private boolean tryRevertLastWrittenOffset(long offset) {
+            try {
+                coordinator.revertLastWrittenOffset(offset);
+                return true;
+            } catch (Throwable t) {
+                log.error("Failed to restore coordinator {} to offset {}.", tp, offset, t);
+                return false;
             }
         }
 
@@ -1137,7 +1155,9 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
                 deferredEventQueue.add(offset, DeferredEventCollection.of(log, event));
             } catch (Throwable t) {
-                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
+                if (!tryRevertLastWrittenOffset(prevLastWrittenOffset)) {
+                    transitionTo(CoordinatorState.FAILED);
+                }
                 event.complete(t);
             }
         }
@@ -1239,6 +1259,26 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
     }
 
     /**
+     * A write operation that also receives the runtime's committed boundary and leader
+     * epoch at execution time. As with {@link CoordinatorWriteOperation}, persistent state
+     * changes must be represented by the returned records and applied through replay.
+     *
+     * @param <S> The type of the coordinator state machine.
+     * @param <T> The type of the response.
+     * @param <U> The type of the records.
+     */
+    @FunctionalInterface
+    public interface CoordinatorWriteOperationWithContext<S, T, U> {
+        /**
+         * @param coordinator The coordinator state machine.
+         * @param context     The immutable view captured while executing this operation.
+         * @return A result containing a list of records and the RPC result.
+         * @throws KafkaException if the operation cannot be performed.
+         */
+        CoordinatorResult<T, U> generateRecordsAndResult(S coordinator, CoordinatorWriteContext context) throws KafkaException;
+    }
+
+    /**
      * A coordinator event that modifies the coordinator state.
      *
      * @param <T> The type of the response.
@@ -1283,7 +1323,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         /**
          * The write operation to execute.
          */
-        final CoordinatorWriteOperation<S, T, U> op;
+        final CoordinatorWriteOperationWithContext<S, T, U> op;
 
         /**
          * The future that will be completed with the response
@@ -1331,6 +1371,15 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             Duration writeTimeout,
             CoordinatorWriteOperation<S, T, U> op
         ) {
+            this(name, tp, writeTimeout, (coordinator, context) -> op.generateRecordsAndResult(coordinator));
+        }
+
+        CoordinatorWriteEvent(
+            String name,
+            TopicPartition tp,
+            Duration writeTimeout,
+            CoordinatorWriteOperationWithContext<S, T, U> op
+        ) {
             this(
                 name,
                 tp,
@@ -1363,7 +1412,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             short producerEpoch,
             VerificationGuard verificationGuard,
             Duration writeTimeout,
-            CoordinatorWriteOperation<S, T, U> op
+            CoordinatorWriteOperationWithContext<S, T, U> op
         ) {
             this.tp = tp;
             this.name = name;
@@ -1396,7 +1445,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 // Get the context of the coordinator or fail if the coordinator is not in active state.
                 withActiveContextOrThrow(tp, context -> {
                     // Execute the operation.
-                    result = op.generateRecordsAndResult(context.coordinator.coordinator());
+                    result = op.generateRecordsAndResult(
+                        context.coordinator.coordinator(),
+                        new CoordinatorWriteContext(context.coordinator.lastCommittedOffset(), context.epoch)
+                    );
 
                     // Append the records and replay them to the state machine.
                     context.append(
@@ -1892,15 +1944,21 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                     if (context != null) {
                         context.lock.lock();
                         try {
-                            if (context.state == CoordinatorState.ACTIVE) {
+                            if (context.state == CoordinatorState.ACTIVE && context.highWatermarklistener == this) {
                                 // The updated high watermark can be applied to the coordinator only if the coordinator
                                 // exists and is in the active state.
                                 log.debug("Updating high watermark of {} to {}.", tp, newHighWatermark);
-                                context.coordinator.updateLastCommittedOffset(newHighWatermark);
+                                try {
+                                    context.coordinator.updateLastCommittedOffset(newHighWatermark);
+                                } catch (Throwable t) {
+                                    // Committed bookkeeping must be restored by loading before more writes run.
+                                    context.transitionTo(CoordinatorState.FAILED);
+                                    throw t;
+                                }
                                 context.deferredEventQueue.completeUpTo(newHighWatermark);
                                 coordinatorMetrics.onUpdateLastCommittedOffset(tp, newHighWatermark);
                             } else {
-                                log.debug("Ignored high watermark updated for {} to {} because the coordinator is not active.",
+                                log.debug("Ignored high watermark updated for {} to {} because the coordinator is not active or the listener is stale.",
                                     tp, newHighWatermark);
                             }
                         } finally {
@@ -2185,6 +2243,27 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         Duration timeout,
         CoordinatorWriteOperation<S, T, U> op
     ) {
+        return scheduleWriteOperationWithContext(name, tp, timeout, (coordinator, context) -> op.generateRecordsAndResult(coordinator));
+    }
+
+    /**
+     * Schedules a write with a context captured under the active coordinator lock when
+     * the event executes, rather than when it is enqueued. Empty record results retain
+     * the normal pending-write barrier; a timeout does not roll back appended records.
+     *
+     * @param name      The name of the write operation.
+     * @param tp        The coordinator's topic partition.
+     * @param timeout   The write operation timeout.
+     * @param op        The write operation receiving the execution context.
+     * @param <T>       The type of the result.
+     * @return A future completed after the write is committed, or exceptionally on failure.
+     */
+    public <T> CompletableFuture<T> scheduleWriteOperationWithContext(
+        String name,
+        TopicPartition tp,
+        Duration timeout,
+        CoordinatorWriteOperationWithContext<S, T, U> op
+    ) {
         throwIfNotRunning();
         log.debug("Scheduled execution of write operation {}.", name);
         CoordinatorWriteEvent<T> event = new CoordinatorWriteEvent<>(name, tp, timeout, op);
@@ -2262,7 +2341,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 producerEpoch,
                 verificationGuard,
                 timeout,
-                op
+                (coordinator, context) -> op.generateRecordsAndResult(coordinator)
             );
             enqueueLast(event);
             return event.future;
