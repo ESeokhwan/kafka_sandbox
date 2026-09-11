@@ -24,6 +24,7 @@ import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig;
 import org.apache.kafka.coordinator.group.GroupCoordinatorConfig;
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig;
 import org.apache.kafka.coordinator.share.ShareCoordinatorConfig;
@@ -64,6 +65,7 @@ public abstract class AbstractKafkaConfig extends AbstractConfig {
         LogConfig.SERVER_CONFIG_DEF,
         ShareGroupConfig.CONFIG_DEF,
         ShareCoordinatorConfig.CONFIG_DEF,
+        GlobalSequenceCoordinatorConfig.CONFIG_DEF,
         TransactionLogConfig.CONFIG_DEF,
         TransactionStateManagerConfig.CONFIG_DEF,
         QuorumConfig.CONFIG_DEF,

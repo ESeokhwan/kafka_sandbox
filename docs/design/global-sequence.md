@@ -36,7 +36,8 @@ global offset 기반 인덱스 조회 및 데이터 읽기를 포함한다.
 - 기존 파티션과 나중에 추가하는 데이터 파티션 모두 처음 생성된 로그 위치인
   physical offset 0부터 인덱싱한다. 새 데이터 파티션은 기존 토픽의 global
   sequence에 합류한다.
-- 데이터 토픽은 `cleanup.policy=delete`를 사용한다. 데이터 compaction과
+- 데이터 토픽은 토픽 설정에 `cleanup.policy=delete`를 명시한다. 이후 브로커 기본값
+  변경으로 compaction이 적용되지 않도록 이 override의 삭제도 거절한다. 데이터 compaction과
   설정 변경을 통한 compaction 활성화는 1차 버전에서 거절한다.
 - 기존 KafkaProducer를 사용한다. Produce 응답과 일반 Kafka Fetch의 offset은
   physical offset을 유지한다. Global 읽기는 별도 API로 제공한다.

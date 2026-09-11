@@ -241,6 +241,8 @@ public class LogConfig extends AbstractConfig {
                         ThrottledReplicaListValidator.INSTANCE, MEDIUM, QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_DOC)
                 .define(TopicConfig.REMOTE_LOG_STORAGE_ENABLE_CONFIG, BOOLEAN, DEFAULT_REMOTE_STORAGE_ENABLE, null,
                         MEDIUM, TopicConfig.REMOTE_LOG_STORAGE_ENABLE_DOC)
+                .define(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, BOOLEAN, false,
+                        MEDIUM, TopicConfig.GLOBAL_SEQUENCE_ENABLED_DOC)
                 .define(TopicConfig.LOCAL_LOG_RETENTION_MS_CONFIG, LONG, DEFAULT_LOCAL_RETENTION_MS, atLeast(-2), MEDIUM,
                         TopicConfig.LOCAL_LOG_RETENTION_MS_DOC)
                 .define(TopicConfig.LOCAL_LOG_RETENTION_BYTES_CONFIG, LONG, DEFAULT_LOCAL_RETENTION_BYTES, atLeast(-2), MEDIUM,
@@ -287,6 +289,7 @@ public class LogConfig extends AbstractConfig {
     public final List<String> followerReplicationThrottledReplicas;
 
     private final RemoteLogConfig remoteLogConfig;
+    private final boolean globalSequenceEnabled;
     private final int maxMessageSize;
     private final Map<?, ?> props;
 
@@ -336,6 +339,11 @@ public class LogConfig extends AbstractConfig {
         this.followerReplicationThrottledReplicas = Collections.unmodifiableList(getList(QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_CONFIG));
 
         remoteLogConfig = new RemoteLogConfig(this);
+        globalSequenceEnabled = getBoolean(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG);
+    }
+
+    public boolean globalSequenceEnabled() {
+        return globalSequenceEnabled;
     }
 
     private Optional<Compression> getCompression() {
@@ -476,6 +484,12 @@ public class LogConfig extends AbstractConfig {
      * @param props The properties to be validated
      */
     public static void validateValues(Map<?, ?> props) {
+        if (Boolean.TRUE.equals(props.get(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG))) {
+            Object cleanupPolicy = props.get(TopicConfig.CLEANUP_POLICY_CONFIG);
+            if (!List.of(TopicConfig.CLEANUP_POLICY_DELETE).equals(cleanupPolicy)) {
+                throw new InvalidConfigurationException("Global sequence topics require cleanup.policy=delete");
+            }
+        }
         long minCompactionLag = (Long) props.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
         long maxCompactionLag = (Long) props.get(TopicConfig.MAX_COMPACTION_LAG_MS_CONFIG);
         if (minCompactionLag > maxCompactionLag) {

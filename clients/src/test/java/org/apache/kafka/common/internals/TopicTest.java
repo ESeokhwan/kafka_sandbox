@@ -33,6 +33,12 @@ import static org.junit.jupiter.api.Assertions.fail;
 public class TopicTest {
 
     @Test
+    public void testGlobalSequenceIndexIsInternal() {
+        assertTrue(Topic.isInternal(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME));
+        assertFalse(Topic.isInternal("global-sequence-data"));
+    }
+
+    @Test
     public void shouldAcceptValidTopicNames() {
         String maxLengthString = TestUtils.randomString(249);
         String[] validTopicNames = {"valid", "TOPIC", "nAmEs", "ar6", "VaL1d", "_0-9_.", "...", maxLengthString};

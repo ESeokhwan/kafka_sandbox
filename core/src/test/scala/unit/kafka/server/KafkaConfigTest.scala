@@ -30,6 +30,7 @@ import org.apache.kafka.common.record.{CompressionType, Records}
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.config.internals.BrokerSecurityConfigs
 import org.apache.kafka.coordinator.group.ConsumerGroupMigrationPolicy
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
 import org.apache.kafka.coordinator.group.Group.GroupType
 import org.apache.kafka.coordinator.group.GroupCoordinatorConfig
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig
@@ -48,6 +49,17 @@ import org.apache.kafka.common.test.{TestUtils => JTestUtils}
 import scala.jdk.CollectionConverters._
 
 class KafkaConfigTest {
+
+  @Test
+  def testGlobalSequenceCoordinatorConfig(): Unit = {
+    val props = createDefaultConfig()
+    val defaults = KafkaConfig.fromProps(props).globalSequenceCoordinatorConfig
+    assertEquals(50, defaults.indexTopicNumPartitions())
+    props.setProperty(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "7")
+    assertEquals(7, KafkaConfig.fromProps(props).globalSequenceCoordinatorConfig.indexTopicNumPartitions())
+    props.setProperty(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, "4")
+    assertThrows(classOf[ConfigException], () => KafkaConfig.fromProps(props))
+  }
 
   def createDefaultConfig(): Properties = {
     val props = new Properties()

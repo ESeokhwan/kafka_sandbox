@@ -82,6 +82,7 @@ public class ConfigurationControlManagerTest {
                 ConfigDef.Type.INT, "1", ConfigDef.Importance.HIGH, "min.isr"));
 
         CONFIGS.put(TOPIC, new ConfigDef().
+            define(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, ConfigDef.Type.BOOLEAN, false, ConfigDef.Importance.HIGH, "").
             define("abc", ConfigDef.Type.LIST, ConfigDef.Importance.HIGH, "abc").
             define("def", ConfigDef.Type.STRING, ConfigDef.Importance.HIGH, "def").
             define("ghi", ConfigDef.Type.BOOLEAN, true, ConfigDef.Importance.HIGH, "ghi").
@@ -183,6 +184,44 @@ public class ConfigurationControlManagerTest {
             manager.incrementalAlterConfigs(toMap(entry(MYTOPIC, toMap(
                 entry("abc", entry(DELETE, "xyz"))))),
                 true));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testGlobalSequenceModeCannotChange(boolean legacy) {
+        String name = TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG;
+        for (boolean initiallyEnabled : List.of(false, true)) {
+            ConfigurationControlManager manager = new ConfigurationControlManager.Builder()
+                .setFeatureControl(createFeatureControlManager())
+                .setKafkaConfigSchema(SCHEMA)
+                .build();
+            // An ordinary topic may have no explicit configuration at all.
+            Map<String, Entry<AlterConfigOp.OpType, String>> initialConfigs = initiallyEnabled ?
+                Map.of(name, entry(SET, "true")) : Map.of();
+            ControllerResult<ApiError> creation = manager.incrementalAlterConfig(MYTOPIC, initialConfigs, true);
+            assertEquals(ApiError.NONE, creation.response());
+            RecordTestUtils.replayAll(manager, creation.records());
+
+            String changedValue = Boolean.toString(!initiallyEnabled);
+            ControllerResult<Map<ConfigResource, ApiError>> changed = legacy ?
+                manager.legacyAlterConfigs(Map.of(MYTOPIC, Map.of(name, changedValue)), false) :
+                manager.incrementalAlterConfigs(Map.of(MYTOPIC, Map.of(name, entry(SET, changedValue))), false);
+            assertEquals(Errors.INVALID_CONFIG, changed.response().get(MYTOPIC).error());
+            assertTrue(changed.records().isEmpty());
+
+            String sameValue = Boolean.toString(initiallyEnabled);
+            ControllerResult<Map<ConfigResource, ApiError>> unchanged = legacy ?
+                manager.legacyAlterConfigs(Map.of(MYTOPIC, Map.of(name, sameValue, "def", "value")), false) :
+                manager.incrementalAlterConfigs(Map.of(MYTOPIC, Map.of(name, entry(SET, sameValue), "def", entry(SET, "value"))), false);
+            assertEquals(ApiError.NONE, unchanged.response().get(MYTOPIC));
+
+            // Legacy omission and incremental DELETE both reset the flag to its false default.
+            ControllerResult<Map<ConfigResource, ApiError>> removed = legacy ?
+                manager.legacyAlterConfigs(Map.of(MYTOPIC, Map.of()), false) :
+                manager.incrementalAlterConfigs(Map.of(MYTOPIC, Map.of(name, entry(DELETE, null))), false);
+            assertEquals(initiallyEnabled ? Errors.INVALID_CONFIG : Errors.NONE, removed.response().get(MYTOPIC).error());
+            assertTrue(removed.records().isEmpty());
+        }
     }
 
     @Test

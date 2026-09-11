@@ -38,6 +38,7 @@ import org.apache.kafka.coordinator.group.Group.GroupType
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfig
 import org.apache.kafka.coordinator.group.{GroupConfig, GroupCoordinatorConfig}
 import org.apache.kafka.coordinator.share.ShareCoordinatorConfig
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
 import org.apache.kafka.network.SocketServerConfigs
 import org.apache.kafka.raft.{MetadataLogConfig, QuorumConfig}
 import org.apache.kafka.security.authorizer.AuthorizerUtils
@@ -203,6 +204,9 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
 
   private val _shareCoordinatorConfig = new ShareCoordinatorConfig(this)
   def shareCoordinatorConfig: ShareCoordinatorConfig = _shareCoordinatorConfig
+
+  private val _globalSequenceCoordinatorConfig = new GlobalSequenceCoordinatorConfig(this)
+  def globalSequenceCoordinatorConfig: GlobalSequenceCoordinatorConfig = _globalSequenceCoordinatorConfig
 
   private val _quotaConfig = new QuotaConfig(this)
   def quotaConfig: QuotaConfig = _quotaConfig

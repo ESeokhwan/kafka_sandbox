@@ -363,6 +363,14 @@ public class ConfigurationControlManager {
             validator.validate(configResource, allConfigs, existingConfigsMap);
             if (!newlyCreatedResource) {
                 existenceChecker.accept(configResource);
+                if (configResource.type() == Type.TOPIC) {
+                    String name = TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG;
+                    boolean wasEnabled = Boolean.parseBoolean(existingConfigsMap.getOrDefault(name, "false").trim());
+                    boolean isEnabled = Boolean.parseBoolean(allConfigs.getOrDefault(name, "false").trim());
+                    if (wasEnabled != isEnabled) {
+                        return new ApiError(INVALID_CONFIG, name + " cannot be changed after topic creation.");
+                    }
+                }
             }
             if (alterConfigPolicy.isPresent()) {
                 alterConfigPolicy.get().validate(new RequestMetadata(configResource, alteredConfigsForAlterConfigPolicyCheck));

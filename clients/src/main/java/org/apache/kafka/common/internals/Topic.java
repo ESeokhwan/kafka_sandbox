@@ -34,7 +34,10 @@ public class Topic {
     );
     public static final String LEGAL_CHARS = "[a-zA-Z0-9._-]";
 
-    private static final Set<String> INTERNAL_TOPICS = Set.of(GROUP_METADATA_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME);
+    public static final String GLOBAL_SEQUENCE_INDEX_TOPIC_NAME = "__global_sequence_index";
+
+    private static final Set<String> INTERNAL_TOPICS = Set.of(GROUP_METADATA_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME,
+        SHARE_GROUP_STATE_TOPIC_NAME, GLOBAL_SEQUENCE_INDEX_TOPIC_NAME);
 
     private static final int MAX_NAME_LENGTH = 249;
 

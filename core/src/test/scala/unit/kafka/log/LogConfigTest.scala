@@ -61,6 +61,7 @@ class LogConfigTest {
   def testFromPropsInvalid(): Unit = {
     LogConfig.configNames.forEach(name => name match {
       case TopicConfig.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG => assertPropertyInvalid(name, "not a boolean")
+      case TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG => assertPropertyInvalid(name, "not a boolean")
       case TopicConfig.RETENTION_BYTES_CONFIG => assertPropertyInvalid(name, "not_a_number")
       case TopicConfig.RETENTION_MS_CONFIG => assertPropertyInvalid(name, "not_a_number")
       case TopicConfig.CLEANUP_POLICY_CONFIG => assertPropertyInvalid(name, "true", "foobar")

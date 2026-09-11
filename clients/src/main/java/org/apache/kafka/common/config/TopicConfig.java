@@ -28,6 +28,12 @@ package org.apache.kafka.common.config;
 // This is a public API, so we should not remove or alter keys without a discussion and a deprecation period.
 // Eventually this should replace LogConfig.scala.
 public class TopicConfig {
+    public static final String GLOBAL_SEQUENCE_ENABLED_CONFIG = "global.sequence.enabled";
+    public static final String GLOBAL_SEQUENCE_ENABLED_DOC = "Enable topic-wide global sequence indexing. " +
+        "This setting can only be selected when the topic is created and cannot be changed later. " +
+        "Global sequence topics require an explicit topic-level cleanup.policy=delete. " +
+        "Produce and ordinary Fetch offsets remain physical offsets.";
+
     public static final String SEGMENT_BYTES_CONFIG = "segment.bytes";
     public static final String SEGMENT_BYTES_DOC = "This configuration controls the segment file size for " +
         "the log. Retention and cleaning is always done a file at a time so a larger segment size means " +

@@ -18,10 +18,11 @@
 package kafka.server
 
 import kafka.utils.TestUtils
-import org.apache.kafka.common.config.ConfigResource
+import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, BROKER_LOGGER, CLIENT_METRICS, GROUP, TOPIC}
 import org.apache.kafka.common.config.TopicConfig.{REMOTE_LOG_STORAGE_ENABLE_CONFIG, SEGMENT_BYTES_CONFIG, SEGMENT_JITTER_MS_CONFIG, SEGMENT_MS_CONFIG}
 import org.apache.kafka.common.errors.{InvalidConfigurationException, InvalidRequestException, InvalidTopicException}
+import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.coordinator.group.GroupConfig
 import org.apache.kafka.server.metrics.ClientMetricsConfigs
 import org.junit.jupiter.api.Assertions.{assertEquals, assertThrows}
@@ -35,6 +36,24 @@ import java.util.Collections.emptyMap
 class ControllerConfigurationValidatorTest {
   val config = new KafkaConfig(TestUtils.createDummyBrokerConfig())
   val validator = new ControllerConfigurationValidator(config)
+
+  @Test
+  def testGlobalSequenceCleanupPolicyMustBePinned(): Unit = {
+    val resource = new ConfigResource(TOPIC, "ordered")
+    val configs = new util.HashMap[String, String]()
+    configs.put(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true")
+    assertThrows(classOf[InvalidConfigurationException], () => validator.validate(resource, configs, emptyMap()))
+    configs.put(TopicConfig.CLEANUP_POLICY_CONFIG, "delete")
+    validator.validate(resource, configs, emptyMap())
+    assertThrows(classOf[InvalidConfigurationException], () => validator.validate(
+      new ConfigResource(TOPIC, Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME), configs, emptyMap()))
+
+    val oldConfigs = new util.HashMap[String, String](configs)
+    configs.put(TopicConfig.CLEANUP_POLICY_CONFIG, "compact")
+    assertThrows(classOf[InvalidConfigurationException], () => validator.validate(resource, configs, oldConfigs))
+    configs.remove(TopicConfig.CLEANUP_POLICY_CONFIG)
+    assertThrows(classOf[InvalidConfigurationException], () => validator.validate(resource, configs, oldConfigs))
+  }
 
   @Test
   def testDefaultTopicResourceIsRejected(): Unit = {

@@ -19,7 +19,7 @@ package kafka.server
 
 import java.util
 import java.util.Properties
-import org.apache.kafka.common.config.ConfigResource
+import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, CLIENT_METRICS, GROUP, TOPIC}
 import org.apache.kafka.controller.ConfigurationValidator
 import org.apache.kafka.common.errors.{InvalidConfigurationException, InvalidRequestException}
@@ -119,6 +119,15 @@ class ControllerConfigurationValidator(kafkaConfig: KafkaConfig) extends Configu
         }
         LogConfig.validate(oldConfigs, properties, kafkaConfig.extractLogConfigMap,
           kafkaConfig.remoteLogManagerConfig.isRemoteStorageSystemEnabled())
+        if (java.lang.Boolean.parseBoolean(properties.getProperty(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "false").trim)) {
+          if (Topic.isInternal(resource.name())) {
+            throw new InvalidConfigurationException("Global sequence indexing cannot be enabled on internal topics.")
+          }
+          // Pin this at topic level so a later broker cleanup policy change cannot enable compaction.
+          if (!newConfigs.containsKey(TopicConfig.CLEANUP_POLICY_CONFIG)) {
+            throw new InvalidConfigurationException("Global sequence topics require an explicit cleanup.policy=delete.")
+          }
+        }
       case BROKER => validateBrokerName(resource.name())
       case CLIENT_METRICS =>
         val properties = new Properties()
