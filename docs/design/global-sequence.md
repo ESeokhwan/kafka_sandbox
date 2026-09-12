@@ -176,6 +176,44 @@ Indexer는 데이터 파티션 리더에서 실행한다. 파티션마다 전용
 커밋됐거나 이미 커밋된 것으로 확인된 뒤에 진행한다. 다른 파티션의 작업은 독립적이다.
 이후 연속 배치를 한 요청으로 묶는 최적화도 이 규칙을 유지해야 한다.
 
+### 리더 라우팅 구현
+
+브로커의 `IndexRoutingManager`는 data topic UUID를 서비스의 고정 partition 함수에
+전달하고, 현재 KRaft metadata image에서 해당 인덱스 파티션의 리더와 inter-broker
+endpoint를 찾는다. 리더가 로컬이면 coordinator Future를 직접 연결하고, 원격이면
+`GlobalSequenceNetworkClient`의 `InterBrokerSendThread`를 통해 v0 내부 RPC를 보낸다.
+원격 연결은 브로커의 inter-broker listener·SSL/SASL 설정과 ApiVersions 협상을 재사용한다.
+프로토콜 미지원·인증 실패는 성공으로 간주하거나 이전 프로토콜로 우회하지 않는다.
+
+각 시도는 index topic UUID, partition, leader broker/epoch, broker registration epoch,
+endpoint를 캡처한다. 성공 응답 시 현재 metadata 및 응답의 coordinator epoch를 다시
+검사한다. 리더가 바뀐 뒤 도착한 성공·조회 결과는 폐기하고 같은 논리적 요청을 재시도한다.
+결과에 포함된 `CoordinatorLocation`과 `isCurrent`는 비동기 복구 작업이 실제 적용되는
+시점에도 이 검사를 수행하기 위한 수단이다. Write의 source broker/epoch는 송신 전과
+성공 응답 시 재확인하며, 실제 coordinator도 write 실행 시 별도로 검증한다.
+
+연결 단절, timeout, coordinator 로딩/이동, metadata 미도착과 일시적인 복제 오류는
+100ms부터 최대 1초까지 backoff하여 재시도한다. KRaft가 image를 갱신하므로 별도의
+controller RPC나 고정된 리더 캐시를 쓰지 않는다. 요청 전체에는 호출자가 지정한
+하나의 deadline을 적용하며, 재시도할 때 예산을 새로 시작하지 않는다. 등록 UUID와
+expected generation, physical batch 및 predecessor, source identity는 그대로 유지하고
+대상 coordinator epoch만 새 리더에 맞춘다.
+
+등록 CAS 거절과 `FENCED`, `OWNER_NOT_COMMITTED`, `OUT_OF_ORDER`는 호출자에게
+반환한다. 특히 fencing/등록 거절은 인덱스 리더가 바뀌었더라도 자동 재시도로 숨기지 않는다.
+Indexer가 이 결과에 맞춰 중단·등록 barrier 확인·진행 위치 조회를 수행하는 것은 다음 단계다.
+Deadline·호출 취소·브로커 종료는 대기 Future와 예약된 재시도를 해제하며, 이미 coordinator가
+수락한 write의 rollback이나 할당 취소를 의미하지 않는다. Broker 종료 시 라우터와 네트워크를
+coordinator 및 scheduler보다 먼저 닫는다. 관측한 인덱스 토픽의 삭제·UUID/partition 수 변경은
+새 이력으로 재시도하지 않고 오류로 중단한다.
+
+인덱스 리더 이동 직후에는 새 리더의 로그에 batch가 존재해도 HW 전파가 아직 끝나지
+않을 수 있다. 이때 Describe는 현 시점에서 확인된 committed progress만 반환하며,
+이전 응답보다 뒤처져 보일 수 있다. 이를 복구의 시작 위치로 바로 적용하지 않는다.
+같은 registration UUID·조건으로 등록 barrier를 다시 확인한 후 progress를 조회한다.
+3개 브로커 통합 테스트는 원격 등록/append, 인덱스 리더 이동, 같은 등록의 재확인,
+중복 append의 `ALREADY_INDEXED`, 다음 배치의 연속 global offset 할당을 검증한다.
+
 ## 5. 저장과 메모리 상태
 
 내부 토픽은 `__global_sequence_index`다. 데이터 topic ID를 결정적인 함수로 매핑하여
