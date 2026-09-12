@@ -1547,6 +1547,24 @@ public class ReplicationControlManagerTest {
     }
 
     @Test
+    public void testGlobalSequenceIndexPartitionCountCannotChange() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().build();
+        ctx.registerBrokers(0);
+        ctx.unfenceBrokers(0);
+        String name = org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME;
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        request.topics().add(new CreatableTopic().setName(name).setNumPartitions(1).setReplicationFactor((short) 1));
+        ControllerResult<CreateTopicsResponseData> created = ctx.replicationControl.createTopics(
+            anonymousContextFor(ApiKeys.CREATE_TOPICS), request, Set.of(name));
+        assertEquals(NONE.code(), created.response().topics().find(name).errorCode());
+        ctx.replay(created.records());
+        ControllerResult<List<CreatePartitionsTopicResult>> increased = ctx.replicationControl.createPartitions(
+            anonymousContextFor(ApiKeys.CREATE_PARTITIONS), List.of(new CreatePartitionsTopic().setName(name).setCount(2)));
+        assertEquals(INVALID_PARTITIONS.code(), increased.response().get(0).errorCode());
+        assertTrue(increased.records().isEmpty());
+    }
+
+    @Test
     public void testCreatePartitions() {
         ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().build();
         ReplicationControlManager replicationControl = ctx.replicationControl;

@@ -26,7 +26,7 @@ import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.{ClientResponse, NodeApiVersions, RequestCompletionHandler}
 import org.apache.kafka.common.Node
-import org.apache.kafka.common.internals.Topic.{GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME}
+import org.apache.kafka.common.internals.Topic.{GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, GROUP_METADATA_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME}
 import org.apache.kafka.common.message.{ApiVersionsResponseData, CreateTopicsRequestData}
 import org.apache.kafka.common.message.CreateTopicsRequestData.{CreatableTopic, CreatableTopicConfig, CreatableTopicConfigCollection}
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic
@@ -80,6 +80,22 @@ class AutoTopicCreationManagerTest {
     val aliveBrokers = util.List.of(new Node(0, "host0", 0), new Node(1, "host1", 1))
 
     Mockito.when(metadataCache.getAliveBrokerNodes(any(classOf[ListenerName]))).thenReturn(aliveBrokers)
+  }
+
+  @Test
+  def testCreateGlobalSequenceIndexTopicWithDurableSettings(): Unit = {
+    autoTopicCreationManager = new DefaultAutoTopicCreationManager(config, brokerToController,
+      groupCoordinator, transactionCoordinator, shareCoordinator)
+    createTopicAndVerifyResult(Errors.UNKNOWN_TOPIC_OR_PARTITION, GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, isInternal = true)
+    createTopicAndVerifyResult(Errors.UNKNOWN_TOPIC_OR_PARTITION, GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, isInternal = true)
+    val requestCaptor = ArgumentCaptor.forClass(classOf[AbstractRequest.Builder[_ <: AbstractRequest]])
+    Mockito.verify(brokerToController).sendRequest(requestCaptor.capture(), any(classOf[ControllerRequestCompletionHandler]))
+    val created = requestCaptor.getValue.asInstanceOf[CreateTopicsRequest.Builder].build().data().topics().find(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+    assertEquals(config.globalSequenceCoordinatorConfig.indexTopicNumPartitions(), created.numPartitions())
+    assertEquals(config.globalSequenceCoordinatorConfig.indexTopicReplicationFactor(), created.replicationFactor())
+    val expected = config.globalSequenceCoordinatorConfig.indexTopicConfigs()
+    assertEquals(expected.size(), created.configs().size())
+    expected.forEach { (key, value) => assertEquals(value, created.configs().find(key.toString).value()) }
   }
 
   @Test

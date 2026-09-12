@@ -30,6 +30,8 @@ import org.apache.kafka.storage.internals.log.{FetchDataInfo, LogOffsetMetadata,
 import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.junit.jupiter.api.Assertions.{assertEquals, assertNotNull}
 import org.junit.jupiter.api.{Test, Timeout}
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.{ArgumentCaptor, ArgumentMatchers}
 import org.mockito.Mockito.{mock, times, verify, when}
@@ -221,8 +223,9 @@ class CoordinatorLoaderImplTest {
     }
   }
 
-  @Test
-  def testUnknownRecordTypeAreIgnored(): Unit = {
+  @ParameterizedTest
+  @ValueSource(booleans = Array(false, true))
+  def testUnknownRecordTypeHandling(requireFullLog: Boolean): Unit = {
     val tp = new TopicPartition("foo", 0)
     val replicaManager = mock(classOf[ReplicaManager])
     val serde = mock(classOf[StringKeyValueDeserializer])
@@ -234,7 +237,8 @@ class CoordinatorLoaderImplTest {
       replicaManager = replicaManager,
       deserializer = serde,
       loadBufferSize = 1000,
-      commitIntervalOffsets = CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+      commitIntervalOffsets = CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS,
+      requireFullLog = requireFullLog
     )) { loader =>
       when(replicaManager.getLog(tp)).thenReturn(Some(log))
       when(log.logStartOffset).thenReturn(0L)
@@ -252,9 +256,12 @@ class CoordinatorLoaderImplTest {
         .thenThrow(new UnknownRecordTypeException(1))
         .thenReturn(("k2", "v2"))
 
-      loader.load(tp, coordinator).get(10, TimeUnit.SECONDS)
-
-      verify(coordinator).replay(1L, RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH, ("k2", "v2"))
+      if (requireFullLog) {
+        assertFutureThrows(classOf[RuntimeException], loader.load(tp, coordinator))
+      } else {
+        loader.load(tp, coordinator).get(10, TimeUnit.SECONDS)
+        verify(coordinator).replay(1L, RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH, ("k2", "v2"))
+      }
     }
   }
 
@@ -641,6 +648,56 @@ class CoordinatorLoaderImplTest {
       verify(coordinator, times(1)).updateLastCommittedOffset(5L)
       verify(coordinator, times(0)).updateLastCommittedOffset(6L)
       verify(coordinator, times(1)).updateLastCommittedOffset(7L)
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = Array("truncated-start", "missing-record", "empty-tail", "control"))
+  def testStrictIndexLoadingRejectsIncompleteHistory(scenario: String): Unit = {
+    val tp = new TopicPartition("__global_sequence_index", 0)
+    val replicaManager = mock(classOf[ReplicaManager])
+    val log = mock(classOf[UnifiedLog])
+    val coordinator = mock(classOf[CoordinatorPlayback[(String, String)]])
+    Using.resource(new CoordinatorLoaderImpl[(String, String)](Time.SYSTEM, replicaManager,
+      new StringKeyValueDeserializer, 1000, requireFullLog = true)) { loader =>
+      when(replicaManager.getLog(tp)).thenReturn(Some(log))
+      when(replicaManager.getLogEndOffset(tp)).thenReturn(Some(2L))
+      when(log.logStartOffset).thenReturn(if (scenario == "truncated-start") 2L else 0L)
+      val readResult = scenario match {
+        case "missing-record" => logReadResult(startOffset = 1, records = Seq(new SimpleRecord("k".getBytes, "v".getBytes)))
+        case "control" => logReadResult(startOffset = 0, producerId = 1L, producerEpoch = 0,
+          controlRecordType = ControlRecordType.COMMIT)
+        case _ => logReadResult(startOffset = 0, records = Seq.empty[SimpleRecord])
+      }
+      when(log.read(0L, 1000, FetchIsolation.LOG_END, true)).thenReturn(readResult)
+      if (scenario == "missing-record") assertFutureThrows(classOf[RuntimeException], loader.load(tp, coordinator))
+      else assertFutureThrows(classOf[IllegalStateException], loader.load(tp, coordinator))
+    }
+  }
+
+  @Test
+  def testStrictIndexLoadingPreservesCommittedBoundaryAndLocalTail(): Unit = {
+    val tp = new TopicPartition("__global_sequence_index", 0)
+    val replicaManager = mock(classOf[ReplicaManager])
+    val log = mock(classOf[UnifiedLog])
+    val coordinator = mock(classOf[CoordinatorPlayback[(String, String)]])
+    Using.resource(new CoordinatorLoaderImpl[(String, String)](Time.SYSTEM, replicaManager,
+      new StringKeyValueDeserializer, 1000, requireFullLog = true)) { loader =>
+      when(replicaManager.getLog(tp)).thenReturn(Some(log))
+      when(replicaManager.getLogEndOffset(tp)).thenReturn(Some(3L))
+      when(log.logStartOffset).thenReturn(0L)
+      when(log.highWatermark).thenReturn(2L)
+      val committed = logReadResult(startOffset = 0,
+        records = Seq(new SimpleRecord("k0".getBytes, "v0".getBytes), new SimpleRecord("k1".getBytes, "v1".getBytes)))
+      val tail = logReadResult(startOffset = 2, records = Seq(new SimpleRecord("k2".getBytes, "v2".getBytes)))
+      when(log.read(0L, 1000, FetchIsolation.LOG_END, true)).thenReturn(committed)
+      when(log.read(2L, 1000, FetchIsolation.LOG_END, true)).thenReturn(tail)
+      loader.load(tp, coordinator).get(10, TimeUnit.SECONDS)
+      verify(coordinator).replay(0L, -1L, (-1).toShort, ("k0", "v0"))
+      verify(coordinator).replay(1L, -1L, (-1).toShort, ("k1", "v1"))
+      verify(coordinator).replay(2L, -1L, (-1).toShort, ("k2", "v2"))
+      verify(coordinator).updateLastWrittenOffset(3L)
+      verify(coordinator).updateLastCommittedOffset(2L)
     }
   }
 

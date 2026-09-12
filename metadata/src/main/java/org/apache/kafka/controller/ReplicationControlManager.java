@@ -1837,6 +1837,9 @@ public class ReplicationControlManager {
         if (topicInfo == null) {
             throw new UnknownTopicOrPartitionException();
         }
+        if (Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME.equals(topic.name())) {
+            throw new InvalidPartitionsException("The global sequence index topic partition count is fixed.");
+        }
         if (topic.count() == topicInfo.parts.size()) {
             throw new InvalidPartitionsException("Topic already has " +
                 topicInfo.parts.size() + " partition(s).");

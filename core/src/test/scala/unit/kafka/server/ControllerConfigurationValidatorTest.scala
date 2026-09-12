@@ -38,6 +38,25 @@ class ControllerConfigurationValidatorTest {
   val validator = new ControllerConfigurationValidator(config)
 
   @Test
+  def testGlobalIndexHistoryConfigurationCannotBeRemovedOrChanged(): Unit = {
+    val required = org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig.REQUIRED_INDEX_TOPIC_CONFIGS
+    val resource = new ConfigResource(TOPIC, Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+    validator.validate(resource, required, emptyMap())
+    required.forEach { (key, _) =>
+      val missing = new util.HashMap[String, String](required)
+      missing.remove(key)
+      assertThrows(classOf[InvalidConfigurationException], () => validator.validate(resource, missing, required))
+    }
+    Map(TopicConfig.CLEANUP_POLICY_CONFIG -> "compact", TopicConfig.RETENTION_MS_CONFIG -> "1000",
+      TopicConfig.RETENTION_BYTES_CONFIG -> "1000", TopicConfig.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG -> "true").foreach {
+      case (key, value) =>
+        val unsafe = new util.HashMap[String, String](required)
+        unsafe.put(key, value)
+        assertThrows(classOf[InvalidConfigurationException], () => validator.validate(resource, unsafe, required))
+    }
+  }
+
+  @Test
   def testGlobalSequenceCleanupPolicyMustBePinned(): Unit = {
     val resource = new ConfigResource(TOPIC, "ordered")
     val configs = new util.HashMap[String, String]()

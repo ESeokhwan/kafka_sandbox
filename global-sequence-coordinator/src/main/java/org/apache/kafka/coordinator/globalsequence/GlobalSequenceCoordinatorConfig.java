@@ -22,6 +22,7 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.TopicConfig;
 
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 
@@ -35,6 +36,13 @@ import static org.apache.kafka.common.config.ConfigDef.Type.SHORT;
  * Topic activation is separately controlled by {@link TopicConfig#GLOBAL_SEQUENCE_ENABLED_CONFIG}.
  */
 public class GlobalSequenceCoordinatorConfig {
+    /** Topic-level overrides required to retain the complete index history. */
+    public static final Map<String, String> REQUIRED_INDEX_TOPIC_CONFIGS = Map.of(
+        TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_DELETE,
+        TopicConfig.RETENTION_MS_CONFIG, "-1",
+        TopicConfig.RETENTION_BYTES_CONFIG, "-1",
+        TopicConfig.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG, "false"
+    );
     public static final String INDEX_TOPIC_NUM_PARTITIONS_CONFIG = "global.sequence.coordinator.index.topic.num.partitions";
     public static final int INDEX_TOPIC_NUM_PARTITIONS_DEFAULT = 50;
     public static final String INDEX_TOPIC_NUM_PARTITIONS_DOC = "Number of index topic partitions. Must not change after the index topic is created.";
@@ -124,12 +132,9 @@ public class GlobalSequenceCoordinatorConfig {
      */
     public Properties indexTopicConfigs() {
         Properties props = new Properties();
-        props.setProperty(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_DELETE);
-        props.setProperty(TopicConfig.RETENTION_MS_CONFIG, "-1");
-        props.setProperty(TopicConfig.RETENTION_BYTES_CONFIG, "-1");
+        props.putAll(REQUIRED_INDEX_TOPIC_CONFIGS);
         props.setProperty(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, Integer.toString(indexTopicMinIsr()));
         props.setProperty(TopicConfig.SEGMENT_BYTES_CONFIG, Integer.toString(indexTopicSegmentBytes()));
-        props.setProperty(TopicConfig.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG, "false");
         props.setProperty(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "false");
         return props;
     }

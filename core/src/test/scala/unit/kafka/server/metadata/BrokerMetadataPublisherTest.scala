@@ -37,6 +37,7 @@ import org.apache.kafka.common.test.{KafkaClusterTestKit, TestKitNodes}
 import org.apache.kafka.common.utils.Exit
 import org.apache.kafka.coordinator.group.GroupCoordinator
 import org.apache.kafka.coordinator.share.ShareCoordinator
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
 import org.apache.kafka.image.{AclsImage, ClientQuotasImage, ClusterImageTest, ConfigurationsImage, DelegationTokenImage, FeaturesImage, MetadataDelta, MetadataImage, MetadataImageTest, MetadataProvenance, ProducerIdsImage, ScramImage, TopicsImage}
 import org.apache.kafka.image.loader.LogDeltaManifest
 import org.apache.kafka.metadata.publisher.AclPublisher
@@ -202,6 +203,7 @@ class BrokerMetadataPublisherTest {
       groupCoordinator,
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
+      mock(classOf[GlobalSequenceCoordinator]),
       mock(classOf[SharePartitionManager]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
@@ -250,6 +252,84 @@ class BrokerMetadataPublisherTest {
   }
 
   @Test
+  def testGlobalSequenceCoordinatorElectionAndDeletion(): Unit = {
+    val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(0))
+    val metadataCache = new KRaftMetadataCache(0, () => KRaftVersion.KRAFT_VERSION_1)
+    val logManager = mock(classOf[LogManager])
+    val replicaManager = mock(classOf[ReplicaManager])
+    val globalCoordinator = mock(classOf[GlobalSequenceCoordinator])
+    val faultHandler = mock(classOf[FaultHandler])
+
+    val metadataPublisher = new BrokerMetadataPublisher(
+      config,
+      metadataCache,
+      logManager,
+      replicaManager,
+      mock(classOf[GroupCoordinator]),
+      mock(classOf[TransactionCoordinator]),
+      mock(classOf[ShareCoordinator]),
+      globalCoordinator,
+      mock(classOf[SharePartitionManager]),
+      mock(classOf[DynamicConfigPublisher]),
+      mock(classOf[DynamicClientQuotaPublisher]),
+      mock(classOf[DynamicTopicClusterQuotaPublisher]),
+      mock(classOf[ScramPublisher]),
+      mock(classOf[DelegationTokenPublisher]),
+      mock(classOf[AclPublisher]),
+      faultHandler,
+      faultHandler
+    )
+
+    val topicId = Uuid.randomUuid()
+    var delta = new MetadataDelta(MetadataImage.EMPTY)
+    delta.replay(new TopicRecord()
+      .setName(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+      .setTopicId(topicId)
+    )
+    delta.replay(new PartitionRecord()
+      .setTopicId(topicId)
+      .setPartitionId(0)
+      .setLeader(config.brokerId)
+      .setLeaderEpoch(7)
+      .setReplicas(util.List.of(Int.box(config.brokerId)))
+      .setIsr(util.List.of(Int.box(config.brokerId)))
+    )
+    delta.replay(new PartitionRecord()
+      .setTopicId(topicId)
+      .setPartitionId(1)
+      .setLeader(config.brokerId)
+      .setLeaderEpoch(7)
+      .setReplicas(util.List.of(Int.box(config.brokerId)))
+      .setIsr(util.List.of(Int.box(config.brokerId)))
+    )
+    val image = delta.apply(MetadataProvenance.EMPTY)
+
+    metadataPublisher.onMetadataUpdate(delta, image,
+      LogDeltaManifest.newBuilder().provenance(MetadataProvenance.EMPTY).leaderAndEpoch(LeaderAndEpoch.UNKNOWN)
+        .numBatches(1).elapsedNs(100).numBytes(42).build())
+    verify(globalCoordinator).onNewMetadataImage(image, delta)
+    verify(globalCoordinator).onElection(0, 7)
+    verify(globalCoordinator).onElection(1, 7)
+
+    delta = new MetadataDelta(image)
+    delta.replay(new RemoveTopicRecord()
+      .setTopicId(topicId)
+    )
+
+    metadataPublisher.onMetadataUpdate(delta, delta.apply(MetadataProvenance.EMPTY),
+      LogDeltaManifest.newBuilder()
+        .provenance(MetadataProvenance.EMPTY)
+        .leaderAndEpoch(LeaderAndEpoch.UNKNOWN)
+        .numBatches(1)
+        .elapsedNs(100)
+        .numBytes(42)
+        .build())
+
+    verify(globalCoordinator).onResignation(0, OptionalInt.empty())
+    verify(globalCoordinator).onResignation(1, OptionalInt.empty())
+  }
+
+  @Test
   def testNewImagePushedToGroupCoordinator(): Unit = {
     val config = KafkaConfig.fromProps(TestUtils.createBrokerConfig(0))
     val metadataCache = new KRaftMetadataCache(0, () => KRaftVersion.KRAFT_VERSION_1)
@@ -266,6 +346,7 @@ class BrokerMetadataPublisherTest {
       groupCoordinator,
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
+      mock(classOf[GlobalSequenceCoordinator]),
       mock(classOf[SharePartitionManager]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
@@ -307,6 +388,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[GroupCoordinator]),
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
+      mock(classOf[GlobalSequenceCoordinator]),
       sharePartitionManager,
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),

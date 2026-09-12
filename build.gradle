@@ -1697,6 +1697,8 @@ project(':global-sequence-coordinator') {
     implementation project(':metadata')
     implementation project(':server-common')
     implementation libs.jacksonDatabind
+    implementation libs.metrics
+    implementation libs.slf4jApi
 
     testImplementation project(':clients').sourceSets.test.output
     testImplementation project(':coordinator-common').sourceSets.test.output

@@ -22,6 +22,8 @@
     <allow pkg="java" />
     <allow pkg="org.junit.jupiter" />
     <allow pkg="org.mockito" />
+    <allow pkg="org.slf4j" />
+    <allow pkg="com.yammer.metrics" />
     <disallow pkg="kafka" />
     <allow pkg="org.apache.kafka.common" exact-match="true" />
     <allow pkg="org.apache.kafka.common.config" />
@@ -31,6 +33,8 @@
     <allow pkg="org.apache.kafka.common.record" />
     <allow pkg="org.apache.kafka.common.requests" />
     <allow pkg="org.apache.kafka.common.utils" />
+    <allow pkg="org.apache.kafka.common.metrics" />
+    <allow pkg="org.apache.kafka.common.metadata" />
     <allow pkg="org.apache.kafka.test" />
     <subpackage name="coordinator">
         <subpackage name="globalsequence">
@@ -38,6 +42,7 @@
             <allow pkg="org.apache.kafka.coordinator.globalsequence" />
             <allow pkg="org.apache.kafka.server.common" />
             <allow pkg="org.apache.kafka.server.util.timer" />
+            <allow pkg="org.apache.kafka.server.metrics" />
             <allow pkg="org.apache.kafka.image" />
             <allow pkg="org.apache.kafka.timeline" />
             <subpackage name="generated">

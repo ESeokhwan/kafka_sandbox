@@ -34,11 +34,13 @@ import org.apache.kafka.common.security.scram.internals.ScramMechanism
 import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCache
 import org.apache.kafka.common.utils.{LogContext, Time, Utils}
 import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
+import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.group.{GroupConfigManager, GroupCoordinator, GroupCoordinatorRecordSerde, GroupCoordinatorService}
 import org.apache.kafka.coordinator.share.metrics.{ShareCoordinatorMetrics, ShareCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.share.{ShareCoordinator, ShareCoordinatorRecordSerde, ShareCoordinatorService}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorRecordSerde, GlobalSequenceCoordinatorService}
 import org.apache.kafka.coordinator.transaction.ProducerIdManager
 import org.apache.kafka.image.publisher.{BrokerRegistrationTracker, MetadataPublisher}
 import org.apache.kafka.metadata.{BrokerState, ListenerInfo}
@@ -128,6 +130,7 @@ class BrokerServer(
   var transactionCoordinator: TransactionCoordinator = _
 
   var shareCoordinator: ShareCoordinator = _
+  var globalSequenceCoordinator: GlobalSequenceCoordinator = _
 
   var clientToControllerChannelManager: NodeToControllerChannelManager = _
 
@@ -397,6 +400,8 @@ class BrokerServer(
         config, clientToControllerChannelManager, groupCoordinator,
         transactionCoordinator, shareCoordinator)
 
+      globalSequenceCoordinator = createGlobalSequenceCoordinator()
+
       dynamicConfigHandlers = Map[ConfigType, ConfigHandler](
         ConfigType.TOPIC -> new TopicConfigHandler(replicaManager, config, quotaManagers),
         ConfigType.BROKER -> new BrokerConfigHandler(config, quotaManagers),
@@ -485,6 +490,7 @@ class BrokerServer(
         groupCoordinator,
         transactionCoordinator,
         shareCoordinator,
+        globalSequenceCoordinator,
         sharePartitionManager,
         new DynamicConfigPublisher(
           config,
@@ -639,6 +645,34 @@ class BrokerServer(
       .build()
   }
 
+  private def createGlobalSequenceCoordinator(): GlobalSequenceCoordinator = {
+    val coordinatorTime = Time.SYSTEM
+    val timer = new SystemTimerReaper(
+      "global-sequence-coordinator-reaper",
+      new SystemTimer("global-sequence-coordinator")
+    )
+    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
+      coordinatorTime,
+      replicaManager,
+      new GlobalSequenceCoordinatorRecordSerde,
+      config.globalSequenceCoordinatorConfig.loadBufferSize(),
+      CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS,
+      requireFullLog = true
+    )
+    new GlobalSequenceCoordinatorService.Builder(config.brokerId, config.globalSequenceCoordinatorConfig)
+      .withTime(coordinatorTime)
+      .withTimer(timer)
+      .withLoader(loader)
+      .withWriter(new CoordinatorPartitionWriter(replicaManager))
+      .withMetrics(metrics)
+      .withTopicCreation(() => {
+        autoTopicCreationManager.createTopics(Set(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME),
+          UnboundedControllerMutationQuota, None)
+        ()
+      })
+      .build()
+  }
+
   private def createShareCoordinator(): ShareCoordinator = {
     val time = Time.SYSTEM
     val timer = new SystemTimerReaper(
@@ -787,6 +821,8 @@ class BrokerServer(
         CoreUtils.swallow(groupCoordinator.shutdown(), this)
       if (shareCoordinator != null)
         CoreUtils.swallow(shareCoordinator.shutdown(), this)
+      if (globalSequenceCoordinator != null)
+        CoreUtils.swallow(globalSequenceCoordinator.shutdown(), this)
 
       if (assignmentsManager != null)
         CoreUtils.swallow(assignmentsManager.close(), this)

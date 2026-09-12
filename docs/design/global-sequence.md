@@ -18,8 +18,8 @@
 # Ordered global sequence topic
 
 상태: 1차 구현을 위한 설계 계약. 모듈·설정, 저장 형식, Runtime context/hook,
-Coordinator shard의 할당·진행 상태까지 구현했다. 브로커 서비스·내부 RPC·Indexer·
-Produce 연동 및 global 읽기는 후속 구현 단계다.
+Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연결까지 구현했다.
+내부 RPC·Indexer·Produce 연동 및 global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -267,8 +267,9 @@ context가 자동으로 최신 값으로 바뀌지는 않는다.
 `prepareAppend(request, context)`를 Runtime의 write callback 안에서 호출한다. 요청에는
 물리 배치, 직전 대상 배치의 base offset(최초에는 -1), 원본 data HW 및 Indexer identity를
 담는다. Identity는 source broker/leader epoch, generation, registration UUID로 구성한다.
-요청 범위 검증과 실제 원본 로그·metadata 검증은 별개다. 후자의 연결은 내부 RPC와
-순차 reader/Indexer 구현에서 수행한다.
+요청 범위 검증과 실제 원본 로그·metadata 검증은 별개다. 서비스는 실행 시점 metadata의
+대상 토픽과 source leader/epoch를 검증한다. 원본 로그 순회와 네트워크 권한 검사는
+순차 reader/Indexer와 내부 RPC 구현에서 연결한다.
 
 `prepareAppend`는 상태를 직접 변경하지 않는다. 신규 배치에는 `BatchIndex`와
 `TopicMetadata`를 atomic `CoordinatorResult`로 반환하며, Runtime이 이를 replay할 때
@@ -304,6 +305,46 @@ tombstone과 인덱스 로그 자체의 transaction은 거절한다. 원본 데�
 `ALREADY_INDEXED`는 현재 committed progress를 반환하고 과거 global base는 생략한다.
 빈 결과도 Runtime의 기존 대기 규칙을 따르므로 다른 선행 write 때문에 완료가 늦어질
 수 있다. 현재 committed progress 조회는 직렬화된 shard 호출 안에서 수행한다.
+
+### 브로커 서비스와 내부 토픽 lifecycle
+
+[GlobalSequenceCoordinatorService](../../global-sequence-coordinator/src/main/java/org/apache/kafka/coordinator/globalsequence/GlobalSequenceCoordinatorService.java)는
+`CoordinatorRuntime`을 소유한다. 브로커는 `CoordinatorPartitionWriter`와 전체 이력 검증을
+켠 `CoordinatorLoaderImpl`을 주입한다. 최초 metadata publish에서 LogManager와
+ReplicaManager 다음에 서비스를 시작하고, 인덱스 파티션 리더 선출/사임에 따라 shard를
+load/unload한다. Metadata는 load를 예약하기 전에 서비스와 Runtime에 전달한다.
+브로커 종료 시에는 ReplicaManager보다 먼저 서비스를 닫는다. 서비스 시작 전 브로커
+startup이 실패했을 때도 생성한 loader·timer·event processor·executor·Runtime metrics를
+해제한다. 이미 종료한 서비스는 재사용하지 않으며 브로커 재시작은 새 인스턴스를 만든다.
+
+Java 서비스의 `appendIndex`와 `committedProgress`는 비동기 Runtime 작업을 반환한다.
+진행 조회는 committed 상태만 읽고, append는 실행 시점의 source broker/leader epoch도
+확인한다. 이 API에 접근하는 네트워크 RPC와 Indexer 등록은 다음 단계에서 연결한다.
+
+데이터 topic ID의 shard는 `Utils.abs(topicId.hashCode()) % N`으로 정한다. 이 Kafka Uuid의
+hash는 UUID 상·하위 64비트의 XOR를 다시 상·하위 32비트 XOR로 접은 값이다. N은 정적
+`global.sequence.coordinator.index.topic.num.partitions`다. 시작할 때 이미 존재하는
+내부 토픽의 파티션 수가 설정과 다르면 시작을 거절한다. Controller도 내부 인덱스
+토픽의 CreatePartitions를 거절한다. 관련 브로커는 같은 N을 설정해야 한다.
+
+활성 데이터 토픽이 있고 인덱스 토픽이 없으면 `AutoTopicCreationManager`를 통해
+브로커 권한의 생성 요청을 보낸다. 일반 `auto.create.topics.enable` 설정과 독립적이다.
+생성 요청의 중복은 기존 inflight 관리로 억제하며, metadata에서 토픽을 확인할 때까지
+1초 간격으로 재시도한다. 따라서 replication factor보다 브로커가 적거나 controller가
+잠시 없을 때도 이후 재시도할 수 있다. 활성 토픽이 없어지거나 서비스가 종료되면
+재시도를 취소한다. 한번 관측한 인덱스 토픽이 삭제되거나 다른 UUID로 교체되면
+기존 shard를 unload하고 오류로 중단하며 빈 토픽을 자동 재생성하지 않는다.
+
+내부 토픽에는 `cleanup.policy=delete`, `retention.ms=-1`, `retention.bytes=-1`,
+`unclean.leader.election.enable=false`를 명시한다. Controller는 이 override의 삭제나
+다른 값으로 변경하는 요청도 거절하며 서비스는 metadata에서 이를 재확인한다.
+Shard별 할당/Indexer 지표는 후속 단계이고, 현재는 `global-sequence-coordinator-metrics`
+그룹으로 Runtime 상태·로딩·이벤트 큐·flush 지표를 수집한다.
+
+인덱스 loader는 offset 0 이전 이력 손실, 누락된 레코드, 알 수 없는 record type,
+control batch 및 log end까지 읽지 못한 경우를 실패로 처리한다. 기존 Group/Share
+loader의 기본 동작은 유지한다. 공통 Runtime은 완료된 load의 shard identity도 확인해
+사임 이전의 늦은 성공/실패가 새로 로딩 중인 shard를 활성화하거나 실패시키지 못하게 한다.
 
 ## 6. 소유권 등록과 fencing
 

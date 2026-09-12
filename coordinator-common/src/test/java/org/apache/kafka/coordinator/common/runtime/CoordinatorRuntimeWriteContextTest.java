@@ -46,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -54,6 +55,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class CoordinatorRuntimeWriteContextTest {
     private static final TopicPartition TP = new TopicPartition("__global_sequence_index", 0);
@@ -108,6 +110,36 @@ class CoordinatorRuntimeWriteContextTest {
 
         MockCoordinatorShard shard() {
             return shards.get(shards.size() - 1);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @SuppressWarnings("unchecked")
+    void testOldLoadCompletionCannotActivateOrFailReplacementShard(boolean oldLoadFails) throws Exception {
+        CoordinatorLoader<String> loader = mock(CoordinatorLoader.class);
+        CompletableFuture<CoordinatorLoader.LoadSummary> oldLoad = new CompletableFuture<>();
+        CompletableFuture<CoordinatorLoader.LoadSummary> newLoad = new CompletableFuture<>();
+        when(loader.load(any(), any())).thenReturn(oldLoad, newLoad);
+        Context ctx = new Context(new MockPartitionWriter(), loader, 0);
+        try {
+            ctx.load(10);
+            ctx.runtime.scheduleUnloadOperation(TP, OptionalInt.of(11));
+            ctx.drain();
+            ctx.load(12);
+            MockCoordinatorShard replacement = ctx.shard();
+            if (oldLoadFails) oldLoad.completeExceptionally(new IllegalStateException("old load failed"));
+            else oldLoad.complete(null);
+            ctx.drain();
+            assertEquals(CoordinatorRuntime.CoordinatorState.LOADING, ctx.runtime.contextOrThrow(TP).state);
+            verify(replacement, never()).onLoaded(any());
+            verify(replacement, never()).onUnloaded();
+            newLoad.complete(null);
+            ctx.drain();
+            assertEquals(ACTIVE, ctx.runtime.contextOrThrow(TP).state);
+            verify(replacement).onLoaded(any());
+        } finally {
+            ctx.runtime.close();
         }
     }
 

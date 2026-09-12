@@ -698,11 +698,12 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 throw new IllegalStateException("Coordinator must be in loading state");
             }
 
-            loader.load(tp, coordinator).whenComplete((summary, exception) -> {
+            SnapshottableCoordinator<S, U> loadingCoordinator = coordinator;
+            loader.load(tp, loadingCoordinator).whenComplete((summary, exception) -> {
                 scheduleInternalOperation("CompleteLoad(tp=" + tp + ", epoch=" + epoch + ")", tp, () -> {
                     CoordinatorContext context = coordinators.get(tp);
                     if (context != null)  {
-                        if (context.state != CoordinatorState.LOADING) {
+                        if (context.state != CoordinatorState.LOADING || context.coordinator != loadingCoordinator) {
                             log.info("Ignored load completion from {} because context is in {} state.",
                                 context.tp, context.state);
                             return;

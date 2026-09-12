@@ -58,6 +58,7 @@ object CoordinatorLoaderImpl {
  * @param deserializer          The deserializer to use.
  * @param loadBufferSize        The load buffer size.
  * @param commitIntervalOffsets The interval between updating the last committed offset during loading, in offsets.
+ * @param requireFullLog        Reject missing history, skipped records and control batches. Used by the global index.
  * @tparam T The record type.
  */
 class CoordinatorLoaderImpl[T](
@@ -65,7 +66,8 @@ class CoordinatorLoaderImpl[T](
   replicaManager: ReplicaManager,
   deserializer: Deserializer[T],
   loadBufferSize: Int,
-  commitIntervalOffsets: Long = CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+  commitIntervalOffsets: Long = CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS,
+  requireFullLog: Boolean = false
 ) extends CoordinatorLoader[T] with Logging {
   private val isRunning = new AtomicBoolean(true)
   private val scheduler = new KafkaScheduler(1)
@@ -112,6 +114,9 @@ class CoordinatorLoaderImpl[T](
           var buffer = ByteBuffer.allocate(0)
           // Loop breaks if leader changes at any time during the load, since logEndOffset is -1.
           var currentOffset = log.logStartOffset
+          if (requireFullLog && currentOffset != 0) {
+            throw new IllegalStateException(s"Cannot load $tp: index history starts at $currentOffset instead of 0")
+          }
           // Loop breaks if no records have been read, since the end of the log has been reached.
           // This is to ensure that the loop breaks even if the current offset remains smaller than
           // the log end offset but the log is empty. This could happen with compacted topics.
@@ -151,6 +156,9 @@ class CoordinatorLoaderImpl[T](
 
             memoryRecords.batches.forEach { batch =>
               if (batch.isControlBatch) {
+                if (requireFullLog) {
+                  throw new IllegalStateException(s"Unexpected control batch in $tp at ${batch.baseOffset}")
+                }
                 batch.asScala.foreach { record =>
                   val controlRecord = ControlRecordType.parse(record.key)
                   if (controlRecord == ControlRecordType.COMMIT) {
@@ -183,7 +191,7 @@ class CoordinatorLoaderImpl[T](
                     try {
                       Some(deserializer.deserialize(record.key, record.value))
                     } catch {
-                      case ex: UnknownRecordTypeException =>
+                      case ex: UnknownRecordTypeException if !requireFullLog =>
                         warn(s"Unknown record type ${ex.unknownType} while loading offsets and group metadata " +
                           s"from $tp. Ignoring it. It could be a left over from an aborted upgrade.")
                         None
@@ -196,6 +204,9 @@ class CoordinatorLoaderImpl[T](
 
                   coordinatorRecordOpt.foreach { coordinatorRecord =>
                     try {
+                      if (requireFullLog && record.offset() != currentOffset) {
+                        throw new IllegalStateException(s"Missing index record in $tp at $currentOffset; found ${record.offset()}")
+                      }
                       if (isTraceEnabled) {
                         trace(s"Replaying record $coordinatorRecord from $tp at offset ${record.offset()} " +
                           s"with producer id ${batch.producerId} and producer epoch ${batch.producerEpoch}.")
@@ -206,6 +217,7 @@ class CoordinatorLoaderImpl[T](
                         batch.producerEpoch,
                         coordinatorRecord
                       )
+                      if (requireFullLog) currentOffset = record.offset() + 1
                     } catch {
                       case ex: RuntimeException =>
                         val msg = s"Replaying record $coordinatorRecord from $tp at offset ${record.offset()} " +
@@ -221,6 +233,9 @@ class CoordinatorLoaderImpl[T](
               // Note that the high watermark can be greater than the current offset but as we load more records
               // the current offset will eventually surpass the high watermark. Also note that the high watermark
               // will continue to advance while loading.
+              if (requireFullLog && currentOffset != batch.nextOffset) {
+                throw new IllegalStateException(s"Incomplete index batch in $tp ending at ${batch.nextOffset}")
+              }
               currentOffset = batch.nextOffset
               val currentHighWatermark = log.highWatermark
               if (currentOffset >= currentHighWatermark) {
@@ -244,6 +259,10 @@ class CoordinatorLoaderImpl[T](
           if (logEndOffset == -1L) {
             future.completeExceptionally(new NotLeaderOrFollowerException(
               s"Stopped loading records from $tp because the partition is not online or is no longer the leader."
+            ))
+          } else if (requireFullLog && currentOffset != logEndOffset) {
+            future.completeExceptionally(new IllegalStateException(
+              s"Incomplete index history in $tp: loaded through $currentOffset, log ends at $logEndOffset"
             ))
           } else if (isRunning.get) {
             future.complete(new LoadSummary(startTimeMs, endTimeMs, schedulerQueueTimeMs, numRecords, numBytes))

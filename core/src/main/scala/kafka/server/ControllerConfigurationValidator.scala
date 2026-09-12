@@ -119,6 +119,13 @@ class ControllerConfigurationValidator(kafkaConfig: KafkaConfig) extends Configu
         }
         LogConfig.validate(oldConfigs, properties, kafkaConfig.extractLogConfigMap,
           kafkaConfig.remoteLogManagerConfig.isRemoteStorageSystemEnabled())
+        if (resource.name() == Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME) {
+          org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig.REQUIRED_INDEX_TOPIC_CONFIGS.forEach { (key, value) =>
+            if (!value.equals(properties.getProperty(key))) {
+              throw new InvalidConfigurationException(s"The global sequence index topic requires explicit $key=$value.")
+            }
+          }
+        }
         if (java.lang.Boolean.parseBoolean(properties.getProperty(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "false").trim)) {
           if (Topic.isInternal(resource.name())) {
             throw new InvalidConfigurationException("Global sequence indexing cannot be enabled on internal topics.")
