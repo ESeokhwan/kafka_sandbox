@@ -30,6 +30,7 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShar
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.IndexerIdentity;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationRequest;
 import org.apache.kafka.coordinator.globalsequence.generated.BatchIndexKey;
 import org.apache.kafka.coordinator.globalsequence.generated.BatchIndexValue;
 import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataValue;
@@ -131,6 +132,81 @@ class GlobalSequenceCoordinatorShardTest {
             shard.onRollback(offset);
             endOffset = offset;
         }
+    }
+
+    @Test
+    void testConditionalRegistrationIsIdempotentBeforeAndAfterCommit() {
+        Context ctx = new Context();
+        RegistrationRequest first = new RegistrationRequest(P0, 1, 3, -1, OWNER.registrationId());
+        var prepared = ctx.shard.prepareRegistration(first, new CoordinatorWriteContext(0, 10));
+        assertTrue(prepared.response().registered());
+        assertEquals(Optional.of(OWNER), prepared.response().indexer());
+        assertEquals(List.of(fence(P0, OWNER)), prepared.records());
+        assertEquals(Optional.empty(), ctx.shard.describePartition(P0).currentIndexer());
+        ctx.replay(prepared.records());
+        assertEquals(Optional.of(OWNER), ctx.shard.describePartition(P0).currentIndexer());
+        assertEquals(Optional.empty(), ctx.shard.committedIndexer(P0));
+        assertTrue(ctx.shard.prepareRegistration(first, new CoordinatorWriteContext(0, 10)).records().isEmpty());
+        ctx.commit(ctx.endOffset);
+        var retry = ctx.shard.prepareRegistration(first, new CoordinatorWriteContext(ctx.highWatermark, 11));
+        assertTrue(retry.records().isEmpty());
+        assertTrue(retry.response().registered());
+        assertEquals(11, retry.response().coordinatorLeaderEpoch());
+        assertEquals(Optional.of(OWNER), ctx.shard.committedIndexer(P0));
+    }
+
+    @Test
+    void testSupersededRegistrationCannotReclaimOwnership() {
+        Context ctx = new Context(P0);
+        RegistrationRequest replacement = new RegistrationRequest(P0, 2, 4, 0, new Uuid(7, 8));
+        var accepted = ctx.shard.prepareRegistration(replacement, new CoordinatorWriteContext(ctx.highWatermark, 10));
+        ctx.replay(accepted.records());
+        RegistrationRequest delayed = new RegistrationRequest(P0, 1, 3, -1, OWNER.registrationId());
+        for (int phase = 0; phase < 2; phase++) {
+            var stale = ctx.shard.prepareRegistration(delayed, new CoordinatorWriteContext(ctx.highWatermark, 10));
+            assertFalse(stale.response().registered());
+            assertTrue(stale.records().isEmpty());
+            assertEquals(1, stale.response().indexer().orElseThrow().generation());
+            ctx.commit(ctx.endOffset);
+        }
+        assertEquals(1, ctx.shard.committedIndexer(P0).orElseThrow().generation());
+    }
+
+    @Test
+    void testRegistrationRejectsStaleEpochWrongBrokerAndIncorrectGeneration() {
+        Context ctx = new Context(P0);
+        for (RegistrationRequest request : List.of(
+            new RegistrationRequest(P0, 1, 2, 0, new Uuid(7, 8)),
+            new RegistrationRequest(P0, 2, 3, 0, new Uuid(7, 8)),
+            new RegistrationRequest(P0, 1, 3, -1, new Uuid(7, 8)),
+            new RegistrationRequest(P0, 1, 3, 5, new Uuid(7, 8)),
+            new RegistrationRequest(P0, 1, 3, 0, OWNER.registrationId()))) {
+            var result = ctx.shard.prepareRegistration(request, new CoordinatorWriteContext(ctx.highWatermark, 10));
+            assertFalse(result.response().registered());
+            assertTrue(result.records().isEmpty());
+        }
+        Context empty = new Context();
+        assertFalse(empty.shard.prepareRegistration(new RegistrationRequest(P0, 1, 3, 0, new Uuid(7, 8)),
+            new CoordinatorWriteContext(0, 10)).response().registered());
+        assertThrows(IllegalArgumentException.class, () -> new RegistrationRequest(P0, 1, 3, -2, new Uuid(7, 8)));
+        assertThrows(IllegalArgumentException.class, () -> new RegistrationRequest(P0, 1, 3, Long.MAX_VALUE, new Uuid(7, 8)));
+    }
+
+    @Test
+    void testRegistrationRollbackRestoresPriorOwnerWithoutLosingPendingData() {
+        Context ctx = new Context(P0);
+        ctx.append(A, -1);
+        long retained = ctx.endOffset;
+        RegistrationRequest replacement = new RegistrationRequest(P0, 2, 4, 0, new Uuid(7, 8));
+        var result = ctx.shard.prepareRegistration(replacement, new CoordinatorWriteContext(ctx.highWatermark, 10));
+        ctx.replay(result.records());
+        assertEquals(Optional.empty(), ctx.shard.describePartition(P0).committedProgress());
+        assertEquals(1, ctx.shard.describePartition(P0).currentIndexer().orElseThrow().generation());
+        ctx.rollback(retained);
+        assertEquals(Optional.of(OWNER), ctx.shard.describePartition(P0).currentIndexer());
+        assertTrue(ctx.prepare(A, -1).records().isEmpty());
+        assertEquals(1, ctx.shard.pendingAllocationCount());
+        assertEquals(result.records(), ctx.shard.prepareRegistration(replacement, new CoordinatorWriteContext(ctx.highWatermark, 10)).records());
     }
 
     @Test

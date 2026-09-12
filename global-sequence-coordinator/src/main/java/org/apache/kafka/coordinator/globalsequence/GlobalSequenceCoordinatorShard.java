@@ -46,6 +46,7 @@ import java.util.OptionalLong;
 import java.util.TreeMap;
 
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newBatchIndexRecord;
+import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newIndexerFenceRecord;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newTopicMetadataRecord;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.requireNonNegative;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.requireNonZeroId;
@@ -113,12 +114,54 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     }
 
     public enum AppendStatus {
-        INDEXED,
-        ALREADY_INDEXED,
-        FENCED,
-        OWNER_NOT_COMMITTED,
-        OUT_OF_ORDER
+        INDEXED((byte) 0),
+        ALREADY_INDEXED((byte) 1),
+        FENCED((byte) 2),
+        OWNER_NOT_COMMITTED((byte) 3),
+        OUT_OF_ORDER((byte) 4);
+
+        private final byte code;
+
+        AppendStatus(byte code) {
+            this.code = code;
+        }
+
+        public byte code() {
+            return code;
+        }
+
+        public static AppendStatus forCode(byte code) {
+            for (AppendStatus status : values()) {
+                if (status.code == code) return status;
+            }
+            throw new IllegalArgumentException("Unknown global sequence append status " + code);
+        }
     }
+
+    /** expectedGeneration is -1 if no ownership has been recorded. Preserve this request on retry. */
+    public record RegistrationRequest(
+        PartitionKey partition,
+        int sourceBrokerId,
+        int sourceLeaderEpoch,
+        long expectedGeneration,
+        Uuid registrationId
+    ) {
+        public RegistrationRequest {
+            Objects.requireNonNull(partition, "partition");
+            requireNonNegative(sourceBrokerId, "sourceBrokerId");
+            requireNonNegative(sourceLeaderEpoch, "sourceLeaderEpoch");
+            requireNonZeroId(registrationId, "registrationId");
+            if (expectedGeneration < -1 || expectedGeneration == Long.MAX_VALUE) {
+                throw new IllegalArgumentException("expectedGeneration must allow a non-negative successor without overflow");
+            }
+        }
+    }
+
+    /** A registered identity is usable only after the runtime write future completes. */
+    public record RegistrationResponse(boolean registered, Optional<IndexerIdentity> indexer, int coordinatorLeaderEpoch) { }
+
+    /** Ownership includes the speculative fence for CAS; progress includes only committed batches. */
+    public record PartitionDescription(Optional<PhysicalBatch> committedProgress, Optional<IndexerIdentity> currentIndexer) { }
 
     /**
      * INDEXED is successful only after the runtime's write future completes. indexedThrough is
@@ -173,6 +216,50 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         nextReplayOffset = new TimelineLong(snapshotRegistry);
     }
 
+    public CoordinatorResult<RegistrationResponse, CoordinatorRecord> prepareRegistration(
+        RegistrationRequest request,
+        CoordinatorWriteContext context
+    ) {
+        validateWriteContext(context);
+        Fence current = latestFences.get(request.partition());
+        IndexerIdentity candidate = new IndexerIdentity(request.sourceBrokerId(), request.sourceLeaderEpoch(),
+            request.expectedGeneration() + 1, request.registrationId());
+        if (current != null && current.identity().equals(candidate)) {
+            // The identical registration may still be pending. Reattach a runtime wait to its fence.
+            return new CoordinatorResult<>(List.of(), new RegistrationResponse(true, Optional.of(candidate), context.leaderEpoch()));
+        }
+        if (!canRegister(request, current)) {
+            return new CoordinatorResult<>(List.of(), new RegistrationResponse(false,
+                Optional.ofNullable(current).map(Fence::identity), context.leaderEpoch()));
+        }
+        CoordinatorRecord record = newIndexerFenceRecord(request.partition().topicId(), request.partition().partition(),
+            candidate.brokerId(), candidate.leaderEpoch(), candidate.generation(), candidate.registrationId());
+        // This fence follows all previously accepted writes. Its commit is the new owner's barrier.
+        return new CoordinatorResult<>(List.of(record), new RegistrationResponse(true, Optional.of(candidate), context.leaderEpoch()));
+    }
+
+    private static boolean canRegister(RegistrationRequest request, Fence current) {
+        if (current == null) return request.expectedGeneration() == -1;
+        IndexerIdentity owner = current.identity();
+        return request.expectedGeneration() == owner.generation() &&
+            !request.registrationId().equals(owner.registrationId()) &&
+            request.sourceLeaderEpoch() >= owner.leaderEpoch() &&
+            (request.sourceLeaderEpoch() != owner.leaderEpoch() || request.sourceBrokerId() == owner.brokerId());
+    }
+
+    public PartitionDescription describePartition(PartitionKey partition) {
+        return new PartitionDescription(committedProgress(partition),
+            Optional.ofNullable(latestFences.get(partition)).map(Fence::identity));
+    }
+
+    private void validateWriteContext(CoordinatorWriteContext context) {
+        Objects.requireNonNull(context, "context");
+        if (context.highWatermark() != highWatermark) {
+            throw new IllegalStateException("Write requires the runtime's current applied high watermark");
+        }
+        ensureCompleteAllocation();
+    }
+
     /**
      * Invoke within scheduleWriteOperationWithContext. An empty result still needs to pass
      * through the runtime: pending retries must attach a new wait, even after an earlier wait
@@ -183,11 +270,7 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         CoordinatorWriteContext context
     ) {
         Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(context, "context");
-        if (context.highWatermark() != highWatermark) {
-            throw new IllegalStateException("Append requires the runtime's current applied high watermark");
-        }
-        ensureCompleteAllocation();
+        validateWriteContext(context);
         PhysicalBatch batch = request.batch();
         Fence owner = latestFences.get(batch.partition());
         if (owner == null || !owner.identity().equals(request.indexer())) {

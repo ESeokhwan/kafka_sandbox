@@ -36,6 +36,8 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShar
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.IndexerIdentity;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationResponse;
 import org.apache.kafka.server.util.timer.MockTimer;
 
 import org.junit.jupiter.api.Test;
@@ -172,6 +174,38 @@ class GlobalSequenceCoordinatorShardRuntimeTest {
         @Override
         public void close() throws Exception {
             runtime.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 10})
+    void testRegistrationRetryWaitsForFenceAndPrecedingAllocation(int lingerMs) throws Exception {
+        try (Context ctx = new Context(lingerMs, new MockPartitionWriter())) {
+            ctx.register(P0);
+            CompletableFuture<AppendResponse> allocation = ctx.append(A, -1, TIMEOUT);
+            RegistrationRequest registration = new RegistrationRequest(P0, 2, 4, 0, new Uuid(7, 8));
+            CompletableFuture<RegistrationResponse> first = ctx.runtime.scheduleWriteOperationWithContext("register", INDEX_PARTITION,
+                Duration.ofMillis(3), (shard, context) -> shard.prepareRegistration(registration, context));
+            ctx.drain();
+            ctx.timer.advanceClock(4);
+            ctx.drain();
+            assertFutureThrows(TimeoutException.class, first);
+            assertEquals(0, ctx.shard.committedNextGlobalOffset(TOPIC));
+            assertEquals(1, ctx.shard.describePartition(P0).currentIndexer().orElseThrow().generation());
+            CompletableFuture<RegistrationResponse> retry = ctx.runtime.scheduleWriteOperationWithContext("retry-register", INDEX_PARTITION,
+                TIMEOUT, (shard, context) -> shard.prepareRegistration(registration, context));
+            ctx.drain();
+            ctx.flush();
+            assertFalse(retry.isDone());
+            assertFalse(allocation.isDone());
+            ctx.commit(4);
+            assertTrue(retry.join().registered());
+            assertEquals(1, retry.join().indexer().orElseThrow().generation());
+            assertEquals(INDEXED, allocation.join().status());
+            assertEquals(Optional.of(A), ctx.shard.committedProgress(P0));
+            assertEquals(3, ctx.shard.committedNextGlobalOffset(TOPIC));
+            assertEquals(1, ctx.shard.committedIndexer(P0).orElseThrow().generation());
+            assertFutureThrows(TimeoutException.class, first);
         }
     }
 

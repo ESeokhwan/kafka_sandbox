@@ -31,6 +31,7 @@ import kafka.server.share.SharePartitionManager;
 import org.apache.kafka.common.internals.Plugin;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator;
 import org.apache.kafka.coordinator.group.GroupConfigManager;
 import org.apache.kafka.coordinator.group.GroupCoordinator;
 import org.apache.kafka.coordinator.share.ShareCoordinator;
@@ -70,6 +71,7 @@ public class KafkaApisBuilder {
     private ApiVersionManager apiVersionManager = null;
     private ClientMetricsManager clientMetricsManager = null;
     private ShareCoordinator shareCoordinator = null;
+    private GlobalSequenceCoordinator globalSequenceCoordinator = null;
     private GroupConfigManager groupConfigManager = null;
 
     public KafkaApisBuilder setRequestChannel(RequestChannel requestChannel) {
@@ -94,6 +96,11 @@ public class KafkaApisBuilder {
 
     public KafkaApisBuilder setTxnCoordinator(TransactionCoordinator txnCoordinator) {
         this.txnCoordinator = txnCoordinator;
+        return this;
+    }
+
+    public KafkaApisBuilder setGlobalSequenceCoordinator(GlobalSequenceCoordinator coordinator) {
+        this.globalSequenceCoordinator = coordinator;
         return this;
     }
 
@@ -195,6 +202,7 @@ public class KafkaApisBuilder {
         if (groupCoordinator == null) throw new RuntimeException("You must set groupCoordinator");
         if (txnCoordinator == null) throw new RuntimeException("You must set txnCoordinator");
         if (shareCoordinator == null) throw new RuntimeException("You must set shareCoordinator");
+        if (globalSequenceCoordinator == null) throw new RuntimeException("You must set globalSequenceCoordinator");
         if (autoTopicCreationManager == null) throw new RuntimeException("You must set autoTopicCreationManager");
         if (config == null) config = new KafkaConfig(Map.of());
         if (configRepository == null) throw new RuntimeException("You must set configRepository");
@@ -214,6 +222,7 @@ public class KafkaApisBuilder {
                              groupCoordinator,
                              txnCoordinator,
                              shareCoordinator,
+                             globalSequenceCoordinator,
                              autoTopicCreationManager,
                              brokerId,
                              config,

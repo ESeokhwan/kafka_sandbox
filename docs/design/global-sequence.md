@@ -367,6 +367,41 @@ identity와 epoch를 metadata에 대조하고, 더 오래된 epoch나 이미 대
 Coordinator leader epoch는 이 소유권과 별개다. 복구·조회 작업은 인덱스 리더 epoch와
 읽기 경계를 캡처하며, 리더가 바뀐 뒤 완료된 오래된 결과를 검증 없이 적용하지 않는다.
 
+### 내부 RPC v0 구현
+
+세 API는 broker listener에서 제공하며 `CLUSTER_ACTION` 권한을 먼저 검사한다.
+승인된 내부 요청은 request quota에서 제외하고 권한 실패는 throttle 대상이다.
+이 브랜치의 API 번호는 93–95이며 upstream Kafka에 예약된 번호가 아니다.
+Global sequence 사용 클러스터는 이 프로토콜을 지원하는 브로커로 구성해야 한다.
+
+| API | 번호 | 요청과 결과 |
+|---|---|---|
+| RegisterGlobalSequenceIndexer | 93 | 토픽 UUID·파티션, source broker/epoch, expected generation, registration UUID → 등록 여부·현재 소유권·coordinator epoch |
+| DescribeGlobalSequencePartition | 94 | 토픽 UUID·파티션 → committed physical progress와 최신 소유권 |
+| AppendGlobalSequenceIndex | 95 | physical 배치·직전 배치·data HW·소유권 → append status·배치 식별 정보·보장된 progress·coordinator epoch |
+
+등록은 최초 `expectedGeneration=-1`, 이후 관측한 generation을 조건으로 사용한다.
+성공 시 generation을 1 증가시킨 fence를 기록한다. 같은 UUID·source·expected generation의
+재시도는 같은 fence의 커밋을 기다린다. 조건 불일치는 `Registered=false`와 현재 소유권을
+반환하며, 이 응답을 받은 이전 Indexer가 자동으로 새 generation을 획득해서는 안 된다.
+등록 timeout은 fence 삭제나 rollback을 뜻하지 않는다.
+
+Describe의 progress는 HW 아래에서 커밋된 배치만 포함한다. 소유권 필드는 등록 CAS에
+필요하므로 아직 커밋되지 않은 최신 fence도 포함한다. 조회된 소유권만으로 append를
+시작하지 않고, 자신의 등록 성공을 기다린 뒤 progress를 다시 읽는다.
+
+Write 요청의 `CoordinatorLeaderEpoch`가 0 이상이면 write 이벤트 실행 시 실제 epoch와
+일치해야 한다. 불일치는 `NOT_COORDINATOR`다. `-1`은 이 검사를 생략하는 내부 API 호환값이며
+라우터는 자신이 선택한 리더 epoch를 전달한다. Source broker/epoch도 실행 시 최신 데이터
+metadata에 대조하고 불일치는 `FENCED_LEADER_EPOCH`로 반환한다.
+
+Append status는 `INDEXED=0`, `ALREADY_INDEXED=1`, `FENCED=2`,
+`OWNER_NOT_COMMITTED=3`, `OUT_OF_ORDER=4`다. 실행 오류는 별도 `ErrorCode`로 전달한다.
+미할당 global base offset 및 없는 physical progress는 `-1`로 표현한다.
+응답은 coordinator Future 이후에만 전송하므로 등록/할당의 성공 응답은 해당 인덱스 기록의
+커밋을 보장한다. 실제 브로커 테스트는 세 RPC, 커밋된 배치의 중복 요청,
+epoch 불일치 거절, 재시작 후 fence·progress 복원을 검증한다.
+
 ## 7. 정상 인덱싱과 append 판단
 
 1. Indexer는 소유권과 committed progress를 확인한다.
@@ -400,7 +435,7 @@ Index HW가 진행되거나 cache에서 항목이 사라져도 같은 prefix에 
 
 ## 8. 내부 결과와 Produce 응답
 
-내부 결과 이름은 의미를 설명하기 위한 것이며 wire error code와 필드 배치는 후속 설계 대상이다.
+내부 결과의 wire 표현은 아래 v0 RPC 계약을 따른다. `ErrorCode=NONE`만으로 append 성공이나 소유권 획득을 판단하지 않는다.
 
 | 결과 | 계약 |
 |---|---|
@@ -603,6 +638,6 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 클러스터 단위 장애 검증은 후속 단계다.
 
-프로토콜 API 번호·최종 wire 필드, 구체적인 설정 기본값, checkpoint 형식,
+후속 global 읽기 프로토콜의 API 번호·wire 필드, checkpoint 형식,
 배치 묶기 크기와 지표 이름은 해당 구현 커밋에서 확정한다. 이 선택들이 위의 순서,
 커밋, fencing, timeout, 복구 계약을 약화해서는 안 된다.

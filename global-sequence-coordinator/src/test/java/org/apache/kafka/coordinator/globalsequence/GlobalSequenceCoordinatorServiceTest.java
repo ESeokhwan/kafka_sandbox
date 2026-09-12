@@ -25,6 +25,7 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.CoordinatorNotAvailableException;
 import org.apache.kafka.common.errors.FencedLeaderEpochException;
 import org.apache.kafka.common.errors.InvalidRequestException;
+import org.apache.kafka.common.errors.NotCoordinatorException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.metadata.ConfigRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
@@ -42,8 +43,11 @@ import org.apache.kafka.coordinator.common.runtime.MockPartitionWriter;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendResponse;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.IndexerIdentity;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionDescription;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationResponse;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.MetadataProvenance;
@@ -266,7 +270,7 @@ class GlobalSequenceCoordinatorServiceTest {
         ctx.publish(image(2, true));
         CompletableFuture<AppendResponse> future = new CompletableFuture<>();
         when(ctx.runtime.<AppendResponse>scheduleWriteOperationWithContext(anyString(), any(), any(), any())).thenReturn(future);
-        assertSame(future, ctx.service.appendIndex(APPEND));
+        assertSame(future, ctx.service.appendIndex(APPEND, 10));
         ArgumentCaptor<CoordinatorWriteOperationWithContext<GlobalSequenceCoordinatorShard, AppendResponse, CoordinatorRecord>> operation =
             ArgumentCaptor.forClass(CoordinatorWriteOperationWithContext.class);
         verify(ctx.runtime).scheduleWriteOperationWithContext(eq("append-global-index"),
@@ -276,11 +280,58 @@ class GlobalSequenceCoordinatorServiceTest {
         CoordinatorResult<AppendResponse, CoordinatorRecord> expected = new CoordinatorResult<>(List.of());
         when(shard.prepareAppend(APPEND, writeContext)).thenReturn(expected);
         assertSame(expected, operation.getValue().generateRecordsAndResult(shard, writeContext));
+        assertThrows(NotCoordinatorException.class, () -> operation.getValue().generateRecordsAndResult(shard, new CoordinatorWriteContext(3, 11)));
         MetadataDelta delta = new MetadataDelta.Builder().setImage(image(2, true)).build();
         delta.replay(new PartitionRecord().setTopicId(TOPIC).setPartitionId(0).setLeader(2).setLeaderEpoch(4)
             .setReplicas(List.of(1, 2)).setIsr(List.of(1, 2)));
         ctx.publish(delta.apply(MetadataProvenance.EMPTY));
         assertThrows(FencedLeaderEpochException.class, () -> operation.getValue().generateRecordsAndResult(shard, writeContext));
+        ctx.service.shutdown();
+    }
+
+    @Test
+    void testRegistrationRechecksCoordinatorAndSourceEpochAtExecution() {
+        Context ctx = new Context();
+        ctx.start();
+        ctx.publish(image(2, true));
+        RegistrationRequest request = new RegistrationRequest(PARTITION, 1, 3, -1, OWNER.registrationId());
+        CompletableFuture<RegistrationResponse> future = new CompletableFuture<>();
+        when(ctx.runtime.<RegistrationResponse>scheduleWriteOperationWithContext(anyString(), any(), any(), any())).thenReturn(future);
+        assertSame(future, ctx.service.registerIndexer(request, 10));
+        ArgumentCaptor<CoordinatorWriteOperationWithContext<GlobalSequenceCoordinatorShard, RegistrationResponse, CoordinatorRecord>> operation =
+            ArgumentCaptor.forClass(CoordinatorWriteOperationWithContext.class);
+        verify(ctx.runtime).scheduleWriteOperationWithContext(eq("register-global-indexer"),
+            eq(new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 1)), eq(Duration.ofMillis(5000)), operation.capture());
+        GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
+        CoordinatorWriteContext context = new CoordinatorWriteContext(3, 10);
+        CoordinatorResult<RegistrationResponse, CoordinatorRecord> expected = new CoordinatorResult<>(List.of());
+        when(shard.prepareRegistration(request, context)).thenReturn(expected);
+        assertSame(expected, operation.getValue().generateRecordsAndResult(shard, context));
+        assertThrows(NotCoordinatorException.class, () -> operation.getValue().generateRecordsAndResult(shard, new CoordinatorWriteContext(3, 11)));
+        MetadataDelta delta = new MetadataDelta.Builder().setImage(image(2, true)).build();
+        delta.replay(new PartitionRecord().setTopicId(TOPIC).setPartitionId(0).setLeader(2).setLeaderEpoch(4)
+            .setReplicas(List.of(1, 2)).setIsr(List.of(1, 2)));
+        ctx.publish(delta.apply(MetadataProvenance.EMPTY));
+        assertThrows(FencedLeaderEpochException.class, () -> operation.getValue().generateRecordsAndResult(shard, context));
+        ctx.service.shutdown();
+    }
+
+    @Test
+    void testDescribeUsesLatestOwnershipButCommittedProgress() {
+        Context ctx = new Context();
+        ctx.start();
+        ctx.publish(image(2, true));
+        CompletableFuture<PartitionDescription> future = new CompletableFuture<>();
+        when(ctx.runtime.<PartitionDescription>scheduleReadOperation(anyString(), any(), any())).thenReturn(future);
+        assertSame(future, ctx.service.describePartition(PARTITION));
+        ArgumentCaptor<CoordinatorReadOperation<GlobalSequenceCoordinatorShard, PartitionDescription>> operation =
+            ArgumentCaptor.forClass(CoordinatorReadOperation.class);
+        verify(ctx.runtime).scheduleReadOperation(eq("describe-global-index-partition"),
+            eq(new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 1)), operation.capture());
+        GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
+        PartitionDescription description = new PartitionDescription(Optional.empty(), Optional.of(OWNER));
+        when(shard.describePartition(PARTITION)).thenReturn(description);
+        assertSame(description, operation.getValue().generateResponse(shard, 0));
         ctx.service.shutdown();
     }
 

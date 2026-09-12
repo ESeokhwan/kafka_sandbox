@@ -289,6 +289,12 @@ public abstract class AbstractResponse implements AbstractRequestResponse {
                 return DescribeShareGroupOffsetsResponse.parse(readable, version);
             case ALTER_SHARE_GROUP_OFFSETS:
                 return AlterShareGroupOffsetsResponse.parse(readable, version);
+            case REGISTER_GLOBAL_SEQUENCE_INDEXER:
+                return RegisterGlobalSequenceIndexerResponse.parse(readable, version);
+            case DESCRIBE_GLOBAL_SEQUENCE_PARTITION:
+                return DescribeGlobalSequencePartitionResponse.parse(readable, version);
+            case APPEND_GLOBAL_SEQUENCE_INDEX:
+                return AppendGlobalSequenceIndexResponse.parse(readable, version);
             case DELETE_SHARE_GROUP_OFFSETS:
                 return DeleteShareGroupOffsetsResponse.parse(readable, version);
             default:

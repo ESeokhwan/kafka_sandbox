@@ -24,6 +24,7 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.CoordinatorNotAvailableException;
 import org.apache.kafka.common.errors.FencedLeaderEpochException;
 import org.apache.kafka.common.errors.InvalidRequestException;
+import org.apache.kafka.common.errors.NotCoordinatorException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.utils.KafkaThread;
@@ -38,8 +39,11 @@ import org.apache.kafka.coordinator.common.runtime.MultiThreadedEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.PartitionWriter;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendResponse;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionDescription;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationResponse;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.TopicImage;
@@ -60,6 +64,7 @@ import java.util.concurrent.Executors;
 import java.util.function.IntSupplier;
 
 import static org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME;
+import static org.apache.kafka.common.internals.Topic.isInternal;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.requireNonZeroId;
 
 /** Owns the local index runtime and initiates internal topic creation when indexing is enabled. */
@@ -279,7 +284,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
     private static boolean isEnabled(MetadataImage image, String topic) {
         String enabled = image.configs().configMapForResource(new ConfigResource(ConfigResource.Type.TOPIC, topic))
             .getOrDefault(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "false");
-        return Boolean.parseBoolean(enabled.trim());
+        return !isInternal(topic) && Boolean.parseBoolean(enabled.trim());
     }
 
     private void scheduleTopicCreation(long delayMs) {
@@ -312,21 +317,69 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
 
     @Override
     public CompletableFuture<AppendResponse> appendIndex(AppendRequest request) {
+        return appendIndex(request, -1);
+    }
+
+    @Override
+    public CompletableFuture<AppendResponse> appendIndex(AppendRequest request, int expectedCoordinatorEpoch) {
         try {
             requireReady();
             TopicPartition partition = indexPartition(partitionFor(request.batch().partition().topicId()));
             return runtime.scheduleWriteOperationWithContext("append-global-index", partition,
                 Duration.ofMillis(config.writeTimeoutMs()), (shard, context) -> {
                     requireReady();
-                    TopicImage topic = requireEnabledTopic(request.batch().partition());
-                    var source = topic.partitions().get(request.batch().partition().partition());
-                    if (source.leader != request.indexer().brokerId() || source.leaderEpoch != request.indexer().leaderEpoch()) {
-                        throw new FencedLeaderEpochException("The append sender is not the current source leader");
-                    }
+                    validateCoordinatorEpoch(expectedCoordinatorEpoch, context.leaderEpoch());
+                    requireSourceLeader(request.batch().partition(), request.indexer().brokerId(), request.indexer().leaderEpoch());
                     return shard.prepareAppend(request, context);
                 });
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    @Override
+    public CompletableFuture<RegistrationResponse> registerIndexer(RegistrationRequest request, int expectedCoordinatorEpoch) {
+        try {
+            requireReady();
+            return runtime.scheduleWriteOperationWithContext("register-global-indexer", indexPartition(partitionFor(request.partition().topicId())),
+                Duration.ofMillis(config.writeTimeoutMs()), (shard, context) -> {
+                    requireReady();
+                    validateCoordinatorEpoch(expectedCoordinatorEpoch, context.leaderEpoch());
+                    requireSourceLeader(request.partition(), request.sourceBrokerId(), request.sourceLeaderEpoch());
+                    return shard.prepareRegistration(request, context);
+                });
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    @Override
+    public CompletableFuture<PartitionDescription> describePartition(PartitionKey partition) {
+        try {
+            requireReady();
+            return runtime.scheduleReadOperation("describe-global-index-partition", indexPartition(partitionFor(partition.topicId())),
+                (shard, committedOffset) -> {
+                    requireReady();
+                    requireEnabledTopic(partition);
+                    return shard.describePartition(partition);
+                });
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    private static void validateCoordinatorEpoch(int expected, int actual) {
+        if (expected < -1) throw new IllegalArgumentException("expectedCoordinatorEpoch must be -1 or non-negative");
+        if (expected >= 0 && expected != actual) {
+            throw new NotCoordinatorException("Expected coordinator epoch " + expected + ", current epoch is " + actual);
+        }
+    }
+
+    private void requireSourceLeader(PartitionKey partition, int brokerId, int leaderEpoch) {
+        TopicImage topic = requireEnabledTopic(partition);
+        var source = topic.partitions().get(partition.partition());
+        if (source.leader != brokerId || source.leaderEpoch != leaderEpoch) {
+            throw new FencedLeaderEpochException("The sender is not the current source leader");
         }
     }
 

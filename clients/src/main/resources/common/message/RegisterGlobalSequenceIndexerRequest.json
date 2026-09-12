@@ -1,0 +1,71 @@
+// Licensed to the Apache Software Foundation (ASF) under one or more
+// contributor license agreements.  See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance with
+// the License.  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+{
+  "apiKey": 93,
+  "type": "request",
+  "listeners": [
+    "broker"
+  ],
+  "name": "RegisterGlobalSequenceIndexerRequest",
+  "validVersions": "0",
+  "flexibleVersions": "0+",
+  "fields": [
+    {
+      "name": "TopicId",
+      "type": "uuid",
+      "versions": "0+",
+      "about": "The data topic identifier."
+    },
+    {
+      "name": "Partition",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The data partition index."
+    },
+    {
+      "name": "SourceBrokerId",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The current data leader broker."
+    },
+    {
+      "name": "SourceLeaderEpoch",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The data leader epoch."
+    },
+    {
+      "name": "ExpectedGeneration",
+      "type": "int64",
+      "versions": "0+",
+      "about": "The previously observed generation, or -1 for initial registration.",
+      "default": -1
+    },
+    {
+      "name": "RegistrationId",
+      "type": "uuid",
+      "versions": "0+",
+      "about": "The UUID preserved across retries of this registration."
+    },
+    {
+      "name": "CoordinatorLeaderEpoch",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The expected index leader epoch, or -1 if not supplied.",
+      "default": -1
+    }
+  ]
+}

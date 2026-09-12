@@ -20,8 +20,11 @@ package org.apache.kafka.coordinator.globalsequence;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendResponse;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionDescription;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationRequest;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationResponse;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 
@@ -46,6 +49,12 @@ public interface GlobalSequenceCoordinator {
     void onNewMetadataImage(MetadataImage image, MetadataDelta delta);
 
     CompletableFuture<AppendResponse> appendIndex(AppendRequest request);
+
+    CompletableFuture<AppendResponse> appendIndex(AppendRequest request, int expectedCoordinatorEpoch);
+
+    CompletableFuture<RegistrationResponse> registerIndexer(RegistrationRequest request, int expectedCoordinatorEpoch);
+
+    CompletableFuture<PartitionDescription> describePartition(PartitionKey partition);
 
     CompletableFuture<Optional<PhysicalBatch>> committedProgress(PartitionKey partition);
 
