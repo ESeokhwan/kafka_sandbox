@@ -29,7 +29,7 @@ import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, Invalid
 import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.test.{KafkaClusterTestKit, TestKitNodes}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{AppendRequest, AppendStatus, PartitionKey, PhysicalBatch, RegistrationRequest}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{AppendRequest, AppendStatus, PartitionKey, RegistrationRequest}
 import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotSame, assertTrue}
 import org.junit.jupiter.api.{Test, Timeout}
@@ -214,15 +214,20 @@ class GlobalSequenceCoordinatorIntegrationTest {
         props.put(ProducerConfig.ACKS_CONFIG, "all")
         val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
         try {
-          def produce(): PhysicalBatch = {
+          val reader = new GlobalSequenceSourceReader(source.replicaManager)
+          def produce(): GlobalSequenceSourceReader.ReadResult = {
             val offset = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("routed", 0, null, Array[Byte](1)))
               .get(30, TimeUnit.SECONDS).offset()
-            new PhysicalBatch(partition, offset, offset, 1)
+            val read = reader.read(partition, sourceEpoch, offset, maxBytes = 1)
+            assertEquals(GlobalSequenceSourceReader.BATCH, read.status)
+            assertEquals(offset, read.batch.get.baseOffset())
+            read
           }
-          def request(batch: PhysicalBatch, predecessor: Long): AppendRequest = new AppendRequest(batch, predecessor,
-            source.replicaManager.localLog(new TopicPartition("routed", 0)).get.highWatermark, owner)
-          val first = produce()
-          val append = request(first, -1)
+          def request(read: GlobalSequenceSourceReader.ReadResult, predecessor: Long): AppendRequest =
+            new AppendRequest(read.batch.get, predecessor, read.dataHighWatermark, owner)
+          val firstRead = produce()
+          val first = firstRead.batch.get
+          val append = request(firstRead, -1)
           val indexed = source.indexRoutingManager.appendIndex(append, 30000).get(35, TimeUnit.SECONDS)
           assertEquals(AppendStatus.INDEXED, indexed.value.status())
           assertEquals(0L, indexed.value.globalBaseOffset().getAsLong)

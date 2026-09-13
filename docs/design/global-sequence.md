@@ -19,7 +19,7 @@
 
 상태: 1차 구현을 위한 설계 계약. 모듈·설정, 저장 형식, Runtime context/hook,
 Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연결까지 구현했다.
-내부 RPC·Indexer·Produce 연동 및 global 읽기는 후속 구현 단계다.
+내부 RPC·리더 라우팅·원본 로그 Reader까지 구현했으며, Indexer·Produce 연동 및 global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -214,6 +214,43 @@ coordinator 및 scheduler보다 먼저 닫는다. 관측한 인덱스 토픽의 
 3개 브로커 통합 테스트는 원격 등록/append, 인덱스 리더 이동, 같은 등록의 재확인,
 중복 append의 `ALREADY_INDEXED`, 다음 배치의 연속 global offset 할당을 검증한다.
 
+### 원본 로그 Reader 구현
+
+`GlobalSequenceSourceReader.read`는 topic UUID·데이터 파티션·source leader epoch,
+재개할 physical offset과 byte 제한을 받는다. 로컬 데이터 리더의 실제 로그 UUID와
+활성화 설정을 확인하고, 현재 epoch를 지정해 Partition의 fetch 경로로 읽는다.
+각 호출은 동기 I/O이므로 Indexer worker에서 실행하며, HW/leadership callback이나
+파티션 lock을 잡은 상태에서 호출하지 않는다. 로그 파일 slice는 Reader 내부에서만
+사용하고 결과에는 immutable `PhysicalBatch`와 캡처한 data HW·epoch·재개 위치만 담는다.
+
+HW를 파일 위치로 materialize하는 `fetchOffsetSnapshot` 대신 0바이트 `LOG_END` fetch로
+읽기 경계를 캡처한다. 이 방식은 배치 중간의 HW를 배치 시작 위치로 조정하지 않는다.
+본문도 `LOG_END`로 읽되 `physicalLastOffset < capturedHW`인 완전한 배치만 반환한다.
+읽는 동안 HW가 더 증가해도 이번 호출의 경계를 확대하지 않는다. 배치 중간의 HW는
+로그 누락으로 취급하지 않고 해당 배치의 base offset에서 HW 갱신을 기다린다.
+
+| 결과 | 호출자의 다음 동작 |
+|---|---|
+| `BATCH` | 반환된 데이터 배치를 인덱싱한다. 커밋/AlreadyIndexed 확인 후에만 `nextPhysicalOffset`을 소비한다. |
+| `CONTINUE` | 읽기 제한 또는 segment 경계까지 control batch만 검증했다. `nextPhysicalOffset`부터 다음 읽기를 예약한다. |
+| `AWAIT_HIGH_WATERMARK` | 현재 HW 아래에 더 읽을 완전한 배치가 없다. 다음 HW 알림을 기다리고 읽기 경합으로 알림을 놓치지 않도록 재확인한다. |
+
+한 호출은 데이터 배치 하나까지만 반환한다. Control-only 구간도 byte 제한 안에서
+순회하므로 긴 구간이 다른 파티션의 작업을 독점하지 않는다. 첫 배치 하나는 진행을 위해
+byte 제한을 초과할 수 있다. Slice 끝에서 잘린 뒤 배치는 건너뛰지 않고 다음 호출에서
+완전히 읽는다. 압축 배치는 CRC와 header의 범위·count, 내부 레코드의 연속 offset을
+검증하며, key/value를 보관하지 않는 streaming iterator를 사용한다. Kafka 4.x의 새
+로그에 기록되는 format v2를 지원한다. Control batch에는 번호를 할당하지 않고 열린
+트랜잭션과 abort된 트랜잭션의 데이터 배치는 모두 인덱싱 대상으로 반환한다.
+
+반환 직전 Partition·로그 객체·실제 topic UUID·leader epoch와 읽기 경계를 다시 확인한다.
+리더나 로그가 교체되면 결과를 버리고, 같은 epoch에서 HW가 후퇴하거나 필요한 원본이
+삭제되면 실패한다. 재개 위치가 local log start보다 앞선 경우, HW 아래에서 빈 읽기가
+발생한 경우, 필요한 batch base offset이 빠진 경우에는 `SourceLogGapException`을
+반환한다. Remote tier만 남은 범위를 자동으로 건너뛰지 않는다. 이 오류를 받은 복구
+흐름은 coordinator의 권위 있는 progress를 재확인한 뒤 실제 손실 여부를 판단해야 한다.
+Reader 자체는 cursor를 영속화하거나 인덱스를 할당하지 않는다.
+
 ## 5. 저장과 메모리 상태
 
 내부 토픽은 `__global_sequence_index`다. 데이터 topic ID를 결정적인 함수로 매핑하여
@@ -313,7 +350,7 @@ context가 자동으로 최신 값으로 바뀌지는 않는다.
 `TopicMetadata`를 atomic `CoordinatorResult`로 반환하며, Runtime이 이를 replay할 때
 speculative sequence와 진행 상태가 바뀐다. IndexerFence가 없거나 identity가 다르면
 `FENCED`, 현재 소유권 레코드가 아직 커밋되지 않았으면 `OWNER_NOT_COMMITTED`다.
-등록 API의 metadata 검증·조건부 generation 변경·등록 재시도 처리는 후속 단계다.
+등록 API는 metadata 검증과 조건부 generation 변경을 수행하며, 동일 registration identity로 재시도한다.
 
 상태의 보관 단위와 갱신 시점은 다음과 같다.
 
@@ -674,7 +711,7 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 순차 reader/Indexer, 장애 복구와 보존, Produce 대기, global 조회/읽기,
 트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
-append 실패·rollback과 로그 replay를 검증한다. 클러스터 단위 장애 검증은 후속 단계다.
+append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.
 
 후속 global 읽기 프로토콜의 API 번호·wire 필드, checkpoint 형식,
 배치 묶기 크기와 지표 이름은 해당 구현 커밋에서 확정한다. 이 선택들이 위의 순서,
