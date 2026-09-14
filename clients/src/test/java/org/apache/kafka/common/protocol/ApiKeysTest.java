@@ -65,7 +65,7 @@ public class ApiKeysTest {
         Set<ApiKeys> authenticationKeys = EnumSet.of(ApiKeys.SASL_HANDSHAKE, ApiKeys.SASL_AUTHENTICATE);
         // Newer protocol apis include throttle time ms even for cluster actions
         Set<ApiKeys> clusterActionsWithThrottleTimeMs = EnumSet.of(ApiKeys.ALTER_PARTITION, ApiKeys.ALLOCATE_PRODUCER_IDS, ApiKeys.UPDATE_FEATURES,
-            ApiKeys.REGISTER_GLOBAL_SEQUENCE_INDEXER, ApiKeys.DESCRIBE_GLOBAL_SEQUENCE_PARTITION, ApiKeys.APPEND_GLOBAL_SEQUENCE_INDEX, ApiKeys.READ_GLOBAL_SEQUENCE_INDEX);
+            ApiKeys.REGISTER_GLOBAL_SEQUENCE_INDEXER, ApiKeys.DESCRIBE_GLOBAL_SEQUENCE_PARTITION, ApiKeys.APPEND_GLOBAL_SEQUENCE_INDEX, ApiKeys.READ_GLOBAL_SEQUENCE_INDEX, ApiKeys.READ_GLOBAL_SEQUENCE_DATA);
         for (ApiKeys apiKey: ApiKeys.clientApis()) {
             Schema responseSchema = apiKey.messageType.responseSchemas()[apiKey.latestVersion()];
             BoundField throttleTimeField = responseSchema.get("throttle_time_ms");

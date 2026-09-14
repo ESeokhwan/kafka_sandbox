@@ -96,6 +96,7 @@ class KafkaApis(val requestChannel: RequestChannel,
                 val shareCoordinator: ShareCoordinator,
                 val globalSequenceCoordinator: GlobalSequenceCoordinator,
                 val indexRoutingManager: IndexRoutingManager,
+                val globalSequenceFetchManager: GlobalSequenceFetchManager,
                 val autoTopicCreationManager: AutoTopicCreationManager,
                 val brokerId: Int,
                 val config: KafkaConfig,
@@ -122,6 +123,7 @@ class KafkaApis(val requestChannel: RequestChannel,
   val requestHelper = new RequestHandlerHelper(requestChannel, quotas, time)
   val globalSequenceApis = new GlobalSequenceApis(globalSequenceCoordinator, authHelper, requestHelper)
   val globalSequenceLookupApis = new GlobalSequenceLookupApis(globalSequenceCoordinator, indexRoutingManager, metadataCache, authHelper, requestHelper)
+  val globalSequenceFetchApis = new GlobalSequenceFetchApis(globalSequenceFetchManager, metadataCache, authHelper, requestHelper, requestChannel, quotas, time)
   val aclApis = new AclApis(authHelper, authorizerPlugin, requestHelper, ProcessRole.BrokerRole, config)
   val configManager = new ConfigAdminManager(brokerId, config, configRepository)
   val describeTopicPartitionsRequestHandler = new DescribeTopicPartitionsRequestHandler(
@@ -243,6 +245,8 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.REGISTER_GLOBAL_SEQUENCE_INDEXER => globalSequenceApis.registerIndexer(request).exceptionally(handleError)
         case ApiKeys.DESCRIBE_GLOBAL_SEQUENCE_PARTITION => globalSequenceApis.describePartition(request).exceptionally(handleError)
         case ApiKeys.APPEND_GLOBAL_SEQUENCE_INDEX => globalSequenceApis.appendIndex(request).exceptionally(handleError)
+        case ApiKeys.FETCH_GLOBAL_SEQUENCE => globalSequenceFetchApis.fetch(request).exceptionally(handleError)
+        case ApiKeys.READ_GLOBAL_SEQUENCE_DATA => globalSequenceFetchApis.readData(request).exceptionally(handleError)
         case ApiKeys.LOOKUP_GLOBAL_SEQUENCE => globalSequenceLookupApis.lookup(request).exceptionally(handleError)
         case ApiKeys.READ_GLOBAL_SEQUENCE_INDEX => globalSequenceLookupApis.readIndex(request).exceptionally(handleError)
         case ApiKeys.INITIALIZE_SHARE_GROUP_STATE => handleInitializeShareGroupStateRequest(request).exceptionally(handleError)

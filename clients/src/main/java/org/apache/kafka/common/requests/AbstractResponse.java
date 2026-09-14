@@ -295,6 +295,10 @@ public abstract class AbstractResponse implements AbstractRequestResponse {
                 return DescribeGlobalSequencePartitionResponse.parse(readable, version);
             case APPEND_GLOBAL_SEQUENCE_INDEX:
                 return AppendGlobalSequenceIndexResponse.parse(readable, version);
+            case FETCH_GLOBAL_SEQUENCE:
+                return FetchGlobalSequenceResponse.parse(readable, version);
+            case READ_GLOBAL_SEQUENCE_DATA:
+                return ReadGlobalSequenceDataResponse.parse(readable, version);
             case LOOKUP_GLOBAL_SEQUENCE:
                 return LookupGlobalSequenceResponse.parse(readable, version);
             case READ_GLOBAL_SEQUENCE_INDEX:

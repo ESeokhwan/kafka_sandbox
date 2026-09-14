@@ -132,6 +132,7 @@ class BrokerServer(
   var shareCoordinator: ShareCoordinator = _
   var globalSequenceCoordinator: GlobalSequenceCoordinator = _
   var indexRoutingManager: IndexRoutingManager = _
+  var globalSequenceFetchManager: GlobalSequenceFetchManager = _
   var globalSequenceIndexerManager: GlobalSequenceIndexerManager = _
 
   var clientToControllerChannelManager: NodeToControllerChannelManager = _
@@ -403,11 +404,16 @@ class BrokerServer(
         transactionCoordinator, shareCoordinator)
 
       globalSequenceCoordinator = createGlobalSequenceCoordinator()
+      val globalSequenceTransport = new GlobalSequenceNetworkClient(NetworkUtils.buildNetworkClient("GlobalSequence", config, metrics, time,
+        new LogContext(s"[GlobalSequence broker=${config.brokerId}]")), config.requestTimeoutMs, time)
       indexRoutingManager = new IndexRoutingManager(config.brokerId, config.globalSequenceCoordinatorConfig.indexTopicNumPartitions(),
         config.interBrokerListenerName, () => metadataCache.getImage(), globalSequenceCoordinator,
-        new GlobalSequenceNetworkClient(NetworkUtils.buildNetworkClient("GlobalSequence", config, metrics, time,
-          new LogContext(s"[GlobalSequence broker=${config.brokerId}]")), config.requestTimeoutMs, time), kafkaScheduler, time)
+        globalSequenceTransport, kafkaScheduler, time)
       indexRoutingManager.startup()
+      val globalSequenceDataRouter = new GlobalSequenceDataRouter(config.brokerId, config.interBrokerListenerName,
+        () => metadataCache.getImage(), new GlobalSequenceDataReader(replicaManager, kafkaScheduler, time),
+        globalSequenceTransport, kafkaScheduler, time)
+      globalSequenceFetchManager = new GlobalSequenceFetchManager(indexRoutingManager, globalSequenceDataRouter, kafkaScheduler, time)
       globalSequenceIndexerManager = GlobalSequenceIndexerManager(config.brokerId, config.globalSequenceCoordinatorConfig,
         replicaManager, indexRoutingManager, kafkaScheduler, time)
       replicaManager.setGlobalSequenceIndexerManager(globalSequenceIndexerManager)
@@ -472,6 +478,7 @@ class BrokerServer(
         shareCoordinator = shareCoordinator,
         globalSequenceCoordinator = globalSequenceCoordinator,
         indexRoutingManager = indexRoutingManager,
+        globalSequenceFetchManager = globalSequenceFetchManager,
         autoTopicCreationManager = autoTopicCreationManager,
         brokerId = config.nodeId,
         config = config,
@@ -825,6 +832,8 @@ class BrokerServer(
        */
       if (globalSequenceIndexerManager != null)
         CoreUtils.swallow(globalSequenceIndexerManager.close(), this)
+      if (globalSequenceFetchManager != null)
+        CoreUtils.swallow(globalSequenceFetchManager.close(), this)
       if (indexRoutingManager != null)
         CoreUtils.swallow(indexRoutingManager.close(), this)
       if (kafkaScheduler != null)

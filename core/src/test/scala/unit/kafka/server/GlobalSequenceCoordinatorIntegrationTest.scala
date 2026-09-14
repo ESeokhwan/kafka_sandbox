@@ -21,7 +21,7 @@ import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry, NewPar
 import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{ElectionType, TopicPartition, Uuid}
-import org.apache.kafka.common.message.{LookupGlobalSequenceRequestData, AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData, RegisterGlobalSequenceIndexerResponseData}
+import org.apache.kafka.common.message.{FetchGlobalSequenceRequestData, LookupGlobalSequenceRequestData, AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData, RegisterGlobalSequenceIndexerResponseData}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.compress.Compression
@@ -175,6 +175,14 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(2, recoveredPage.batches().size())
         assertEquals(physicalOffset, recoveredPage.batches().get(0).physicalBaseOffset())
         assertEquals(nextOffset, recoveredPage.batches().get(1).physicalBaseOffset())
+        val fetch = new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData().setTopicId(topicId)
+          .setGlobalEndOffsetExclusive(100).setTimeoutMs(10000)).build()
+        val recoveredData = IntegrationTestUtils.connectAndReceive[FetchGlobalSequenceResponse](fetch, broker.socketServer,
+          broker.config.interBrokerListenerName).data()
+        assertEquals(Errors.NONE.code(), recoveredData.errorCode(), recoveredData.errorMessage())
+        assertEquals(2L, recoveredData.nextGlobalOffset())
+        val values = recoveredData.batches().asScala.map(_.records().asInstanceOf[MemoryRecords].records().iterator().next().value())
+        assertEquals(Seq(java.nio.ByteBuffer.wrap(Array[Byte](1, 2, 3)), java.nio.ByteBuffer.wrap(Array[Byte](4))), values.toSeq)
       } finally {
         admin.close()
       }
@@ -359,6 +367,32 @@ class GlobalSequenceCoordinatorIntegrationTest {
               assertEquals(next, page.nextGlobalOffset())
             }
           }
+          brokers.foreach { broker =>
+            for (maxBytes <- Seq(1, 1048576)) {
+              var next = 0L
+              while (next < globalEnd) {
+                val request = new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData().setTopicId(topicId)
+                  .setGlobalStartOffset(next).setGlobalEndOffsetExclusive(Long.MaxValue).setMaxBatches(3)
+                  .setMaxBytes(maxBytes).setTimeoutMs(10000)).build()
+                val page = IntegrationTestUtils.connectAndReceive[FetchGlobalSequenceResponse](request, broker.socketServer,
+                  broker.config.interBrokerListenerName).data()
+                assertEquals(Errors.NONE.code(), page.errorCode(), page.errorMessage())
+                assertEquals(globalEnd, page.committedGlobalEndOffset())
+                assertEquals(if (maxBytes == 1) 1 else math.min(3L, globalEnd - next).toInt, page.batches().size())
+                page.batches().asScala.foreach { entry =>
+                  assertEquals(next, entry.globalBaseOffset())
+                  assertEquals((next % 2).toInt, entry.physicalPartition())
+                  assertEquals(next / 2, entry.physicalBaseOffset())
+                  val batch = entry.records().asInstanceOf[MemoryRecords].batches().iterator().next()
+                  batch.ensureValid()
+                  assertEquals(next / 2, batch.baseOffset())
+                  assertEquals(java.nio.ByteBuffer.wrap(Array[Byte](1)), batch.iterator().next().value())
+                  next += 1
+                }
+                assertEquals(next, page.nextGlobalOffset())
+              }
+            }
+          }
           keys.foreach { key =>
             TestUtils.waitUntilTrue(() => Try(brokers.head.indexRoutingManager.describePartition(key, 5000)
               .get(6, TimeUnit.SECONDS)).toOption.exists(r => r.value.committedProgress().isPresent &&
@@ -458,6 +492,24 @@ class GlobalSequenceCoordinatorIntegrationTest {
           "Source data did not replicate before leader movement", 30000)
         assertEquals(0L, source.indexRoutingManager.describePartition(key, 5000).get(6, TimeUnit.SECONDS)
           .value.committedProgress().get().lastOffset())
+        def verifyGlobalFetchAfterMove(): Unit = {
+          brokers.foreach { broker =>
+            val request = new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData().setTopicId(id)
+              .setGlobalStartOffset(1).setGlobalEndOffsetExclusive(2).setMaxBytes(1).setTimeoutMs(10000)).build()
+            val page = IntegrationTestUtils.connectAndReceive[FetchGlobalSequenceResponse](request, broker.socketServer,
+              broker.config.interBrokerListenerName).data()
+            assertEquals(Errors.NONE.code(), page.errorCode(), page.errorMessage())
+            assertEquals(2L, page.nextGlobalOffset())
+            assertEquals(1, page.batches().size())
+            val entry = page.batches().get(0)
+            assertEquals(1L, entry.physicalBaseOffset())
+            assertEquals(2L, entry.physicalLastOffset())
+            assertEquals(2, entry.recordCount())
+            assertEquals(1L, entry.selectedGlobalStartOffset())
+            assertEquals(2L, entry.selectedGlobalEndOffset())
+            entry.records().asInstanceOf[MemoryRecords].batches().iterator().next().ensureValid()
+          }
+        }
         def move(target: BrokerServer): Unit = {
           val targetId = Int.box(target.config.brokerId)
           val replicas = (Seq(targetId) ++ ids.filterNot(_ == targetId)).asJava
@@ -471,6 +523,7 @@ class GlobalSequenceCoordinatorIntegrationTest {
         }
         move(brokers(1))
         awaitProgress(2)
+        verifyGlobalFetchAfterMove()
         val secondIndexer = brokers(1).globalSequenceIndexerManager.indexer(key).get
         assertTrue(secondIndexer.sourceLeaderEpoch > firstIndexer.sourceLeaderEpoch)
         move(source)
@@ -480,6 +533,7 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertNotSame(firstIndexer, source.globalSequenceIndexerManager.indexer(key).get)
         assertEquals(3, appendOn(source, 1))
         awaitProgress(3)
+        verifyGlobalFetchAfterMove()
       } finally admin.close()
     } finally cluster.close()
   }

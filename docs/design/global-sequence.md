@@ -25,7 +25,7 @@ Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연�
 장애 복구의 progress 재확인과 source leader 변경을 연결했다.
 리더·follower·future replica의 원본 보존 경계를 연결했다.
 Produce 응답을 데이터 HW와 인덱스 커밋 이후에 완료하도록 연결했다. Global 인덱스 조회 API까지 구현했다.
-Global 데이터 Fetch와 트랜잭션 격리는 후속 단계다.
+Global 데이터 Fetch의 READ_UNCOMMITTED 경로를 구현했다. READ_COMMITTED 격리는 후속 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -846,6 +846,67 @@ Global fetch는 인덱스 조회 후 각 physical 데이터 리더에서 배치�
 적용한다. Client가 요청한 토픽을 읽을 권한과 브로커 내부 physical 읽기의
 CLUSTER_ACTION 권한은 각 진입점에서 구분한다.
 
+### Global fetch v0 구현 (15번)
+
+`FetchGlobalSequence`(API 98)는 어느 브로커에서나 받을 수 있는 공개 데이터 읽기다.
+`ReadGlobalSequenceData`(API 99)는 source 리더에게 한 배치의 원본을 요청하는 내부 RPC다.
+두 번호는 이 브랜치의 번호이며, upstream 예약 번호가 아니다. 공개 API는 topic READ,
+내부 API는 CLUSTER_ACTION을 검사한 뒤 조회나 디스크 작업을 시작한다.
+
+공개 요청은 lookup v0의 다섯 필드에 `MaxBytes`(기본 1 MiB)와 `IsolationLevel`을 추가한다.
+현재 v0은 `IsolationLevel=0`(READ_UNCOMMITTED)만 허용하고 다른 값은 INVALID_REQUEST로
+거절한다. 배치 수는 1~1000, timeout은 1~30000ms다. 내부 요청은 topic UUID, physical
+partition/base/last/count, 예상 source leader epoch와 남은 timeout을 전달한다.
+내부 응답은 원본 한 배치와 그 전체를 덮는 raw data HW, 검사한 source epoch를 반환한다.
+
+공개 응답은 lookup과 동일한 snapshot 정보, `NextGlobalOffset`, 매핑·선택 범위에 원본
+`Records`를 추가한다. 원본 배치 전체가 전달되므로 선택 범위 밖 레코드도 바이트에 포함된다.
+클라이언트는 각 레코드의 `globalBaseOffset + (physicalOffset - physicalBaseOffset)`을 계산하고
+`[SelectedGlobalStartOffset, SelectedGlobalEndOffset)`에 속하는 레코드만 사용한다. Offset,
+CRC, 압축, producer ID/epoch/sequence, transaction 플래그를 다시 쓰지 않는다.
+
+`GlobalSequenceFetchManager`는 lookup의 committed snapshot을 얻고 최대 4개 physical 읽기를
+병렬 실행한다. 아직 응답에 포함하지 않은 가장 앞 배치를 기준으로 창을 제한하므로 뒤 읽기가
+먼저 완료되어도 추가 payload가 계속 쌓이지 않는다. 인덱스 조회와 source 리더 재시도 모두
+하나의 monotonic deadline을 사용한다. 응답 직전 index route도 재검증한다. 바뀐 index route의
+페이지는 버리고 NOT_COORDINATOR와 요청 시작 cursor를 돌려준다.
+
+응답은 읽기가 끝난 연속 prefix만 포함한다. 앞 읽기가 실패하면 그 뒤 결과는 버리고
+`ErrorCode`와 첫 미처리 `NextGlobalOffset`을 함께 반환한다. 이미 포함한 prefix는 사용할 수
+있다. 앞 읽기를 기다리다 timeout이 발생해도 같은 규칙을 적용한다. 예를 들어 global 0은
+완료, 1은 실패, 2는 완료라면 응답에는 0만 있고 cursor는 1이다. 검증 전에 거절된 요청은
+매핑과 유효 cursor가 없다(`NextGlobalOffset=-1`). Byte 제한으로 이미 페이지를 끝냈다면
+그 뒤에 미리 읽던 배치의 오류는 이 페이지의 오류로 취급하지 않는다.
+
+`MaxBytes`는 전체 원본 배치 바이트의 합에 적용하며 첫 배치 초과를 허용한다. 원본 한 배치가
+8 MiB를 넘으면 MESSAGE_TOO_LARGE로 해당 위치에서 중단한다. 응답 데이터의 hard cap은
+16 MiB이고, 최대 1000개 매핑과 flexible header를 위해 128 KiB를 예약한다. 따라서 요청의
+MaxBytes는 1~16646144 bytes(16 MiB - 128 KiB)다. 여러 배치가 payload 예산을 넘으면
+배치를 자르지 않고 다음 페이지에서 재개한다. 별도 serialization 크기 검사도 적용한다.
+
+`GlobalSequenceDataRouter`는 현재 KRaft image의 UUID·source 리더 epoch·broker epoch·
+inter-broker endpoint로 라우팅하며 응답 시 route를 다시 검사한다. 리더 변경, 새 리더의 HW
+노출 지연, 일시적 네트워크 오류는 남은 deadline 안에서 재시도한다. 원본이 retention으로
+사라진 경우 OFFSET_OUT_OF_RANGE를 그대로 반환한다. 다른 UUID로 재생성된 토픽의 데이터를
+대신 읽지 않는다. Index 라우터의 보안 설정과 transport를 공유하고 fetch 작업을 먼저 종료한다.
+
+`GlobalSequenceDataReader`는 2개 worker와 길이 128의 대기 큐에서 디스크를 읽는다. LOG_END의
+raw HW를 캡처하여 배치 중간 HW를 내림 처리하지 않고, 전체 배치가 HW 아래인지 확인한다.
+UUID, Partition/log 인스턴스, leader epoch와 보존 경계를 읽기 전후에 검사하고 배치 CRC,
+물리 offset 연속성, 인덱스 매핑의 base/last/count를 검증한다. 열린 트랜잭션과 abort 데이터도
+READ_UNCOMMITTED에서는 읽으며 control batch는 데이터 매핑으로 반환하지 않는다.
+원본 FileRecords는 닫지 않고 크기를 검사한 뒤 복사한다. Timeout·취소·종료는 timer와 대기
+작업을 정리하고 실행 중인 레코드 순회도 중단을 확인한다.
+
+공개 응답은 request quota와 실제 응답 크기의 fetch bandwidth quota를 모두 기록한다.
+둘 중 큰 throttle 시간으로 채널을 mute하고, 현재의 제한된 페이지는 즉시 전달한다.
+빈 응답으로 바꾸지 않으므로 bandwidth 값을 되돌리지 않고 cursor도 그대로 유지한다.
+내부 데이터 응답은 request quota에서 제외하고 CLUSTER_ACTION 거절은 request throttle을 적용한다.
+
+검증 대상은 압축별 원본 바이트·CRC 보존, raw HW와 열린/abort 트랜잭션, 누락·손상·큰 배치,
+역순 완료와 읽기 창 제한, 부분 실패·선택 범위·byte pagination, timeout·취소, ACL과 두 quota다.
+실제 브로커에서 로컬/원격 Fetch, 재시작 후 이전 데이터, source/index 리더 이동 후 읽기를 확인한다.
+
 ### 트랜잭션 격리
 
 READ_UNCOMMITTED는 커밋된 인덱스와 data HW 아래의 데이터를 기준으로 하므로 열린
@@ -923,8 +984,8 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
 복구의 progress 재확인과 source leader 변경, 모든 source replica의 보존 경계를 연결했다.
-Produce 대기와 global 인덱스 조회까지 연결했다. 후속 구현 순서는 global 데이터 Fetch,
-트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
+Produce 대기와 global 인덱스 조회·READ_UNCOMMITTED 데이터 Fetch까지 연결했다.
+후속 구현 순서는 READ_COMMITTED 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.
 
