@@ -409,7 +409,8 @@ class BrokerServer(
           new LogContext(s"[GlobalSequence broker=${config.brokerId}]")), config.requestTimeoutMs, time), kafkaScheduler, time)
       indexRoutingManager.startup()
       globalSequenceIndexerManager = GlobalSequenceIndexerManager(config.brokerId, config.globalSequenceCoordinatorConfig,
-        replicaManager, indexRoutingManager, kafkaScheduler)
+        replicaManager, indexRoutingManager, kafkaScheduler, time)
+      replicaManager.setGlobalSequenceIndexerManager(globalSequenceIndexerManager)
 
       dynamicConfigHandlers = Map[ConfigType, ConfigHandler](
         ConfigType.TOPIC -> new TopicConfigHandler(replicaManager, config, quotaManagers),

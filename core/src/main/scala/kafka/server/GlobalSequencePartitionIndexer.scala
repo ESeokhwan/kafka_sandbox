@@ -22,6 +22,7 @@ import kafka.utils.Logging
 import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.errors.{FencedLeaderEpochException, InvalidRequestException}
 import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.common.utils.Time
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard._
 import org.apache.kafka.server.util.Scheduler
 
@@ -45,7 +46,8 @@ private[server] class GlobalSequencePartitionIndexer(
   executor: Executor,
   scheduler: Scheduler,
   requestTimeoutMs: Int,
-  readMaxBytes: Int
+  readMaxBytes: Int,
+  time: Time = Time.SYSTEM
 ) extends AutoCloseable with Logging {
   import GlobalSequenceSourceReader._
   import IndexRoutingManager._
@@ -59,6 +61,15 @@ private[server] class GlobalSequencePartitionIndexer(
   @volatile private var operation: CompletableFuture[_] = _
   @volatile private var retryTask: ScheduledFuture[_] = _
   @volatile private[server] var failure: Option[Throwable] = None
+
+  private val produceWaiters = new GlobalSequenceIndexWaiters(scheduler, time,
+    () => !isStopped && source.isLeader && source.getLeaderEpoch == sourceLeaderEpoch && source.topicId.contains(partition.topicId()),
+    () => source.log.map(_.highWatermark).getOrElse(0L))
+
+  def awaitIndexed(lastOffset: Long, deadlineNs: Long): CompletableFuture[Void] =
+    produceWaiters.await(lastOffset + 1, deadlineNs)
+
+  private def publishProgress(): Unit = produceWaiters.advance(progress.map(_.resumeOffset()).getOrElse(0L))
 
   // Accessed only by the serial worker, never by partition listeners or future completion threads.
   private var busy = true
@@ -76,6 +87,7 @@ private[server] class GlobalSequencePartitionIndexer(
       observedHighWatermark.accumulateAndGet(offset, (left, right) => math.max(left, right))
       if (wakeupQueued.compareAndSet(false, true)) enqueue {
         wakeupQueued.set(false)
+        publishProgress()
         if (!busy) pump()
       }
     }
@@ -177,6 +189,7 @@ private[server] class GlobalSequencePartitionIndexer(
       if (committed.map(_.lastOffset()).getOrElse(-1L) < progress.map(_.lastOffset()).getOrElse(-1L))
         throw new InvalidRequestException("Committed global sequence progress regressed after a registration barrier")
       progress = committed
+      publishProgress()
       // Preserve already validated control-only progress within this source lifetime.
       // A new lifetime still starts at the durable cursor (or zero).
       cursor = math.max(cursor, committed.map(_.resumeOffset()).getOrElse(0L))
@@ -243,6 +256,7 @@ private[server] class GlobalSequencePartitionIndexer(
         if (!router.isCurrent(partition, result.coordinator)) register()
         else {
           progress = result.value.indexedThrough().toScala
+          publishProgress()
           cursor = progress.get.resumeOffset()
           pending = None
           recoveryError = None
@@ -254,6 +268,7 @@ private[server] class GlobalSequencePartitionIndexer(
 
   override def close(): Unit = {
     if (stopped.compareAndSet(false, true)) {
+      produceWaiters.close(failure.getOrElse(Errors.NOT_LEADER_OR_FOLLOWER.exception()), executor)
       source.removeListener(listener)
       // Cancel only our routing wait. This does not roll back a write accepted by the coordinator.
       val outstanding = operation

@@ -22,6 +22,8 @@ import org.apache.kafka.common.{Node, TopicPartition, Uuid}
 import org.apache.kafka.common.errors.{ClusterAuthorizationException, FencedLeaderEpochException, InvalidRequestException, TimeoutException}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard._
 import org.apache.kafka.server.util.MockTime
+import org.apache.kafka.storage.internals.log.UnifiedLog
+import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 import org.mockito.ArgumentMatchers.{any, anyInt, anyLong}
@@ -66,6 +68,13 @@ class GlobalSequencePartitionIndexerTest {
                         sourceKey: PartitionKey = key) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val source: Partition = mock(classOf[Partition])
+    val log: UnifiedLog = mock(classOf[UnifiedLog])
+    var hw = 20L
+    when(source.isLeader).thenReturn(true)
+    when(source.getLeaderEpoch).thenReturn(3)
+    when(source.topicId).thenReturn(Some(sourceKey.topicId()))
+    when(source.log).thenReturn(Some(log))
+    when(log.highWatermark).thenAnswer(_ => hw)
     val reader: GlobalSequenceSourceReader = mock(classOf[GlobalSequenceSourceReader])
     val router: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     var listener: PartitionListener = _
@@ -102,7 +111,7 @@ class GlobalSequencePartitionIndexerTest {
       reads += offset
       read(offset)
     }
-    val indexer = new GlobalSequencePartitionIndexer(sourceKey, source, 1, 3, reader, router, executor, time.scheduler, 1000, 1024)
+    val indexer = new GlobalSequencePartitionIndexer(sourceKey, source, 1, 3, reader, router, executor, time.scheduler, 1000, 1024, time)
     def owner: IndexerIdentity = {
       val request = registrations.head._1
       new IndexerIdentity(1, 3, request.expectedGeneration() + 1, request.registrationId())
@@ -134,6 +143,58 @@ class GlobalSequencePartitionIndexerTest {
       executor.runAll()
     }
     override def close(): Unit = { indexer.close(); executor.shutdown(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testProduceWaiterCompletesAfterIndexCommitIncludingAlreadyIndexed(): Unit = {
+    for (status <- Seq(AppendStatus.INDEXED, AppendStatus.ALREADY_INDEXED)) {
+      val c = new Context
+      try {
+        c.read = offset => if (offset == 0) c.batch(a)
+          else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+        c.start()
+        val wait = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(1))
+        assertFalse(wait.isDone)
+        c.completeAppend(status)
+        assertTrue(wait.isDone)
+        assertFalse(wait.isCompletedExceptionally)
+        assertTrue(c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(1)).isDone)
+      } finally c.close()
+    }
+  }
+
+  @Test
+  def testRecoveredProduceWaiterWaitsForSourceHighWatermarkNotification(): Unit = {
+    val c = new Context
+    try {
+      c.hw = 0
+      c.start(Some(a))
+      val wait = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(1))
+      assertFalse(wait.isDone)
+      c.hw = a.resumeOffset()
+      c.listener.onHighWatermarkUpdated(tp, c.hw)
+      assertFalse(wait.isDone)
+      c.executor.runAll()
+      assertTrue(wait.isDone)
+      assertFalse(wait.isCompletedExceptionally)
+    } finally c.close()
+  }
+
+  @Test
+  def testProduceTimeoutDoesNotCancelPendingIndexAppend(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => if (offset == 0) c.batch(a)
+        else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+      c.start()
+      val wait = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.MILLISECONDS.toNanos(20))
+      c.time.sleep(20)
+      assertFutureThrows(classOf[TimeoutException], wait)
+      assertFalse(c.appends.head._2.isDone)
+      assertFalse(c.indexer.isStopped)
+      c.completeAppend()
+      assertTrue(c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(1)).isDone)
+    } finally c.close()
   }
 
   @Test

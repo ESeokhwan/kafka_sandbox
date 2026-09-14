@@ -148,7 +148,7 @@ class GlobalSequenceRetentionLogTest {
     try {
       c.append()
       c.log.roll()
-      c.log.appendAsLeader(MemoryRecords.withEndTransactionMarker(123L, 0.toShort, new EndTransactionMarker(ControlRecordType.COMMIT, 0)),
+      c.log.appendAsLeader(MemoryRecords.withEndTransactionMarker(c.time.milliseconds(), 123L, 0.toShort, new EndTransactionMarker(ControlRecordType.COMMIT, 0)),
         3, AppendOrigin.COORDINATOR)
       c.log.updateHighWatermark(3L)
       c.log.roll()

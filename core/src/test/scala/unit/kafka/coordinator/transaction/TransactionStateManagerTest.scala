@@ -759,7 +759,8 @@ class TransactionStateManagerTest {
       any(),
       any(),
       any(),
-      any()
+      any(),
+      any[Option[Long]]()
     )
 
     for (batches <- attemptedAppends.values; batch <- batches) {
@@ -803,7 +804,8 @@ class TransactionStateManagerTest {
       any(),
       any(),
       any(),
-      any()
+      any(),
+      any[Option[Long]]()
     )
 
     assertEquals(Set(onlinePartitionId), appendedRecords.keySet.map(_.partition))
@@ -846,7 +848,9 @@ class TransactionStateManagerTest {
       any(),
       any(),
       any(),
-      any())
+      any(),
+      any[Option[Long]]()
+    )
 
     assertEquals(Set.empty, listExpirableTransactionalIds())
     assertEquals(partitionIds.toSet, appendedRecords.keys.map(_.partition))
@@ -899,7 +903,8 @@ class TransactionStateManagerTest {
       any(),
       any(),
       any(),
-      any()
+      any(),
+      any[Option[Long]]()
     )
 
     val expiredTransactionalIds = collectTransactionalIdsFromTombstones(appendedRecords)
@@ -1115,7 +1120,8 @@ class TransactionStateManagerTest {
       callbackCapture.capture(),
       any(),
       any(),
-      any()
+      any(),
+      any[Option[Long]]()
     )).thenAnswer(_ => callbackCapture.getValue.apply(
       recordsCapture.getValue.map { case (topicPartition, records) =>
         val batches = capturedAppends.getOrElse(topicPartition, {
@@ -1267,7 +1273,8 @@ class TransactionStateManagerTest {
       capturedArgument.capture(),
       any(),
       any(),
-      any()
+      any(),
+      any[Option[Long]]()
     )).thenAnswer(_ => capturedArgument.getValue.apply(
       Map(new TopicIdPartition(transactionTopicId, partitionId, TRANSACTION_STATE_TOPIC_NAME) ->
         new PartitionResponse(error, 0L, RecordBatch.NO_TIMESTAMP, 0L)))

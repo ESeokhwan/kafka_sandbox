@@ -20,7 +20,8 @@ package kafka.server
 import kafka.cluster.{Partition, PartitionListener}
 import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
-import org.apache.kafka.common.errors.FencedLeaderEpochException
+import org.apache.kafka.common.errors.{FencedLeaderEpochException, NotLeaderOrFollowerException}
+import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.apache.kafka.common.metadata.{ConfigRecord, PartitionRecord, TopicRecord}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionDescription, PartitionKey}
 import org.apache.kafka.image.{MetadataDelta, MetadataImage, MetadataProvenance}
@@ -56,6 +57,7 @@ class GlobalSequenceIndexerManagerTest {
     val router: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val calls = mutable.ArrayBuffer.empty[CompletableFuture[IndexRoutingManager.RoutedResult[PartitionDescription]]]
     when(replicas.onlinePartition(tp)).thenReturn(Some(source))
+    when(source.topicPartition).thenReturn(tp)
     when(source.topicId).thenReturn(Some(topicId))
     when(source.isLeader).thenReturn(true)
     when(source.getLeaderEpoch).thenReturn(3)
@@ -66,8 +68,31 @@ class GlobalSequenceIndexerManagerTest {
       result
     }
     val manager = new GlobalSequenceIndexerManager(1, replicas, mock(classOf[GlobalSequenceSourceReader]), router,
-      workers, time.scheduler, 1000, 1024, mock(classOf[GlobalSequenceRetentionManager]))
+      workers, time.scheduler, 1000, 1024, mock(classOf[GlobalSequenceRetentionManager]), time)
     override def close(): Unit = { manager.close(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testProduceReceiptCannotAttachToAnotherSourceLifetime(): Unit = {
+    val c = new Context
+    try {
+      val receipt = GlobalSequenceAppendReceipt(c.source, topicId, 3, 0, 2)
+      assertFutureThrows(classOf[NotLeaderOrFollowerException], c.manager.awaitIndexed(receipt, 1000000000L))
+      c.manager.onMetadataUpdate(image())
+      val pending = c.manager.awaitIndexed(receipt, 1000000000L)
+      assertFalse(pending.isDone)
+      when(c.source.getLeaderEpoch).thenReturn(4)
+      c.manager.onMetadataUpdate(image(epoch = 4))
+      assertFutureThrows(classOf[NotLeaderOrFollowerException], c.manager.awaitIndexed(receipt, 1000000000L))
+      c.workers.runAll()
+      assertFutureThrows(classOf[NotLeaderOrFollowerException], pending)
+      assertFutureThrows(classOf[NotLeaderOrFollowerException], c.manager.awaitIndexed(
+        receipt.copy(topicId = Uuid.randomUuid(), leaderEpoch = 4), 1000000000L))
+      val replaced = mock(classOf[Partition])
+      when(replaced.topicPartition).thenReturn(tp)
+      assertFutureThrows(classOf[NotLeaderOrFollowerException], c.manager.awaitIndexed(
+        receipt.copy(source = replaced, leaderEpoch = 4), 1000000000L))
+    } finally c.close()
   }
 
   @Test

@@ -22,7 +22,7 @@ Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연�
 내부 RPC·리더 라우팅·원본 로그 Reader와 파티션별 자동 Indexer까지 구현했다.
 장애 복구의 progress 재확인과 source leader 변경을 연결했다.
 리더·follower·future replica의 원본 보존 경계를 연결했다.
-Produce 대기 연동 및 global 읽기는 후속 구현 단계다.
+Produce 응답을 데이터 HW와 인덱스 커밋 이후에 완료하도록 연결했다. Global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -275,8 +275,7 @@ lifecycle을 검증한다. 통합 테스트는 별도 수동 append 없이 Produ
 Source gap과 predecessor 불일치는 같은 등록 barrier 이후 authoritative progress를 재확인한다.
 재확인 후에도 복구할 수 없으면 읽기 위치를 건너뛰지 않고 오류로 중단한다.
 Retention/DeleteRecords에는 committed progress 기반 보존 경계를 적용한다.
-Produce 응답은 아직 인덱스 커밋을 기다리지 않으며, 해당 대기는
-13번에서 연결한다. Global 조회/Fetch API도 후속 단계다.
+Produce 응답은 데이터 HW와 인덱스 커밋을 기다린다. Global 조회/Fetch API는 후속 단계다.
 
 ### 원본 로그 Reader 구현
 
@@ -590,8 +589,8 @@ AlreadyIndexed에 과거의 정확한 global base offset을 반드시 반환하�
 필요한 사용자는 별도의 매핑 조회를 사용한다. Pending은 성공 결과가 아니며, timeout이
 발생하더라도 같은 배치의 할당을 보존하고 새 대기 요청을 연결할 수 있어야 한다.
 
-`KafkaApis`는 데이터 append의 physical base offset과 실제 배치 끝으로 완료 waiter를
-등록한다. 먼저 progress를 확인하고 알림을 구독한 뒤 재확인하는 등, waiter 등록 전에
+`KafkaApis`가 호출하는 `ReplicaManager`의 Produce 경로에서 데이터 append의 physical base offset과
+실제 배치 끝으로 완료 waiter를 등록한다. 먼저 progress를 확인하고 알림을 구독한 뒤 재확인하는 등, waiter 등록 전에
 인덱싱이 끝난 경우와 등록 도중 완료되는 경우 모두 알림을 놓치지 않도록 한다.
 Producer payload를 인덱스 로그에 복사하지 않으며 요청 스레드를 블로킹하지 않는다.
 
@@ -611,6 +610,34 @@ Produce 응답의 base offset은 항상 physical offset이다. Global/일반 토
 `acks=0` 요청의 수신·append 오류 처리는 기존 Kafka 동작을 따르며, 요청 종료 후 발생한
 백그라운드 인덱스 실패는 복구·지표로 처리한다. 이미 반환한 클라이언트 성공을 취소하는
 개념은 두지 않는다.
+
+### Produce 대기 구현 (13번)
+
+`ReplicaManager.handleProduceAppend` 진입 시 monotonic clock으로 deadline을 한 번 정한다.
+트랜잭션 검증과 실제 append를 마친 뒤 데이터 복제 대기에는 남은 시간을 적용하고,
+데이터 응답이 성공한 global 파티션만 같은 deadline으로 인덱스 커밋을 기다린다.
+일반 토픽과 데이터 append 오류는 원래 파티션별 결과를 보존한다. `acks=0`에는 waiter를 만들지 않는다.
+
+`LogAppendResult`는 global append에 한해 원본 `Partition` 인스턴스, topic UUID,
+append 전 source leader epoch, 실제 `LogAppendInfo.firstOffset/lastOffset`을 전달한다.
+요청 레코드 수나 응답 base offset만으로 배치 끝을 추정하지 않는다. 리더 변경과 append가
+경합하면 보수적으로 오류를 반환하며, 새 leader epoch 또는 교체된 `Partition`의 동일 offset에
+옛 요청을 붙이지 않는다. 인덱싱이 데이터 응답보다 먼저 완료되어도 같은 source lifetime의
+committed progress를 재사용한다.
+
+`GlobalSequenceIndexWaiters`는 완료 prefix 확인과 waiter 등록을 같은 lock에서 처리한다.
+Indexer가 등록 barrier 이후 읽은 progress 또는 현재 route의 append 커밋을 반영하면
+prefix를 갱신한다. 현재 source의 실제 HW도 요청 끝 이상이어야 성공하며, 복구 직후 index
+progress보다 HW가 뒤처져 있으면 HW listener의 worker 알림을 기다린다. HW 조회 전후에
+source identity를 확인한다. `Partition` listener는 중단 상태를 즉시 표시하되 대기 Future의
+오류 완료는 worker에서 처리하여 partition lock 안에서 응답 callback을 실행하지 않는다.
+
+Timeout·취소·완료 시 waiter와 timer를 해제한다. Timeout은 Indexer의 진행 중인 append를
+취소하지 않는다. 기존 `KafkaApis` 응답 callback을 그대로 사용하므로 quota, 권한 오류,
+physical base offset, 혼합 토픽 응답 형식도 유지한다. 테스트는 등록/커밋 경합, HW 지연,
+timeout 후 background 인덱싱, source lifetime 교체, 실제 append 범위와 공유 deadline,
+`acks=0/1/all`, 일반·global·실패 파티션 혼합을 검증한다. 실제 브로커 테스트에서는
+`acks=1/all` 응답 직후 committed index를 확인하고 인덱스 리더 변경 후에도 같은 계약을 확인한다.
 
 ## 9. 복구와 미확정 write
 
@@ -836,8 +863,9 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 
 기준 브랜치에서 재사용하거나 확장할 지점은 다음과 같다.
 
-- [KafkaApis](../../core/src/main/scala/kafka/server/KafkaApis.scala):
-  Produce response callback에 인덱싱 완료 대기를 연결한다.
+- [KafkaApis](../../core/src/main/scala/kafka/server/KafkaApis.scala) 및
+  [ReplicaManager](../../core/src/main/scala/kafka/server/ReplicaManager.scala):
+  실제 append 결과로 인덱싱 완료를 기다린 뒤 기존 Produce response callback을 호출한다.
 - [CoordinatorRuntime](../../coordinator-common/src/main/java/org/apache/kafka/coordinator/common/runtime/CoordinatorRuntime.java):
   write 실행 시 HW·epoch context, HW/rollback hook을 추가한다. 빈 레코드 결과도
   pending write를 기다리는 기존 계약을 고려하며, 이 동작을 임의로 우회하지 않는다.
@@ -854,7 +882,7 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
 복구의 progress 재확인과 source leader 변경, 모든 source replica의 보존 경계를 연결했다.
-후속 구현 순서는 Produce 대기, global 조회/읽기,
+Produce 대기까지 연결했다. 후속 구현 순서는 global 조회/읽기,
 트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.

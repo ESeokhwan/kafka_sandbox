@@ -39,6 +39,8 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShar
 import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotSame, assertTrue}
 import org.junit.jupiter.api.{Test, Timeout}
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 
 import java.nio.ByteBuffer
 import java.time.Duration
@@ -99,12 +101,11 @@ class GlobalSequenceCoordinatorIntegrationTest {
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
         props.put(ProducerConfig.ACKS_CONFIG, "all")
-        val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
-        val physicalOffset = try {
-          producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("ordered", 0, null, Array[Byte](1, 2, 3)))
-            .get(30, TimeUnit.SECONDS).offset()
-        } finally producer.close()
+        // Inject data directly: this test deliberately disabled the automatic indexer above.
         val dataPartition = new TopicPartition("ordered", 0)
+        val physicalOffset = broker.replicaManager.onlinePartition(dataPartition).get.appendRecordsToLeader(
+          MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Array[Byte](1, 2, 3))),
+          AppendOrigin.CLIENT, -1, RequestLocal.noCaching).firstOffset
         val dataHw = broker.replicaManager.localLog(dataPartition).get.highWatermark
         assertTrue(dataHw > physicalOffset)
         val sourceEpoch = broker.metadataCache.getImage().topics().getTopic(topicId).partitions().get(0).leaderEpoch
@@ -229,16 +230,16 @@ class GlobalSequenceCoordinatorIntegrationTest {
         val registered = source.indexRoutingManager.registerIndexer(registration, 30000).get(35, TimeUnit.SECONDS)
         assertTrue(registered.value.registered())
         val owner = registered.value.indexer().get()
-        val props = cluster.clientProperties()
-        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
-        props.put(ProducerConfig.ACKS_CONFIG, "all")
-        val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
-        try {
+        locally {
           val reader = new GlobalSequenceSourceReader(source.replicaManager)
           def produce(): GlobalSequenceSourceReader.ReadResult = {
-            val offset = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("routed", 0, null, Array[Byte](1)))
-              .get(30, TimeUnit.SECONDS).offset()
+            val sourcePartition = source.replicaManager.onlinePartition(new TopicPartition("routed", 0)).get
+            val info = sourcePartition.appendRecordsToLeader(
+              MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Array[Byte](1))),
+              AppendOrigin.CLIENT, -1, RequestLocal.noCaching)
+            val offset = info.firstOffset
+            TestUtils.waitUntilTrue(() => sourcePartition.log.get.highWatermark > info.lastOffset,
+              "Manually appended data did not reach its HW", 30000)
             val read = reader.read(partition, sourceEpoch, offset, maxBytes = 1)
             assertEquals(GlobalSequenceSourceReader.BATCH, read.status)
             assertEquals(offset, read.batch.get.baseOffset())
@@ -270,13 +271,14 @@ class GlobalSequenceCoordinatorIntegrationTest {
           val next = source.indexRoutingManager.appendIndex(request(second, first.baseOffset()), 30000).get(35, TimeUnit.SECONDS)
           assertEquals(AppendStatus.INDEXED, next.value.status())
           assertEquals(1L, next.value.globalBaseOffset().getAsLong)
-        } finally producer.close()
+        }
       } finally admin.close()
     } finally cluster.close()
   }
 
-  @Test
-  def testAutomaticIndexingAcrossSourcePartitionsAndIndexLeaderChange(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("1", "all"))
+  def testAutomaticIndexingAcrossSourcePartitionsAndIndexLeaderChange(acks: String): Unit = {
     val cluster = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder()
       .setNumBrokerNodes(3).setNumControllerNodes(1).build())
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "2")
@@ -313,13 +315,18 @@ class GlobalSequenceCoordinatorIntegrationTest {
         val props = cluster.clientProperties()
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
-        props.put(ProducerConfig.ACKS_CONFIG, "all")
+        props.put(ProducerConfig.ACKS_CONFIG, acks)
+        if (acks == "1") props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false")
         val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
         def produceAndAwait(start: Int): Unit = {
           for (offset <- start until start + 3; partition <- 0 to 1) {
             val result = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("automatic", partition, null, Array[Byte](1)))
               .get(30, TimeUnit.SECONDS)
             assertEquals(offset.toLong, result.offset(), "Produce still returns the physical offset")
+            val committed = brokers(partition).indexRoutingManager.describePartition(keys(partition), 5000)
+              .get(6, TimeUnit.SECONDS).value.committedProgress()
+            assertTrue(committed.isPresent && committed.get().lastOffset() >= result.offset(),
+              "A successful Produce response must already be covered by committed index progress")
           }
           keys.foreach { key =>
             TestUtils.waitUntilTrue(() => Try(brokers.head.indexRoutingManager.describePartition(key, 5000)

@@ -85,7 +85,8 @@ import scala.jdk.OptionConverters.RichOptional
  */
 case class LogAppendResult(info: LogAppendInfo,
                            exception: Option[Throwable],
-                           hasCustomErrorMessage: Boolean) {
+                           hasCustomErrorMessage: Boolean,
+                           globalSequenceReceipt: Option[GlobalSequenceAppendReceipt] = None) {
   def error: Errors = exception match {
     case None => Errors.NONE
     case Some(e) => Errors.forException(e)
@@ -236,6 +237,12 @@ class ReplicaManager(val config: KafkaConfig,
   private val addPartitionsToTxnConfig = new AddPartitionsToTxnConfig(config)
   private val shareFetchPurgatoryName = "ShareFetch"
   private val delayedShareFetchTimer = new SystemTimer(shareFetchPurgatoryName)
+
+  @volatile private var globalSequenceIndexerManager: Option[GlobalSequenceIndexerManager] = None
+
+  private[server] def setGlobalSequenceIndexerManager(manager: GlobalSequenceIndexerManager): Unit = {
+    globalSequenceIndexerManager = Some(manager)
+  }
 
   val delayedProducePurgatory = delayedProducePurgatoryParam.getOrElse(
     new DelayedOperationPurgatory[DelayedProduce](
@@ -623,6 +630,7 @@ class ReplicaManager(val config: KafkaConfig,
    *                                      thread calling this method
    * @param actionQueue                   the action queue to use. ReplicaManager#defaultActionQueue is used by default.
    * @param verificationGuards            the mapping from topic partition to verification guards if transaction verification is used
+   * @param globalSequenceDeadlineNs      client Produce deadline shared by replication and index waits; internal writes omit it
    */
   def appendRecordsToLeader(
     requiredAcks: Short,
@@ -679,7 +687,8 @@ class ReplicaManager(val config: KafkaConfig,
                     responseCallback: Map[TopicIdPartition, PartitionResponse] => Unit,
                     recordValidationStatsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit = _ => (),
                     requestLocal: RequestLocal = RequestLocal.noCaching,
-                    verificationGuards: Map[TopicPartition, VerificationGuard] = Map.empty): Unit = {
+                    verificationGuards: Map[TopicPartition, VerificationGuard] = Map.empty,
+                    globalSequenceDeadlineNs: Option[Long] = None): Unit = {
     if (!isValidRequiredAcks(requiredAcks)) {
       sendInvalidRequiredAcksResponse(entriesPerPartition, responseCallback)
       return
@@ -701,13 +710,26 @@ class ReplicaManager(val config: KafkaConfig,
       k -> v.info.recordValidationStats
     })
 
+    val receipts = localProduceResults.flatMap { case (tp, result) => result.globalSequenceReceipt.map(tp -> _) }
+    val waitForIndex = requiredAcks != 0 && globalSequenceDeadlineNs.nonEmpty && receipts.nonEmpty
+    val responseWithIndex: Map[TopicIdPartition, PartitionResponse] => Unit = if (!waitForIndex) responseCallback
+    else responses => GlobalSequenceProduce.awaitIndexes(responses, receipts, receipt => {
+      globalSequenceIndexerManager match {
+        case Some(manager) => manager.awaitIndexed(receipt, globalSequenceDeadlineNs.get)
+        case None => CompletableFuture.failedFuture(Errors.NOT_ENOUGH_REPLICAS.exception())
+      }
+    }, responseCallback)
+    val remainingTimeout = if (waitForIndex)
+      math.max(0L, math.min(timeout, TimeUnit.NANOSECONDS.toMillis(globalSequenceDeadlineNs.get - time.nanoseconds())))
+    else timeout
+
     maybeAddDelayedProduce(
       requiredAcks,
-      timeout,
+      remainingTimeout,
       entriesPerPartition,
       localProduceResults,
       produceStatus,
-      responseCallback
+      responseWithIndex
     )
   }
 
@@ -738,6 +760,8 @@ class ReplicaManager(val config: KafkaConfig,
                           requestLocal: RequestLocal = RequestLocal.noCaching,
                           transactionSupportedOperation: TransactionSupportedOperation): Unit = {
 
+    // One budget includes transaction verification, the local append, replication and index commit.
+    val globalSequenceDeadlineNs = time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(math.max(0L, timeout))
     val transactionalProducerInfo = mutable.HashSet[(Long, Short)]()
     val topicPartitionBatchInfo = mutable.Map[TopicPartition, Int]()
     val topicIds = entriesPerPartition.keys.map(tp => tp.topic() -> tp.topicId()).toMap
@@ -803,7 +827,8 @@ class ReplicaManager(val config: KafkaConfig,
         responseCallback = newResponseCallback,
         recordValidationStatsCallback = recordValidationStatsCallback,
         requestLocal = newRequestLocal,
-        verificationGuards = verificationGuards
+        verificationGuards = verificationGuards,
+        globalSequenceDeadlineNs = Some(globalSequenceDeadlineNs)
       )
     }
 
@@ -1405,6 +1430,10 @@ class ReplicaManager(val config: KafkaConfig,
       } else {
         try {
           val partition = getPartitionOrException(topicIdPartition)
+          // Capture the source lifetime before appending; an epoch change during the append fails
+          // the later wait conservatively instead of acknowledging a reused physical offset.
+          val sourceEpoch = partition.getLeaderEpoch
+          val sourceTopicId = partition.topicId
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal,
             verificationGuards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL))
           val numAppendedMessages = info.numMessages
@@ -1419,7 +1448,14 @@ class ReplicaManager(val config: KafkaConfig,
             trace(s"${records.sizeInBytes} written to log $topicIdPartition beginning at offset " +
               s"${info.firstOffset} and ending at offset ${info.lastOffset}")
 
-          (topicIdPartition, LogAppendResult(info, exception = None, hasCustomErrorMessage = false))
+          val receipt = if (origin == AppendOrigin.CLIENT && partition.log.exists(_.config.globalSequenceEnabled) &&
+            info.firstOffset >= 0 && info.lastOffset >= info.firstOffset) {
+            // Check the config after append too: a concurrent initial leader/log installation
+            // must not let an opted-in append bypass the index wait.
+            Some(GlobalSequenceAppendReceipt(partition, sourceTopicId.getOrElse(topicIdPartition.topicId()),
+              sourceEpoch, info.firstOffset, info.lastOffset))
+          } else None
+          (topicIdPartition, LogAppendResult(info, exception = None, hasCustomErrorMessage = false, receipt))
 
         } catch {
           // NOTE: Failed produce requests metric is not incremented for known exceptions

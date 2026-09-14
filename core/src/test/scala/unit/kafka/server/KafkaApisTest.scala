@@ -2832,7 +2832,8 @@ class KafkaApisTest extends Logging {
       responseCallback.capture(),
       any(),
       ArgumentMatchers.eq(requestLocal),
-      any()
+      any(),
+      any[Option[Long]]()
     )).thenAnswer(_ => responseCallback.getValue.apply(Map(new TopicIdPartition(topicId,tp2) -> new PartitionResponse(Errors.NONE))))
     kafkaApis = createKafkaApis()
     kafkaApis.handleWriteTxnMarkersRequest(request, requestLocal)
@@ -2887,7 +2888,9 @@ class KafkaApisTest extends Logging {
       any(),
       any(),
       ArgumentMatchers.eq(requestLocal),
-      any())
+      any(),
+      any[Option[Long]]()
+    )
   }
 
   @Test
@@ -2965,7 +2968,8 @@ class KafkaApisTest extends Logging {
       responseCallback.capture(),
       any(),
       ArgumentMatchers.eq(RequestLocal.noCaching),
-      any()
+      any(),
+      any[Option[Long]]()
     )).thenAnswer { _ =>
       responseCallback.getValue.apply(
         entriesPerPartition.getValue.keySet.map { tp =>

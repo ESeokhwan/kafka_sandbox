@@ -6224,6 +6224,71 @@ class ReplicaManagerTest {
 
   }
 
+  @ParameterizedTest
+  @ValueSource(ints = Array(-1, 0, 1))
+  def testGlobalProduceUsesActualAppendRangeAndSharedDeadline(acks: Int): Unit = {
+    val ordered = new TopicIdPartition(Uuid.randomUuid(), 0, "ordered")
+    val ordinary = new TopicIdPartition(Uuid.randomUuid(), 0, "ordinary")
+    val missing = new TopicIdPartition(Uuid.randomUuid(), 0, "missing")
+    val rm = setupReplicaManagerWithMockedPurgatories(new MockTimer(time), brokerId = 0)
+    try {
+      val delta = new TopicsDelta(TopicsImage.EMPTY)
+      for (tp <- Seq(ordered, ordinary)) {
+        delta.replay(new TopicRecord().setName(tp.topic()).setTopicId(tp.topicId()))
+        delta.replay(new PartitionRecord().setTopicId(tp.topicId()).setPartitionId(0)
+          .setLeader(0).setLeaderEpoch(0).setPartitionEpoch(0)
+          .setReplicas(util.List.of(0)).setIsr(util.List.of(0)))
+      }
+      rm.applyDelta(delta, imageFromTopics(delta.apply()))
+      val source = rm.onlinePartition(ordered.topicPartition()).get
+      val configProps = new Properties()
+      configProps.put(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true")
+      configProps.put(TopicConfig.CLEANUP_POLICY_CONFIG, "delete")
+      source.log.get.updateConfig(new LogConfig(configProps))
+      source.appendRecordsToLeader(MemoryRecords.withRecords(Compression.NONE,
+        new SimpleRecord(Array[Byte](1)), new SimpleRecord(Array[Byte](2))), AppendOrigin.CLIENT, 1, RequestLocal.noCaching)
+
+      val manager = mock(classOf[GlobalSequenceIndexerManager])
+      val wait = new CompletableFuture[Void]()
+      val receipts = ArgumentCaptor.forClass(classOf[GlobalSequenceAppendReceipt])
+      val deadlines = ArgumentCaptor.forClass(classOf[java.lang.Long])
+      when(manager.awaitIndexed(receipts.capture(), deadlines.capture())).thenReturn(wait)
+      rm.setGlobalSequenceIndexerManager(manager)
+      val startNs = time.nanoseconds()
+      var responses: Map[TopicIdPartition, PartitionResponse] = Map.empty
+      var callbacks = 0
+      rm.handleProduceAppend(timeout = 1000, requiredAcks = acks.toShort, internalTopicsAllowed = false,
+        transactionalId = null, entriesPerPartition = Map(
+          ordered -> MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Array[Byte](3)),
+            new SimpleRecord(Array[Byte](4)), new SimpleRecord(Array[Byte](5))),
+          ordinary -> TestUtils.singletonRecords(Array[Byte](1)), missing -> TestUtils.singletonRecords(Array[Byte](1))),
+        responseCallback = result => { responses = result; callbacks += 1 },
+        recordValidationStatsCallback = _ => time.sleep(200),
+        transactionSupportedOperation = GENERIC_ERROR_SUPPORTED)
+      assertEquals(5L, source.log.get.highWatermark)
+      if (acks == 0) {
+        verifyNoInteractions(manager)
+        assertEquals(1, callbacks)
+      } else {
+        assertEquals(0, callbacks, "Data acknowledgement must wait for the index commit")
+        val receipt = receipts.getValue
+        assertSame(source, receipt.source)
+        assertEquals(ordered.topicId(), receipt.topicId)
+        assertEquals(0, receipt.leaderEpoch)
+        assertEquals(2L, receipt.firstOffset)
+        assertEquals(4L, receipt.lastOffset)
+        assertEquals(startNs + TimeUnit.MILLISECONDS.toNanos(1000), deadlines.getValue.longValue())
+        wait.complete(null)
+        assertEquals(1, callbacks)
+      }
+      assertEquals(Errors.NONE, responses(ordered).error)
+      assertEquals(2L, responses(ordered).baseOffset)
+      assertEquals(Errors.NONE, responses(ordinary).error)
+      assertEquals(0L, responses(ordinary).baseOffset)
+      assertEquals(Errors.UNKNOWN_TOPIC_OR_PARTITION, responses(missing).error)
+    } finally rm.shutdown(checkpointHW = false)
+  }
+
   @Test
   def testAppendRecordsToLeader(): Unit = {
     val localId = 0
