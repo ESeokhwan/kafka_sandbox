@@ -32,6 +32,7 @@ import org.apache.kafka.common.metadata.PartitionRecord;
 import org.apache.kafka.common.metadata.TopicRecord;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorResult;
@@ -117,12 +118,14 @@ class GlobalSequenceCoordinatorServiceTest {
         delta.replay(new ConfigRecord().setResourceType(ConfigResource.Type.TOPIC.id()).setResourceName(topic).setName(key).setValue(value));
     }
 
-    private static class Context {
+    static class Context {
+        final MockTime time = new MockTime();
+        final GlobalSequenceLookup.Reader reader = mock(GlobalSequenceLookup.Reader.class);
         final MockTimer timer = new MockTimer();
         final CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime = mock(CoordinatorRuntime.class);
         final AtomicInteger creations = new AtomicInteger();
         final GlobalSequenceCoordinatorService service = new GlobalSequenceCoordinatorService(
-            new LogContext(), config(), runtime, timer, creations::incrementAndGet);
+            new LogContext(), config(), runtime, timer, creations::incrementAndGet, reader, time);
 
         void start() {
             service.startup(() -> 2);

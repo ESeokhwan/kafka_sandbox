@@ -26,7 +26,7 @@ import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests.{AbstractRequest, AbstractResponse}
 import org.apache.kafka.common.utils.Time
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinator
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceLookup}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard._
 import org.apache.kafka.image.MetadataImage
 import org.apache.kafka.server.util.Scheduler
@@ -79,6 +79,23 @@ class IndexRoutingManager private[server](
       transport.startup()
       started = true
     }
+  }
+
+  def lookupIndex(request: GlobalSequenceLookup.Request): CompletableFuture[RoutedResult[GlobalSequenceLookup.Result]] = {
+    val key = new PartitionKey(request.topicId(), 0)
+    val deadline = time.hiResClockMs() + request.timeoutMs()
+    def remainingRequest = new GlobalSequenceLookup.Request(request.topicId(), request.startOffset(), request.endOffset(),
+      request.maxBatches(), math.max(1L, deadline - time.hiResClockMs()).toInt)
+    submit(key, None, request.timeoutMs())(
+      route => coordinator.lookupIndex(remainingRequest, route.leaderEpoch),
+      route => GlobalSequenceProtocol.lookupRequest(remainingRequest, route.leaderEpoch),
+      response => GlobalSequenceProtocol.lookupResponse(request, response),
+      (result, route) => {
+        checkEpoch(result.snapshot().leaderEpoch(), route)
+        if (result.snapshot().indexTopicId() != route.indexTopicId || result.snapshot().indexPartition() != route.partition)
+          throw new NotCoordinatorException("Lookup response identifies a different index snapshot")
+      },
+      _ => false)
   }
 
   def describePartition(partition: PartitionKey, timeoutMs: Long): CompletableFuture[RoutedResult[PartitionDescription]] =

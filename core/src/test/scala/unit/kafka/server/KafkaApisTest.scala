@@ -195,6 +195,7 @@ class KafkaApisTest extends Logging {
       txnCoordinator = txnCoordinator,
       shareCoordinator = shareCoordinator,
       globalSequenceCoordinator = globalSequenceCoordinator,
+      indexRoutingManager = mock(classOf[IndexRoutingManager]),
       autoTopicCreationManager = autoTopicCreationManager,
       brokerId = brokerId,
       config = config,

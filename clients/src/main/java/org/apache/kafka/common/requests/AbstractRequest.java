@@ -358,6 +358,10 @@ public abstract class AbstractRequest implements AbstractRequestResponse {
                 return DescribeGlobalSequencePartitionRequest.parse(readable, apiVersion);
             case APPEND_GLOBAL_SEQUENCE_INDEX:
                 return AppendGlobalSequenceIndexRequest.parse(readable, apiVersion);
+            case LOOKUP_GLOBAL_SEQUENCE:
+                return LookupGlobalSequenceRequest.parse(readable, apiVersion);
+            case READ_GLOBAL_SEQUENCE_INDEX:
+                return ReadGlobalSequenceIndexRequest.parse(readable, apiVersion);
             case DELETE_SHARE_GROUP_OFFSETS:
                 return DeleteShareGroupOffsetsRequest.parse(readable, apiVersion);
             default:

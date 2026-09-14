@@ -1082,6 +1082,8 @@ public class RequestResponseTest {
             case REGISTER_GLOBAL_SEQUENCE_INDEXER: return new RegisterGlobalSequenceIndexerRequest.Builder(new org.apache.kafka.common.message.RegisterGlobalSequenceIndexerRequestData()).build(version);
             case DESCRIBE_GLOBAL_SEQUENCE_PARTITION: return new DescribeGlobalSequencePartitionRequest.Builder(new org.apache.kafka.common.message.DescribeGlobalSequencePartitionRequestData()).build(version);
             case APPEND_GLOBAL_SEQUENCE_INDEX: return new AppendGlobalSequenceIndexRequest.Builder(new org.apache.kafka.common.message.AppendGlobalSequenceIndexRequestData()).build(version);
+            case LOOKUP_GLOBAL_SEQUENCE: return new LookupGlobalSequenceRequest.Builder(new org.apache.kafka.common.message.LookupGlobalSequenceRequestData()).build(version);
+            case READ_GLOBAL_SEQUENCE_INDEX: return new ReadGlobalSequenceIndexRequest.Builder(new org.apache.kafka.common.message.ReadGlobalSequenceIndexRequestData()).build(version);
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsRequest(version);
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }
@@ -1180,6 +1182,8 @@ public class RequestResponseTest {
             case REGISTER_GLOBAL_SEQUENCE_INDEXER: return new RegisterGlobalSequenceIndexerResponse(new org.apache.kafka.common.message.RegisterGlobalSequenceIndexerResponseData());
             case DESCRIBE_GLOBAL_SEQUENCE_PARTITION: return new DescribeGlobalSequencePartitionResponse(new org.apache.kafka.common.message.DescribeGlobalSequencePartitionResponseData());
             case APPEND_GLOBAL_SEQUENCE_INDEX: return new AppendGlobalSequenceIndexResponse(new org.apache.kafka.common.message.AppendGlobalSequenceIndexResponseData());
+            case LOOKUP_GLOBAL_SEQUENCE: return new LookupGlobalSequenceResponse(new org.apache.kafka.common.message.LookupGlobalSequenceResponseData());
+            case READ_GLOBAL_SEQUENCE_INDEX: return new ReadGlobalSequenceIndexResponse(new org.apache.kafka.common.message.ReadGlobalSequenceIndexResponseData());
             case DELETE_SHARE_GROUP_OFFSETS: return createDeleteShareGroupOffsetsResponse();
             default: throw new IllegalArgumentException("Unknown API key " + apikey);
         }

@@ -17,12 +17,15 @@
 
 # Ordered global sequence topic
 
+1~18번 커밋별 구현 범위와 완료 현황은 [구현 계획](global-sequence-implementation-plan.md)에 정리한다.
+
 상태: 1차 구현을 위한 설계 계약. 모듈·설정, 저장 형식, Runtime context/hook,
 Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연결까지 구현했다.
 내부 RPC·리더 라우팅·원본 로그 Reader와 파티션별 자동 Indexer까지 구현했다.
 장애 복구의 progress 재확인과 source leader 변경을 연결했다.
 리더·follower·future replica의 원본 보존 경계를 연결했다.
-Produce 응답을 데이터 HW와 인덱스 커밋 이후에 완료하도록 연결했다. Global 읽기는 후속 구현 단계다.
+Produce 응답을 데이터 HW와 인덱스 커밋 이후에 완료하도록 연결했다. Global 인덱스 조회 API까지 구현했다.
+Global 데이터 Fetch와 트랜잭션 격리는 후속 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -275,7 +278,7 @@ lifecycle을 검증한다. 통합 테스트는 별도 수동 append 없이 Produ
 Source gap과 predecessor 불일치는 같은 등록 barrier 이후 authoritative progress를 재확인한다.
 재확인 후에도 복구할 수 없으면 읽기 위치를 건너뛰지 않고 오류로 중단한다.
 Retention/DeleteRecords에는 committed progress 기반 보존 경계를 적용한다.
-Produce 응답은 데이터 HW와 인덱스 커밋을 기다린다. Global 조회/Fetch API는 후속 단계다.
+Produce 응답은 데이터 HW와 인덱스 커밋을 기다린다. Global 인덱스 조회는 구현했으며 데이터 Fetch API는 후속 단계다.
 
 ### 원본 로그 Reader 구현
 
@@ -787,6 +790,44 @@ committed global end와 같으면 빈 결과를 반환하며, 그보다 크면 �
 start > end는 잘못된 요청이고, 유효한 빈 범위는 빈 결과다. Pagination으로 일부만 반환할
 때는 다음 미처리 위치를 명시한다. 미커밋 할당은 노출하지 않는다.
 
+### Global lookup v0 구현 (14번)
+
+`LookupGlobalSequence`(API 96)는 어느 브로커에서나 받을 수 있는 클라이언트 조회다.
+Topic UUID로 토픽을 확인하고 READ 권한을 검사한 뒤 `IndexRoutingManager`가 인덱스 리더로
+라우팅한다. 브로커 간에는 별도의 `ReadGlobalSequenceIndex`(API 97)를 사용하며 이 진입점은
+CLUSTER_ACTION을 요구한다. 두 API 번호는 이 브랜치의 번호다. 공개 응답에는 기존 request
+quota와 throttle 처리를 적용하고, 승인된 내부 조회는 request quota에서 제외한다.
+
+요청 필드는 `TopicId`, `GlobalStartOffset`, `GlobalEndOffsetExclusive`, `MaxBatches`,
+`TimeoutMs`다. 페이지 크기는 1~1000개 배치, timeout은 1~30000ms이며 기본값은 각각
+100과 5000ms다. 내부 요청은 예상 `CoordinatorLeaderEpoch`도 전달한다.
+응답은 전체 physical/global 배치 매핑과 배치 내 `SelectedGlobalStartOffset`/
+`SelectedGlobalEndOffset`, `NextGlobalOffset`, `CommittedGlobalEndOffset`을 제공한다.
+`IndexTopicId`, `IndexPartition`, `CoordinatorLeaderEpoch`, `IndexHighWatermark`는 그 페이지가
+사용한 committed snapshot을 나타낸다. Error 응답은 usable 매핑이나 cursor를 제공하지 않는다.
+
+Runtime의 `scheduleReadOperationWithContext`는 active coordinator lock 안에서 실제 epoch와
+committed index HW를 캡처한다. 미커밋 write를 기다리지 않고 같은 시점의 committed global
+end를 얻는다. `GlobalSequenceIndexReader`는 별도 worker에서 이 경계 이하의 인덱스 로그를
+읽으며 BatchIndex/TopicMetadata 쌍과 대상 토픽의 global 연속성을 확인한다. 이 버전은 과거
+매핑 cache 없이 로그를 처음부터 읽는다. 조회 scan은 쓰기 중복 판정이나 신규 할당에 사용하지 않는다.
+
+조회 worker는 브로커별 2개, 대기 큐는 128개다. 한 번의 fetch는 1 MiB를 요청하며 첫 배치를
+포함한 실제 반환 slice가 8 MiB를 넘으면 `MESSAGE_TOO_LARGE`로 거절한다. 한 페이지에는
+최대 1000개 매핑만 보관한다. 큐 포화는 `THROTTLING_QUOTA_EXCEEDED`, deadline 만료는
+`REQUEST_TIMED_OUT`으로 드러난다. Timeout·취소·종료는 대기 timer와 큐 작업을 정리하며
+실행 중인 scan도 deadline/종료를 확인한다. 조회 중 HW가 올라가도 해당 페이지의 경계는 확장하지 않는다.
+
+원본 인덱스 UUID·Partition/log 인스턴스·leader epoch·HW를 읽기 전후와 chunk 사이에 검사한다.
+Scan 후에는 다시 Runtime read 이벤트에서 shard 인스턴스와 epoch·committed 경계·토픽 설정을
+확인한다. 이전 리더의 결과는 현재 상태에 적용하지 않는다. 라우터의 재시도도 요청의 남은
+timeout을 전달한다. 매 페이지의 snapshot은 독립적이며 다음 페이지는 반환된 `NextGlobalOffset`부터
+요청한다. 인덱스 이력은 append-only이므로 이미 커밋된 매핑은 그대로 유지된다.
+
+테스트는 범위/페이지 경계, 중간 배치 선택, 다른 토픽의 레코드가 섞인 로그, 미커밋 tail,
+조회 중 HW 상승, 누락·손상, ACL, timeout·취소 및 epoch/shard 교체를 검증한다. 실제 브로커에서
+로컬/원격 조회, 브로커 재시작, 인덱스 리더 이동 후 pagination을 확인한다.
+
 ### 데이터 읽기
 
 Global fetch는 인덱스 조회 후 각 physical 데이터 리더에서 배치를 읽는다. Physical
@@ -882,7 +923,7 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
 복구의 progress 재확인과 source leader 변경, 모든 source replica의 보존 경계를 연결했다.
-Produce 대기까지 연결했다. 후속 구현 순서는 global 조회/읽기,
+Produce 대기와 global 인덱스 조회까지 연결했다. 후속 구현 순서는 global 데이터 Fetch,
 트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.

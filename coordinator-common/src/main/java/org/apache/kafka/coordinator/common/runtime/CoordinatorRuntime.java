@@ -1541,6 +1541,11 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         T generateResponse(S state, long offset) throws KafkaException;
     }
 
+    /** A read operation with the committed offset and the actual active coordinator epoch. */
+    public interface CoordinatorReadOperationWithContext<S, T> {
+        T generateResponse(S state, CoordinatorReadContext context) throws KafkaException;
+    }
+
     /**
      * A coordinator that reads the committed coordinator state.
      *
@@ -1560,7 +1565,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         /**
          * The read operation to execute.
          */
-        final CoordinatorReadOperation<S, T> op;
+        final CoordinatorReadOperationWithContext<S, T> op;
 
         /**
          * The future that will be completed with the response
@@ -1589,7 +1594,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         CoordinatorReadEvent(
             String name,
             TopicPartition tp,
-            CoordinatorReadOperation<S, T> op
+            CoordinatorReadOperationWithContext<S, T> op
         ) {
             this.tp = tp;
             this.name = name;
@@ -1618,7 +1623,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                     // Execute the read operation.
                     response = op.generateResponse(
                         context.coordinator.coordinator(),
-                        context.coordinator.lastCommittedOffset()
+                        new CoordinatorReadContext(context.coordinator.lastCommittedOffset(), context.epoch)
                     );
 
                     // The response can be completed immediately.
@@ -2403,6 +2408,16 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         String name,
         TopicPartition tp,
         CoordinatorReadOperation<S, T> op
+    ) {
+        return scheduleReadOperationWithContext(name, tp, (shard, context) ->
+            op.generateResponse(shard, context.highWatermark()));
+    }
+
+    /** Schedules a committed read; captures HW and epoch under the active coordinator lock. */
+    public <T> CompletableFuture<T> scheduleReadOperationWithContext(
+        String name,
+        TopicPartition tp,
+        CoordinatorReadOperationWithContext<S, T> op
     ) {
         throwIfNotRunning();
         log.debug("Scheduled execution of read operation {}.", name);

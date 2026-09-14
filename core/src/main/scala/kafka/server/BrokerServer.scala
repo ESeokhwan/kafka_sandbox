@@ -471,6 +471,7 @@ class BrokerServer(
         txnCoordinator = transactionCoordinator,
         shareCoordinator = shareCoordinator,
         globalSequenceCoordinator = globalSequenceCoordinator,
+        indexRoutingManager = indexRoutingManager,
         autoTopicCreationManager = autoTopicCreationManager,
         brokerId = config.nodeId,
         config = config,
@@ -676,6 +677,7 @@ class BrokerServer(
       .withTimer(timer)
       .withLoader(loader)
       .withWriter(new CoordinatorPartitionWriter(replicaManager))
+      .withIndexReader(new GlobalSequenceIndexReader(replicaManager, kafkaScheduler, coordinatorTime))
       .withMetrics(metrics)
       .withTopicCreation(() => {
         autoTopicCreationManager.createTopics(Set(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME),

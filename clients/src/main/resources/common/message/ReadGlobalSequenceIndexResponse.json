@@ -1,0 +1,141 @@
+// Licensed to the Apache Software Foundation (ASF) under one or more
+// contributor license agreements.  See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance with
+// the License.  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+{
+  "apiKey": 97,
+  "type": "response",
+  "name": "ReadGlobalSequenceIndexResponse",
+  "validVersions": "0",
+  "flexibleVersions": "0+",
+  "fields": [
+    {
+      "name": "ThrottleTimeMs",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The throttle duration in milliseconds."
+    },
+    {
+      "name": "ErrorCode",
+      "type": "int16",
+      "versions": "0+",
+      "about": "The lookup error, or zero."
+    },
+    {
+      "name": "ErrorMessage",
+      "type": "string",
+      "versions": "0+",
+      "about": "The error description, or null.",
+      "default": "null",
+      "nullableVersions": "0+"
+    },
+    {
+      "name": "TopicId",
+      "type": "uuid",
+      "versions": "0+",
+      "about": "The data topic UUID."
+    },
+    {
+      "name": "IndexTopicId",
+      "type": "uuid",
+      "versions": "0+",
+      "about": "The index topic UUID for the captured snapshot."
+    },
+    {
+      "name": "IndexPartition",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The index partition.",
+      "default": -1
+    },
+    {
+      "name": "CoordinatorLeaderEpoch",
+      "type": "int32",
+      "versions": "0+",
+      "about": "The coordinator epoch for the captured snapshot.",
+      "default": -1
+    },
+    {
+      "name": "IndexHighWatermark",
+      "type": "int64",
+      "versions": "0+",
+      "about": "The exclusive committed index-log boundary for this page.",
+      "default": -1
+    },
+    {
+      "name": "CommittedGlobalEndOffset",
+      "type": "int64",
+      "versions": "0+",
+      "about": "The exclusive global end at the captured snapshot.",
+      "default": -1
+    },
+    {
+      "name": "NextGlobalOffset",
+      "type": "int64",
+      "versions": "0+",
+      "about": "The next unprocessed global offset.",
+      "default": -1
+    },
+    {
+      "name": "Batches",
+      "type": "[]BatchMapping",
+      "versions": "0+",
+      "about": "Committed mappings in global order.",
+      "fields": [
+        {
+          "name": "GlobalBaseOffset",
+          "type": "int64",
+          "versions": "0+",
+          "about": "The full batch global base offset."
+        },
+        {
+          "name": "PhysicalPartition",
+          "type": "int32",
+          "versions": "0+",
+          "about": "The source partition."
+        },
+        {
+          "name": "PhysicalBaseOffset",
+          "type": "int64",
+          "versions": "0+",
+          "about": "The full physical batch base offset."
+        },
+        {
+          "name": "PhysicalLastOffset",
+          "type": "int64",
+          "versions": "0+",
+          "about": "The inclusive physical last offset."
+        },
+        {
+          "name": "RecordCount",
+          "type": "int32",
+          "versions": "0+",
+          "about": "The record count in the full batch."
+        },
+        {
+          "name": "SelectedGlobalStartOffset",
+          "type": "int64",
+          "versions": "0+",
+          "about": "The inclusive selected global start in this batch."
+        },
+        {
+          "name": "SelectedGlobalEndOffset",
+          "type": "int64",
+          "versions": "0+",
+          "about": "The exclusive selected global end in this batch."
+        }
+      ]
+    }
+  ]
+}

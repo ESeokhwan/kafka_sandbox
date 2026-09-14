@@ -81,6 +81,8 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         private Timer timer;
         private Metrics metrics;
         private Runnable createIndexTopic;
+        private GlobalSequenceLookup.Reader indexReader = (request, snapshot, deadline) ->
+            CompletableFuture.failedFuture(new UnsupportedOperationException("Index reader is not configured"));
 
         public Builder(int nodeId, GlobalSequenceCoordinatorConfig config) {
             this.nodeId = nodeId;
@@ -118,6 +120,11 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
             return this;
         }
 
+        public Builder withIndexReader(GlobalSequenceLookup.Reader reader) {
+            this.indexReader = Objects.requireNonNull(reader, "indexReader");
+            return this;
+        }
+
         public GlobalSequenceCoordinatorService build() {
             Objects.requireNonNull(writer, "writer");
             Objects.requireNonNull(loader, "loader");
@@ -148,8 +155,9 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                         .withAppendLingerMs(config.appendLingerMs())
                         .withExecutorService(executor)
                         .build();
-                return new GlobalSequenceCoordinatorService(logContext, config, runtime, timer, createIndexTopic);
+                return new GlobalSequenceCoordinatorService(logContext, config, runtime, timer, createIndexTopic, indexReader, time);
             } catch (RuntimeException e) {
+                Utils.closeQuietly(indexReader, "global sequence index reader");
                 Utils.closeQuietly(processor, "global sequence event processor");
                 executor.shutdown();
                 Utils.closeQuietly(runtimeMetrics, "global sequence runtime metrics");
@@ -165,6 +173,8 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
     private final CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime;
     private final Timer timer;
     private final Runnable createIndexTopic;
+    private final GlobalSequenceLookup.Reader indexReader;
+    private final Time time;
     private volatile boolean active;
     private boolean closed;
     private volatile MetadataImage metadataImage = MetadataImage.EMPTY;
@@ -180,6 +190,22 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         Timer timer,
         Runnable createIndexTopic
     ) {
+        this(logContext, config, runtime, timer, createIndexTopic,
+            (request, snapshot, deadline) -> CompletableFuture.failedFuture(new UnsupportedOperationException("Index reader is not configured")),
+            Time.SYSTEM);
+    }
+
+    GlobalSequenceCoordinatorService(
+        LogContext logContext,
+        GlobalSequenceCoordinatorConfig config,
+        CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime,
+        Timer timer,
+        Runnable createIndexTopic,
+        GlobalSequenceLookup.Reader indexReader,
+        Time time
+    ) {
+        this.indexReader = indexReader;
+        this.time = time;
         this.log = logContext.logger(GlobalSequenceCoordinatorService.class);
         this.config = config;
         this.runtime = runtime;
@@ -368,6 +394,42 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         }
     }
 
+    private record LookupState(GlobalSequenceLookup.Snapshot snapshot, GlobalSequenceCoordinatorShard shard) { }
+
+    @Override
+    public CompletableFuture<GlobalSequenceLookup.Result> lookupIndex(GlobalSequenceLookup.Request request, int expectedCoordinatorEpoch) {
+        try {
+            requireReady();
+            long deadline = time.nanoseconds() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(request.timeoutMs());
+            int partition = partitionFor(request.topicId());
+            TopicPartition tp = indexPartition(partition);
+            return runtime.scheduleReadOperationWithContext("capture-global-lookup", tp, (shard, context) -> {
+                requireReady();
+                requireEnabledTopic(new PartitionKey(request.topicId(), 0));
+                validateCoordinatorEpoch(expectedCoordinatorEpoch, context.leaderEpoch());
+                long globalEnd = shard.committedNextGlobalOffset(request.topicId());
+                if (request.startOffset() > globalEnd)
+                    throw new org.apache.kafka.common.errors.OffsetOutOfRangeException("Global start exceeds the committed end");
+                return new LookupState(new GlobalSequenceLookup.Snapshot(
+                    metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id(), partition,
+                    context.leaderEpoch(), context.highWatermark(), globalEnd), shard);
+            }).thenCompose(state -> indexReader.read(request, state.snapshot(), deadline).thenCompose(result ->
+                runtime.scheduleReadOperationWithContext("validate-global-lookup", tp, (shard, context) -> {
+                    requireReady();
+                    requireEnabledTopic(new PartitionKey(request.topicId(), 0));
+                    validateCoordinatorEpoch(state.snapshot().leaderEpoch(), context.leaderEpoch());
+                    if (shard != state.shard() || context.highWatermark() < state.snapshot().indexHighWatermark() ||
+                        !metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id().equals(state.snapshot().indexTopicId()))
+                        throw new NotCoordinatorException("Global lookup snapshot was invalidated");
+                    if (time.nanoseconds() >= deadline)
+                        throw new org.apache.kafka.common.errors.TimeoutException("Global lookup deadline expired");
+                    return result;
+                })));
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
     private static void validateCoordinatorEpoch(int expected, int actual) {
         if (expected < -1) throw new IllegalArgumentException("expectedCoordinatorEpoch must be -1 or non-negative");
         if (expected >= 0 && expected != actual) {
@@ -429,6 +491,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
             stopTopicCreation();
         }
         // Also close resources when broker startup failed before startup() was called.
+        Utils.closeQuietly(indexReader, "global sequence index reader");
         Utils.closeQuietly(runtime, "global sequence coordinator runtime");
         log.info("Shut down.");
     }

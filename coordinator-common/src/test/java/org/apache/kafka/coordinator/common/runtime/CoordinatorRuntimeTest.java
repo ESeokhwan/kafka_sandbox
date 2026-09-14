@@ -1648,6 +1648,16 @@ public class CoordinatorRuntimeTest {
         // The read is completed immediately.
         assertTrue(read.isDone());
         assertEquals("read-response", read.get(5, TimeUnit.SECONDS));
+
+        // Context reads observe committed progress immediately despite the pending second write.
+        CompletableFuture<CoordinatorReadContext> contextRead = runtime.scheduleReadOperationWithContext(
+            "read-context", TP, (state, context) -> context);
+        assertTrue(contextRead.isDone());
+        assertEquals(new CoordinatorReadContext(2, 10), contextRead.get(5, TimeUnit.SECONDS));
+        assertFalse(write2.isDone());
+        writer.commit(TP, 4);
+        assertEquals(new CoordinatorReadContext(4, 10), runtime.scheduleReadOperationWithContext(
+            "read-context-after-commit", TP, (state, context) -> context).get(5, TimeUnit.SECONDS));
     }
 
     @Test

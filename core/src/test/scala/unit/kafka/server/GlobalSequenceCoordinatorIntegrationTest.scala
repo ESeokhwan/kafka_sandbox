@@ -21,7 +21,7 @@ import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry, NewPar
 import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{ElectionType, TopicPartition, Uuid}
-import org.apache.kafka.common.message.{AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData, RegisterGlobalSequenceIndexerResponseData}
+import org.apache.kafka.common.message.{LookupGlobalSequenceRequestData, AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData, RegisterGlobalSequenceIndexerResponseData}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.compress.Compression
@@ -166,6 +166,15 @@ class GlobalSequenceCoordinatorIntegrationTest {
         } finally resumedProducer.close()
         TestUtils.waitUntilTrue(() => Try(describe().data()).toOption.exists(_.physicalLastOffset() == nextOffset),
           "Automatic indexing did not resume from the committed batch after restart", 30000)
+        val lookup = new LookupGlobalSequenceRequest.Builder(new LookupGlobalSequenceRequestData().setTopicId(topicId)
+          .setGlobalStartOffset(0).setGlobalEndOffsetExclusive(100).setMaxBatches(10).setTimeoutMs(10000)).build()
+        val recoveredPage = IntegrationTestUtils.connectAndReceive[LookupGlobalSequenceResponse](lookup, broker.socketServer,
+          broker.config.interBrokerListenerName).data()
+        assertEquals(Errors.NONE.code(), recoveredPage.errorCode(), recoveredPage.errorMessage())
+        assertEquals(2L, recoveredPage.committedGlobalEndOffset())
+        assertEquals(2, recoveredPage.batches().size())
+        assertEquals(physicalOffset, recoveredPage.batches().get(0).physicalBaseOffset())
+        assertEquals(nextOffset, recoveredPage.batches().get(1).physicalBaseOffset())
       } finally {
         admin.close()
       }
@@ -327,6 +336,28 @@ class GlobalSequenceCoordinatorIntegrationTest {
               .get(6, TimeUnit.SECONDS).value.committedProgress()
             assertTrue(committed.isPresent && committed.get().lastOffset() >= result.offset(),
               "A successful Produce response must already be covered by committed index progress")
+          }
+          // Each broker accepts client lookup, routing to the local or remote index leader.
+          val globalEnd = (start + 3) * 2L
+          brokers.foreach { broker =>
+            var next = 0L
+            while (next < globalEnd) {
+              val request = new LookupGlobalSequenceRequest.Builder(new LookupGlobalSequenceRequestData().setTopicId(topicId)
+                .setGlobalStartOffset(next).setGlobalEndOffsetExclusive(Long.MaxValue).setMaxBatches(2).setTimeoutMs(10000)).build()
+              val page = IntegrationTestUtils.connectAndReceive[LookupGlobalSequenceResponse](request, broker.socketServer,
+                broker.config.interBrokerListenerName).data()
+              assertEquals(Errors.NONE.code(), page.errorCode(), page.errorMessage())
+              assertEquals(globalEnd, page.committedGlobalEndOffset())
+              assertEquals(2, page.batches().size())
+              page.batches().asScala.foreach { mapping =>
+                assertEquals(next, mapping.globalBaseOffset())
+                assertEquals((next % 2).toInt, mapping.physicalPartition())
+                assertEquals(next / 2, mapping.physicalBaseOffset())
+                assertEquals(next + 1, mapping.selectedGlobalEndOffset())
+                next += 1
+              }
+              assertEquals(next, page.nextGlobalOffset())
+            }
           }
           keys.foreach { key =>
             TestUtils.waitUntilTrue(() => Try(brokers.head.indexRoutingManager.describePartition(key, 5000)

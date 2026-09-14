@@ -22,6 +22,7 @@ import kafka.network.RequestChannel;
 import kafka.server.AutoTopicCreationManager;
 import kafka.server.FetchManager;
 import kafka.server.ForwardingManager;
+import kafka.server.IndexRoutingManager;
 import kafka.server.KafkaApis;
 import kafka.server.KafkaConfig;
 import kafka.server.QuotaFactory.QuotaManagers;
@@ -72,6 +73,7 @@ public class KafkaApisBuilder {
     private ClientMetricsManager clientMetricsManager = null;
     private ShareCoordinator shareCoordinator = null;
     private GlobalSequenceCoordinator globalSequenceCoordinator = null;
+    private IndexRoutingManager indexRoutingManager = null;
     private GroupConfigManager groupConfigManager = null;
 
     public KafkaApisBuilder setRequestChannel(RequestChannel requestChannel) {
@@ -96,6 +98,11 @@ public class KafkaApisBuilder {
 
     public KafkaApisBuilder setTxnCoordinator(TransactionCoordinator txnCoordinator) {
         this.txnCoordinator = txnCoordinator;
+        return this;
+    }
+
+    public KafkaApisBuilder setIndexRoutingManager(IndexRoutingManager router) {
+        this.indexRoutingManager = router;
         return this;
     }
 
@@ -203,6 +210,7 @@ public class KafkaApisBuilder {
         if (txnCoordinator == null) throw new RuntimeException("You must set txnCoordinator");
         if (shareCoordinator == null) throw new RuntimeException("You must set shareCoordinator");
         if (globalSequenceCoordinator == null) throw new RuntimeException("You must set globalSequenceCoordinator");
+        if (indexRoutingManager == null) throw new RuntimeException("You must set indexRoutingManager");
         if (autoTopicCreationManager == null) throw new RuntimeException("You must set autoTopicCreationManager");
         if (config == null) config = new KafkaConfig(Map.of());
         if (configRepository == null) throw new RuntimeException("You must set configRepository");
@@ -223,6 +231,7 @@ public class KafkaApisBuilder {
                              txnCoordinator,
                              shareCoordinator,
                              globalSequenceCoordinator,
+                             indexRoutingManager,
                              autoTopicCreationManager,
                              brokerId,
                              config,

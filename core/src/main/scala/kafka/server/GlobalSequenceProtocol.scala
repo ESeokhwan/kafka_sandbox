@@ -18,6 +18,9 @@
 package kafka.server
 
 import org.apache.kafka.common.Uuid
+import org.apache.kafka.common.message.{LookupGlobalSequenceResponseData, ReadGlobalSequenceIndexRequestData, ReadGlobalSequenceIndexResponseData}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup
+import scala.jdk.CollectionConverters._
 import org.apache.kafka.common.errors.InvalidRequestException
 import org.apache.kafka.common.message.{AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData}
 import org.apache.kafka.common.protocol.Errors
@@ -28,6 +31,71 @@ import java.util.{Optional, OptionalLong}
 
 /** Wire conversion for the router. Error responses never supply usable ownership or progress. */
 private[server] object GlobalSequenceProtocol {
+  def lookupRequest(request: GlobalSequenceLookup.Request, epoch: Int): ReadGlobalSequenceIndexRequest.Builder =
+    new ReadGlobalSequenceIndexRequest.Builder(new ReadGlobalSequenceIndexRequestData().setTopicId(request.topicId())
+      .setGlobalStartOffset(request.startOffset()).setGlobalEndOffsetExclusive(request.endOffset())
+      .setMaxBatches(request.maxBatches()).setTimeoutMs(request.timeoutMs()).setCoordinatorLeaderEpoch(epoch))
+
+  def lookupResponse(request: GlobalSequenceLookup.Request, response: AbstractResponse): GlobalSequenceLookup.Result = response match {
+    case reply: ReadGlobalSequenceIndexResponse =>
+      val data = reply.data()
+      val error = Errors.forCode(data.errorCode())
+      if (error != Errors.NONE) throw error.exception()
+      if (data.topicId() != request.topicId()) throw new InvalidRequestException("Lookup response identifies a different topic")
+      val snapshot = new GlobalSequenceLookup.Snapshot(data.indexTopicId(), data.indexPartition(), data.coordinatorLeaderEpoch(),
+        data.indexHighWatermark(), data.committedGlobalEndOffset())
+      val end = math.min(request.endOffset(), snapshot.committedGlobalEnd())
+      if (request.startOffset() > end || data.batches().size() > request.maxBatches())
+        throw new InvalidRequestException("Lookup response violates the range or page size")
+      var next = request.startOffset()
+      val mappings = data.batches().asScala.zipWithIndex.map { case (batch, position) =>
+        val mapping = new GlobalSequenceLookup.Mapping(batch.globalBaseOffset(), new PhysicalBatch(
+          new PartitionKey(request.topicId(), batch.physicalPartition()), batch.physicalBaseOffset(), batch.physicalLastOffset(), batch.recordCount()))
+        if (next >= end || mapping.globalBaseOffset() > next || mapping.globalEndOffset() <= next ||
+          (position > 0 && mapping.globalBaseOffset() != next) || mapping.globalEndOffset() > snapshot.committedGlobalEnd() ||
+          batch.selectedGlobalStartOffset() != next || batch.selectedGlobalEndOffset() != math.min(end, mapping.globalEndOffset()))
+          throw new InvalidRequestException("Lookup mappings are not a contiguous selection of the requested range")
+        next = batch.selectedGlobalEndOffset()
+        mapping
+      }
+      if (next != data.nextGlobalOffset() || (next < end && mappings.size < request.maxBatches()))
+        throw new InvalidRequestException("Lookup response has an inconsistent continuation offset")
+      new GlobalSequenceLookup.Result(snapshot, mappings.toList.asJava, next)
+    case _ => throw new InvalidRequestException("Unexpected global sequence lookup response type")
+  }
+
+  def publicLookupResponse(request: GlobalSequenceLookup.Request, result: GlobalSequenceLookup.Result): LookupGlobalSequenceResponse = {
+    val snapshot = result.snapshot()
+    val data = new LookupGlobalSequenceResponseData().setTopicId(request.topicId()).setIndexTopicId(snapshot.indexTopicId())
+      .setIndexPartition(snapshot.indexPartition()).setCoordinatorLeaderEpoch(snapshot.leaderEpoch())
+      .setIndexHighWatermark(snapshot.indexHighWatermark()).setCommittedGlobalEndOffset(snapshot.committedGlobalEnd())
+      .setNextGlobalOffset(result.nextGlobalOffset())
+    result.mappings().forEach { mapping =>
+      val batch = mapping.batch()
+      data.batches().add(new LookupGlobalSequenceResponseData.BatchMapping().setGlobalBaseOffset(mapping.globalBaseOffset())
+        .setPhysicalPartition(batch.partition().partition()).setPhysicalBaseOffset(batch.baseOffset()).setPhysicalLastOffset(batch.lastOffset())
+        .setRecordCount(batch.recordCount()).setSelectedGlobalStartOffset(math.max(request.startOffset(), mapping.globalBaseOffset()))
+        .setSelectedGlobalEndOffset(math.min(request.endOffset(), mapping.globalEndOffset())))
+    }
+    new LookupGlobalSequenceResponse(data)
+  }
+
+  def internalLookupResponse(request: GlobalSequenceLookup.Request, result: GlobalSequenceLookup.Result): ReadGlobalSequenceIndexResponse = {
+    val snapshot = result.snapshot()
+    val data = new ReadGlobalSequenceIndexResponseData().setTopicId(request.topicId()).setIndexTopicId(snapshot.indexTopicId())
+      .setIndexPartition(snapshot.indexPartition()).setCoordinatorLeaderEpoch(snapshot.leaderEpoch())
+      .setIndexHighWatermark(snapshot.indexHighWatermark()).setCommittedGlobalEndOffset(snapshot.committedGlobalEnd())
+      .setNextGlobalOffset(result.nextGlobalOffset())
+    result.mappings().forEach { mapping =>
+      val batch = mapping.batch()
+      data.batches().add(new ReadGlobalSequenceIndexResponseData.BatchMapping().setGlobalBaseOffset(mapping.globalBaseOffset())
+        .setPhysicalPartition(batch.partition().partition()).setPhysicalBaseOffset(batch.baseOffset()).setPhysicalLastOffset(batch.lastOffset())
+        .setRecordCount(batch.recordCount()).setSelectedGlobalStartOffset(math.max(request.startOffset(), mapping.globalBaseOffset()))
+        .setSelectedGlobalEndOffset(math.min(request.endOffset(), mapping.globalEndOffset())))
+    }
+    new ReadGlobalSequenceIndexResponse(data)
+  }
+
   def describeRequest(partition: PartitionKey): DescribeGlobalSequencePartitionRequest.Builder =
     new DescribeGlobalSequencePartitionRequest.Builder(new DescribeGlobalSequencePartitionRequestData()
       .setTopicId(partition.topicId()).setPartition(partition.partition()))

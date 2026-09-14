@@ -40,6 +40,7 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.{mock, never, verify, when}
 
 import java.util.{List => JList, Optional, OptionalLong}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup
 import java.util.concurrent.CompletableFuture
 import scala.collection.mutable.ArrayBuffer
 
@@ -97,6 +98,33 @@ class IndexRoutingManagerTest {
     val router = new IndexRoutingManager(1, 2, new ListenerName("PLAINTEXT"), () => metadata, coordinator, transport, time.scheduler, time)
     router.startup()
     override def close(): Unit = { router.close(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testGlobalLookupUsesLocalAndRemoteRoutesAndKeepsOneDeadline(): Unit = {
+    val lookup = new GlobalSequenceLookup.Request(topicId, 0, 3, 1, 1000)
+    def result(epoch: Int) = new GlobalSequenceLookup.Result(new GlobalSequenceLookup.Snapshot(indexId, 1, epoch, 4, 3),
+      JList.of(new GlobalSequenceLookup.Mapping(0, batch)), 3)
+    val local = new Context(image(leader = 1))
+    try {
+      when(local.coordinator.lookupIndex(lookup, 10)).thenReturn(CompletableFuture.completedFuture(result(10)))
+      assertEquals(result(10), local.router.lookupIndex(lookup).join().value)
+      assertTrue(local.transport.sent.isEmpty)
+    } finally local.close()
+    val remote = new Context
+    try {
+      val future = remote.router.lookupIndex(lookup)
+      assertTrue(remote.transport.sent.head.request.isInstanceOf[ReadGlobalSequenceIndexRequest])
+      remote.metadata = image(epoch = 11)
+      remote.transport.sent.head.future.complete(GlobalSequenceProtocol.internalLookupResponse(lookup, result(10)))
+      assertFalse(future.isDone)
+      remote.time.sleep(100)
+      val retry = remote.transport.sent.last.request.asInstanceOf[ReadGlobalSequenceIndexRequest].data()
+      assertEquals(11, retry.coordinatorLeaderEpoch())
+      assertEquals(900, retry.timeoutMs())
+      remote.transport.sent.last.future.complete(GlobalSequenceProtocol.internalLookupResponse(lookup, result(11)))
+      assertEquals(result(11), future.join().value)
+    } finally remote.close()
   }
 
   private def describeReply(base: Long = -1, last: Long = -1, count: Int = 0): DescribeGlobalSequencePartitionResponse =
