@@ -17,7 +17,7 @@
   "apiKey": 98,
   "type": "response",
   "name": "FetchGlobalSequenceResponse",
-  "validVersions": "0",
+  "validVersions": "0-1",
   "flexibleVersions": "0+",
   "fields": [
     {
@@ -142,6 +142,13 @@
           "about": "The complete original batch, retaining physical offsets, CRC and producer metadata."
         }
       ]
+    },
+    {
+      "name": "TransactionPending",
+      "type": "bool",
+      "versions": "1+",
+      "about": "True when the first unprocessed global range is not below its source LSO. Resume at NextGlobalOffset.",
+      "default": false
     }
   ]
 }

@@ -54,7 +54,7 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
       val name = metadata.getTopicName(body.data().topicId())
       if (name.isEmpty) throw new UnknownTopicIdException("Unknown global sequence topic UUID")
       if (!auth.authorize(request.context, READ, TOPIC, name.get())) throw new TopicAuthorizationException(name.get())
-      val fetch = GlobalSequenceFetch.request(body.data())
+      val fetch = GlobalSequenceFetch.request(body.data(), body.version())
       manager.fetch(fetch).handle[Unit] { (response, error) =>
         send(if (error == null) response else body.getErrorResponse(0, error))
       }
@@ -73,9 +73,10 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
     }
     try {
       auth.authorizeClusterOperation(request, CLUSTER_ACTION)
+      val isolation = GlobalSequenceFetch.isolation(body.data().isolationLevel(), body.version())
       val batch = GlobalSequenceFetch.physical(body.data())
       val deadline = time.nanoseconds() + body.data().timeoutMs().toLong * 1000000L
-      manager.readLocal(batch, body.data().sourceLeaderEpoch(), deadline).handle[Unit] { (data, error) =>
+      manager.readLocal(batch, body.data().sourceLeaderEpoch(), deadline, isolation).handle[Unit] { (data, error) =>
         send(if (error == null) GlobalSequenceFetch.dataResponse(batch, data) else body.getErrorResponse(0, error))
       }
     } catch {

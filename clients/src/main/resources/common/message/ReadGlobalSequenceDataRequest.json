@@ -17,7 +17,7 @@
   "apiKey": 99,
   "type": "request",
   "name": "ReadGlobalSequenceDataRequest",
-  "validVersions": "0",
+  "validVersions": "0-1",
   "flexibleVersions": "0+",
   "listeners": [
     "broker"
@@ -66,6 +66,13 @@
       "versions": "0+",
       "about": "Remaining timeout from 1 to 30000 milliseconds.",
       "default": 5000
+    },
+    {
+      "name": "IsolationLevel",
+      "type": "int8",
+      "versions": "1+",
+      "about": "READ_UNCOMMITTED (0) or READ_COMMITTED (1).",
+      "default": 0
     }
   ]
 }

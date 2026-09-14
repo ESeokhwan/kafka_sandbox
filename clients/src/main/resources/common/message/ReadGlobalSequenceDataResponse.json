@@ -17,7 +17,7 @@
   "apiKey": 99,
   "type": "response",
   "name": "ReadGlobalSequenceDataResponse",
-  "validVersions": "0",
+  "validVersions": "0-1",
   "flexibleVersions": "0+",
   "fields": [
     {
@@ -71,9 +71,49 @@
       "name": "Records",
       "type": "records",
       "versions": "0+",
-      "about": "One original complete physical batch, or null on error.",
+      "about": "One original complete batch; null on error, empty for pending or aborted READ_COMMITTED reads.",
       "nullableVersions": "0+",
       "default": "null"
+    },
+    {
+      "name": "LastStableOffset",
+      "type": "int64",
+      "versions": "1+",
+      "about": "The exclusive source LSO captured for this read.",
+      "default": -1,
+      "ignorable": true
+    },
+    {
+      "name": "ReadStatus",
+      "type": "int8",
+      "versions": "1+",
+      "about": "0: original data, 1: pending at LSO, 2: aborted. Pending and aborted responses contain no records.",
+      "default": 0,
+      "ignorable": true
+    },
+    {
+      "name": "PhysicalBaseOffset",
+      "type": "int64",
+      "versions": "1+",
+      "about": "The requested physical batch base, including when no payload is returned.",
+      "default": -1,
+      "ignorable": true
+    },
+    {
+      "name": "PhysicalLastOffset",
+      "type": "int64",
+      "versions": "1+",
+      "about": "The requested inclusive physical last offset.",
+      "default": -1,
+      "ignorable": true
+    },
+    {
+      "name": "RecordCount",
+      "type": "int32",
+      "versions": "1+",
+      "about": "The requested whole batch record count.",
+      "default": 0,
+      "ignorable": true
     }
   ]
 }

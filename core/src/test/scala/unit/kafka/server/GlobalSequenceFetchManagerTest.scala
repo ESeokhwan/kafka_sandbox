@@ -17,7 +17,8 @@
 
 package kafka.server
 
-import org.apache.kafka.common.{Node, Uuid}
+import org.apache.kafka.common.{IsolationLevel, Node, Uuid}
+import org.apache.kafka.common.IsolationLevel.{READ_COMMITTED, READ_UNCOMMITTED}
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.errors.{OffsetOutOfRangeException, RecordTooLargeException}
 import org.apache.kafka.common.message.FetchGlobalSequenceRequestData
@@ -46,16 +47,18 @@ class GlobalSequenceFetchManagerTest {
     (0 until batch.recordCount()).map(_ => new SimpleRecord(new Array[Byte](bytes))): _*), 3, batch.lastOffset() + 1)
   private case class Work(batch: PhysicalBatch, deadline: Long, future: CompletableFuture[Data])
   private class Context(entries: Seq[GlobalSequenceLookup.Mapping] = (0L until 6L).map(mapping(_)),
-                        maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue) extends AutoCloseable {
+                        maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue,
+                        isolation: IsolationLevel = READ_UNCOMMITTED) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val index: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val source: GlobalSequenceDataRouter = mock(classOf[GlobalSequenceDataRouter])
     val lookup = new CompletableFuture[IndexRoutingManager.RoutedResult[GlobalSequenceLookup.Result]]()
-    val request = Request(new GlobalSequenceLookup.Request(topic, startOffset, endOffset, 1000, 1000), maxBytes)
+    val request = Request(new GlobalSequenceLookup.Request(topic, startOffset, endOffset, 1000, 1000), maxBytes, isolation)
     val work = ArrayBuffer.empty[Work]
     when(index.lookupIndex(any())).thenReturn(lookup)
     when(index.isCurrent(any(), any())).thenReturn(true)
-    when(source.read(any(), anyLong())).thenAnswer { call =>
+    when(source.read(any(), anyLong(), any())).thenAnswer { call =>
+      assertEquals(isolation, call.getArgument[IsolationLevel](2))
       val item = Work(call.getArgument[PhysicalBatch](0), call.getArgument[Long](1), new CompletableFuture[Data]())
       work += item
       item.future
@@ -68,7 +71,7 @@ class GlobalSequenceFetchManagerTest {
         new GlobalSequenceLookup.Snapshot(route.indexTopicId, 0, 10, 100, end), entries.asJava,
         math.min(endOffset, end)), route))
     }
-    def complete(position: Int, size: Int = 1): Unit = work(position).future.complete(data(work(position).batch, size))
+    def complete(position: Int, size: Int = 1): Unit = work(position).future.complete(data(work(position).batch, size).copy(lastStableOffset = work(position).batch.lastOffset() + 1))
     def response: FetchGlobalSequenceResponse = future.join()
     override def close(): Unit = { manager.close(); time.scheduler.clear() }
   }
@@ -210,7 +213,8 @@ class GlobalSequenceFetchManagerTest {
   def testManyImmediateCompletionsDoNotRecurseAndEmptyPagesNeedNoDataReads(): Unit = {
     val c = new Context((0L until 1000L).map(mapping(_)))
     try {
-      when(c.source.read(any(), anyLong())).thenAnswer { call => CompletableFuture.completedFuture(data(call.getArgument[PhysicalBatch](0))) }
+      org.mockito.Mockito.doAnswer((call: org.mockito.invocation.InvocationOnMock) =>
+        CompletableFuture.completedFuture(data(call.getArgument[PhysicalBatch](0)))).when(c.source).read(any(), anyLong(), any())
       c.loaded()
       assertEquals(1000, c.response.data().batches().size())
       assertEquals(1000L, c.response.data().nextGlobalOffset())
@@ -230,5 +234,82 @@ class GlobalSequenceFetchManagerTest {
     assertThrows(classOf[IllegalArgumentException], () => GlobalSequenceFetch.request(request.setMaxBytes(MaxPayloadBytes + 1)))
     request.setMaxBytes(1).setIsolationLevel(1.toByte)
     assertThrows(classOf[org.apache.kafka.common.errors.InvalidRequestException], () => GlobalSequenceFetch.request(request))
+  }
+
+  @Test
+  def testReadCommittedStopsAtTheFirstPendingGlobalRangeDespiteCompletedLaterPartitions(): Unit = {
+    val c = new Context(isolation = READ_COMMITTED)
+    try {
+      c.loaded()
+      c.complete(2)
+      c.complete(1)
+      val front = c.work.head.batch
+      c.work.head.future.complete(Data(MemoryRecords.EMPTY, 3, front.lastOffset() + 1, front.baseOffset(), Pending))
+      val response = c.response.data()
+      assertEquals(Errors.NONE.code(), response.errorCode())
+      assertTrue(response.transactionPending())
+      assertEquals(0L, response.nextGlobalOffset())
+      assertTrue(response.batches().isEmpty)
+      assertTrue(c.work(3).future.isCancelled)
+    } finally c.close()
+  }
+
+  @Test
+  def testAbortedPrefixAdvancesOnlyToTheFirstPendingRange(): Unit = {
+    val c = new Context(isolation = READ_COMMITTED)
+    try {
+      c.loaded()
+      c.complete(2)
+      val pending = c.work(1).batch
+      c.work(1).future.complete(Data(MemoryRecords.EMPTY, 3, pending.lastOffset() + 1, pending.baseOffset(), Pending))
+      c.work.head.future.complete(Data(MemoryRecords.EMPTY, 3, 1, 1, Aborted))
+      assertEquals(1L, c.response.data().nextGlobalOffset())
+      assertTrue(c.response.data().transactionPending())
+      assertTrue(c.response.data().batches().isEmpty)
+    } finally c.close()
+  }
+
+  @Test
+  def testAllAbortedPartialPageAndResumePreserveGlobalHoles(): Unit = {
+    val first = new Context(Seq(mapping(0, 3)), startOffset = 1, endOffset = 2, isolation = READ_COMMITTED)
+    try {
+      first.loaded()
+      first.work.head.future.complete(Data(MemoryRecords.EMPTY, 3, 3, 3, Aborted))
+      assertEquals(Errors.NONE.code(), first.response.data().errorCode())
+      assertEquals(2L, first.response.data().nextGlobalOffset())
+      assertFalse(first.response.data().transactionPending())
+      assertTrue(first.response.data().batches().isEmpty)
+    } finally first.close()
+    val next = new Context(Seq(mapping(0, 3), mapping(3, 2)), maxBytes = 1, startOffset = 2, endOffset = 5,
+      isolation = READ_COMMITTED)
+    try {
+      next.loaded()
+      next.complete(1, 1000)
+      next.work.head.future.complete(Data(MemoryRecords.EMPTY, 3, 3, 3, Aborted))
+      val response = next.response.data()
+      assertEquals(5L, response.nextGlobalOffset())
+      assertEquals(1, response.batches().size())
+      assertEquals(3L, response.batches().get(0).selectedGlobalStartOffset())
+      assertEquals(5L, response.batches().get(0).selectedGlobalEndOffset())
+      assertTrue(response.batches().get(0).records().sizeInBytes() > 1, "Aborted batches do not consume the first-batch byte allowance")
+    } finally next.close()
+  }
+
+  @Test
+  def testReadCommittedKeepsSuccessfulPrefixWhenNextPartitionIsPendingOrFails(): Unit = {
+    for (pending <- Seq(true, false)) {
+      val c = new Context(isolation = READ_COMMITTED)
+      try {
+        c.loaded()
+        c.complete(0)
+        val batch = c.work(1).batch
+        if (pending) c.work(1).future.complete(Data(MemoryRecords.EMPTY, 3, batch.lastOffset() + 1, batch.baseOffset(), Pending))
+        else c.work(1).future.completeExceptionally(new OffsetOutOfRangeException("expired"))
+        assertEquals(1L, c.response.data().nextGlobalOffset())
+        assertEquals(1, c.response.data().batches().size())
+        assertEquals(pending, c.response.data().transactionPending())
+        assertEquals((if (pending) Errors.NONE else Errors.OFFSET_OUT_OF_RANGE).code(), c.response.data().errorCode())
+      } finally c.close()
+    }
   }
 }

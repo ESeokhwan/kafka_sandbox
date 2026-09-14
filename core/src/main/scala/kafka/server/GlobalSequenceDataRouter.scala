@@ -17,7 +17,8 @@
 
 package kafka.server
 
-import org.apache.kafka.common.Node
+import org.apache.kafka.common.{IsolationLevel, Node}
+import org.apache.kafka.common.IsolationLevel.READ_UNCOMMITTED
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, FencedLeaderEpochException, InvalidRequestException, NotLeaderOrFollowerException, TimeoutException, UnknownTopicIdException}
 import org.apache.kafka.common.internals.Topic
@@ -46,8 +47,8 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Data]]()
   @volatile private var closed = false
 
-  def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long): CompletableFuture[Data] =
-    reader.read(batch, epoch, deadlineNs)
+  def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
+    reader.read(batch, epoch, deadlineNs, isolation)
 
   private def resolve(batch: PhysicalBatch): Location = {
     val image = metadata()
@@ -65,7 +66,7 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
     Location(node.get(), partition.leaderEpoch, broker.epoch())
   }
 
-  def read(batch: PhysicalBatch, deadlineNs: Long): CompletableFuture[Data] = {
+  def read(batch: PhysicalBatch, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] = {
     val result = new CompletableFuture[Data]()
     @volatile var timer: ScheduledFuture[_] = null
     @volatile var retryTimer: ScheduledFuture[_] = null
@@ -102,13 +103,13 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
       try {
         val route = resolve(batch)
         val operation = if (route.node.id() == brokerId) {
-          val local = readLocal(batch, route.leaderEpoch, deadlineNs)
+          val local = readLocal(batch, route.leaderEpoch, deadlineNs, isolation)
           active = local
           local
         } else {
-          val remote = transport.send(route.node, GlobalSequenceFetch.dataRequest(batch, route.leaderEpoch, remainingMs.toInt))
+          val remote = transport.send(route.node, GlobalSequenceFetch.dataRequest(batch, route.leaderEpoch, remainingMs.toInt, isolation))
           active = remote
-          remote.thenApply[Data]((response: AbstractResponse) => GlobalSequenceFetch.decode(batch, route.leaderEpoch, response))
+          remote.thenApply[Data]((response: AbstractResponse) => GlobalSequenceFetch.decode(batch, route.leaderEpoch, response, isolation))
         }
         if (result.isDone) active.cancel(false)
         operation.whenComplete { (value, error) =>
@@ -118,6 +119,7 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
             else try {
               if (resolve(batch) != route || value.sourceLeaderEpoch != route.leaderEpoch)
                 throw new NotLeaderOrFollowerException("Source route changed while reading the mapped batch")
+              GlobalSequenceFetch.validateData(batch, value, isolation)
               result.complete(value)
             } catch { case NonFatal(failure) => retry(failure, attempt) }
           }

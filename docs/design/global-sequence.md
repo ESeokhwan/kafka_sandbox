@@ -25,7 +25,7 @@ Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연�
 장애 복구의 progress 재확인과 source leader 변경을 연결했다.
 리더·follower·future replica의 원본 보존 경계를 연결했다.
 Produce 응답을 데이터 HW와 인덱스 커밋 이후에 완료하도록 연결했다. Global 인덱스 조회 API까지 구현했다.
-Global 데이터 Fetch의 READ_UNCOMMITTED 경로를 구현했다. READ_COMMITTED 격리는 후속 단계다.
+Global 데이터 Fetch의 READ_UNCOMMITTED 및 READ_COMMITTED 격리까지 구현했다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -918,6 +918,61 @@ Abort가 확인된 배치는 global 범위를 소비한 채 필터링한다. 다
 반영하고 번호를 재사용하지 않는다. 반환 레코드의 global offset에 이로 인한 빈 구간이
 있을 수 있다. 인덱스 커밋이 사용자 트랜잭션 완료를 뜻하지 않는다.
 
+### Global fetch v1 구현 (16번)
+
+API 98 `FetchGlobalSequence`와 API 99 `ReadGlobalSequenceData`의 v1에 READ_COMMITTED를
+추가했다. 공개 v0은 기존 READ_UNCOMMITTED만 지원한다. 공개 요청의 `IsolationLevel=1`은
+v1을 요구하며, 내부 v1 요청에도 같은 격리 값을 전달한다. 두 request builder 모두
+READ_COMMITTED 요청의 최소 버전을 1로 제한하여 버전 협상에서 v0 읽기로 바뀌지 않게 한다.
+READ_UNCOMMITTED는 v0/v1에서 모두 이전의 원본 배치 읽기를 유지한다.
+
+`GlobalSequenceDataReader`는 raw data HW와 LSO를 캡처한다. Partition이 HW를 먼저 읽고 LSO를
+읽는 사이 replication이 진행할 수 있으므로, LSO는 앞서 캡처한 HW 이하로 제한한다. 전체 physical 배치가
+HW 아래인지 확인하고, READ_COMMITTED에서는 `physicalLastOffset < LSO`인 배치만 읽는다.
+배치가 LSO에 걸리거나 위에 있으면 payload를 읽지 않고 pending 상태를 반환한다. 같은 파티션의
+열린 트랜잭션 뒤에 있는 일반 배치도 LSO 밖이면 보류한다. Marker가 로컬에 append되어도 아직
+HW 아래로 복제되지 않았다면 LSO를 넘지 못하므로 commit/abort를 확정된 것으로 취급하지 않는다.
+
+LSO 아래의 transactional 배치는 기존 source log의 transaction index에서 abort 범위를 조회한다.
+Producer ID가 같고 abort의 `[firstOffset, lastOffset]`이 대상 배치 전체를 포함하는 경우만
+제외한다. Producer ID나 시작 offset만으로 판정하지 않는다. 동일 producer의 이전 abort와
+이후 commit, interleaved producer, 여러 배치 및 segment를 가로지르는 트랜잭션을 구분한다.
+조회는 source worker에서 실행하고, payload 및 abort 조회 뒤 UUID·Partition/log 인스턴스·
+source leader epoch·보존 경계와 raw HW/LSO를 재검증한다. Lookup과 physical 읽기는 이전과
+같은 하나의 deadline을 공유하며 취소·리더 변경 경로에서도 격리 수준을 유지한다.
+
+내부 v1 응답은 `LastStableOffset`, `ReadStatus`, 요청한 physical base/last/count를 추가한다.
+ReadStatus는 0(원본 데이터), 1(LSO에서 미확정), 2(abort됨)이다. 미확정·abort 응답의 Records는
+비어 있다. Router는 해당 상태와 LSO, data HW, 요청 배치 식별자가 서로 일치하는지 검사한다.
+READ_COMMITTED의 LSO 증거가 빠지거나 상태와 모순되면 INVALID_REQUEST로 거절한다.
+이 필드들은 v0 READ_UNCOMMITTED 응답을 직렬화할 때 생략된다.
+
+공개 v1 응답의 `TransactionPending=true`는 첫 미처리 global 범위가 source LSO에서 막혔음을
+뜻한다. 이 경우 ErrorCode는 NONE이며, 이미 읽은 연속 prefix와 재개할 `NextGlobalOffset`을
+반환한다. 서버가 사용자 트랜잭션 종료까지 장시간 요청을 붙들고 있지는 않는다. 클라이언트는
+같은 cursor로 다음 요청을 보내고, commit/abort가 복제되어 LSO가 진행하면 이어서 읽는다.
+여기서 `CommittedGlobalEndOffset`은 여전히 커밋된 **인덱스** 범위이며 transaction visibility의
+상한을 의미하지 않는다.
+
+Abort된 배치는 응답 목록에 넣지 않고 선택한 global 범위를 소비한다. 이후 번호를 당겨 쓰거나
+다시 할당하지 않는다. 예를 들어 global 0이 abort, 1이 pending, 2가 읽기 완료라면 반환 배치는
+없고 cursor는 1, TransactionPending은 true다. 0이 abort이고 1이 visible이면 1부터 데이터를
+반환하며 0은 global 번호의 빈 구간으로 남는다. 배치 중간에서 시작·끝나는 요청도 선택한 범위만
+cursor에 반영한다. 한 페이지가 전부 abort이면 빈 데이터와 전진한 cursor를 정상 반환한다.
+
+페이지의 MaxBatches는 조회한 매핑 수를 제한하므로 abort도 페이지 경계에는 포함된다.
+MaxBytes에는 실제 반환한 원본 배치만 계산하며 abort는 첫 배치 초과 허용을 소비하지 않는다.
+앞 범위가 pending 또는 실패했으면 뒤 파티션에서 먼저 완료한 배치를 노출하거나 그 범위를
+건너뛰지 않는다. Request/fetch bandwidth quota와 원본 physical offset·CRC·producer metadata
+보존은 v0과 동일하게 적용한다.
+
+단위 테스트는 marker 복제 전후의 LSO, commit/abort, 같은 producer의 후속 트랜잭션,
+segment 경계, 배치 중간·모두 필터링된 페이지, 앞 pending/실패와 뒤 완료의 조합,
+버전 downgrade 거절과 내부 LSO 증거 검사를 다룬다. 실제 3브로커 테스트는 열린 앞 트랜잭션과
+다른 파티션의 뒤 데이터를 생성하고, source 리더를 옮긴 뒤 commit/abort 및 같은 producer의
+후속 commit을 수행한다. Source 리더 복귀와 index 리더 변경 뒤에도 두 격리 수준의 결과,
+physical control offset에 의한 간격과 global cursor를 확인한다.
+
 ## 12. 장애 시나리오와 기대 결과
 
 아래 ID는 후속 단위·통합 테스트의 인수 기준이다. 표의 범위는 원본과 인덱스가
@@ -984,8 +1039,8 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
 복구의 progress 재확인과 source leader 변경, 모든 source replica의 보존 경계를 연결했다.
-Produce 대기와 global 인덱스 조회·READ_UNCOMMITTED 데이터 Fetch까지 연결했다.
-후속 구현 순서는 READ_COMMITTED 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
+Produce 대기와 global 인덱스 조회·두 격리 수준의 데이터 Fetch까지 연결했다.
+후속 구현 순서는 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.
 

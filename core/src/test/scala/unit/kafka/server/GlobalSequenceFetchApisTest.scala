@@ -20,6 +20,7 @@ package kafka.server
 import kafka.network.RequestChannel
 import kafka.server.QuotaFactory.QuotaManagers
 import org.apache.kafka.common.Uuid
+import org.apache.kafka.common.IsolationLevel.{READ_COMMITTED, READ_UNCOMMITTED}
 import org.apache.kafka.common.acl.AclOperation.{CLUSTER_ACTION, READ}
 import org.apache.kafka.common.errors.ClusterAuthorizationException
 import org.apache.kafka.common.message.{FetchGlobalSequenceRequestData, FetchGlobalSequenceResponseData, ReadGlobalSequenceDataRequestData}
@@ -83,7 +84,7 @@ class GlobalSequenceFetchApisTest {
         case "uuid" => when(c.metadata.getTopicName(topic)).thenReturn(Optional.empty())
         case "bytes" => c.data.setMaxBytes(0)
         case "range" => c.data.setGlobalStartOffset(11)
-        case "isolation" => c.data.setIsolationLevel(1.toByte)
+        case "isolation" => c.data.setIsolationLevel(2.toByte)
         case "timeout" => c.data.setTimeoutMs(30001)
         case "page" => c.data.setMaxBatches(1001)
       }
@@ -137,11 +138,60 @@ class GlobalSequenceFetchApisTest {
     val records = org.apache.kafka.common.record.MemoryRecords.withRecords(10L, org.apache.kafka.common.compress.Compression.NONE,
       new org.apache.kafka.common.record.SimpleRecord(Array[Byte](1)))
     when(c.request.body[ReadGlobalSequenceDataRequest]).thenReturn(new ReadGlobalSequenceDataRequest.Builder(data).build())
-    when(c.manager.readLocal(batch, 3, 400000000L)).thenReturn(CompletableFuture.completedFuture(GlobalSequenceFetch.Data(records, 3, 11)))
+    when(c.manager.readLocal(batch, 3, 400000000L, READ_UNCOMMITTED)).thenReturn(CompletableFuture.completedFuture(GlobalSequenceFetch.Data(records, 3, 11)))
     c.apis.readData(c.request).join()
     val captured = ArgumentCaptor.forClass(classOf[AbstractResponse])
     verify(c.helper).sendResponseExemptThrottle(eqTo(c.request), captured.capture(), eqTo(None))
     assertEquals(records, captured.getValue.asInstanceOf[ReadGlobalSequenceDataResponse].data().records())
     verifyNoInteractions(c.bandwidth, c.requestQuota)
+  }
+
+  @Test
+  def testVersionOneForwardsReadCommittedAndReturnsThePendingCursor(): Unit = {
+    val c = new Context
+    c.data.setIsolationLevel(1.toByte)
+    when(c.request.header).thenReturn(new RequestHeader(ApiKeys.FETCH_GLOBAL_SEQUENCE, 1.toShort, "client", 1))
+    when(c.request.body[FetchGlobalSequenceRequest]).thenReturn(new FetchGlobalSequenceRequest.Builder(c.data).build(1.toShort))
+    c.response.data().setTransactionPending(true).setNextGlobalOffset(2)
+    c.apis.fetch(c.request).join()
+    val captured = ArgumentCaptor.forClass(classOf[GlobalSequenceFetch.Request])
+    verify(c.manager).fetch(captured.capture())
+    assertEquals(READ_COMMITTED, captured.getValue.isolation)
+    assertTrue(c.sent().data().transactionPending())
+    assertEquals(2L, c.response.data().nextGlobalOffset())
+  }
+
+  @Test
+  def testCommittedVersionCannotDowngradeAndVersionZeroStillRejectsIt(): Unit = {
+    val c = new Context
+    c.data.setIsolationLevel(1.toByte)
+    val builder = new FetchGlobalSequenceRequest.Builder(c.data)
+    assertEquals(1.toShort, builder.oldestAllowedVersion())
+    assertThrows(classOf[org.apache.kafka.common.errors.UnsupportedVersionException], () => builder.build(0.toShort))
+    // A malformed v0 request may still arrive on the wire, bypassing the builder.
+    when(c.request.body[FetchGlobalSequenceRequest]).thenReturn(new FetchGlobalSequenceRequest(c.data, 0.toShort))
+    c.apis.fetch(c.request).join()
+    assertEquals(Errors.INVALID_REQUEST.code(), c.sent().data().errorCode())
+    verifyNoInteractions(c.manager)
+  }
+
+  @Test
+  def testInternalReadCommittedPassesIsolationAndReturnsNoAbortedPayload(): Unit = {
+    val c = new Context
+    val data = new ReadGlobalSequenceDataRequestData().setTopicId(topic).setPartition(1)
+      .setPhysicalBaseOffset(10).setPhysicalLastOffset(10).setRecordCount(1).setSourceLeaderEpoch(3)
+      .setTimeoutMs(400).setIsolationLevel(1.toByte)
+    val batch = GlobalSequenceFetch.physical(data)
+    when(c.request.body[ReadGlobalSequenceDataRequest]).thenReturn(new ReadGlobalSequenceDataRequest.Builder(data).build(1.toShort))
+    when(c.manager.readLocal(batch, 3, 400000000L, READ_COMMITTED)).thenReturn(CompletableFuture.completedFuture(
+      GlobalSequenceFetch.Data(org.apache.kafka.common.record.MemoryRecords.EMPTY, 3, 12, 12, GlobalSequenceFetch.Aborted)))
+    c.apis.readData(c.request).join()
+    val captured = ArgumentCaptor.forClass(classOf[AbstractResponse])
+    verify(c.helper).sendResponseExemptThrottle(eqTo(c.request), captured.capture(), eqTo(None))
+    val response = captured.getValue.asInstanceOf[ReadGlobalSequenceDataResponse].data()
+    assertEquals(GlobalSequenceFetch.Aborted, response.readStatus())
+    assertEquals(12L, response.lastStableOffset())
+    assertEquals(10L, response.physicalBaseOffset())
+    assertEquals(0, response.records().sizeInBytes())
   }
 }

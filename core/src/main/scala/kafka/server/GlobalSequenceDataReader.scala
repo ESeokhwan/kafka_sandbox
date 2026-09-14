@@ -17,7 +17,8 @@
 
 package kafka.server
 
-import org.apache.kafka.common.{TopicIdPartition, TopicPartition}
+import org.apache.kafka.common.{IsolationLevel, TopicIdPartition, TopicPartition}
+import org.apache.kafka.common.IsolationLevel.{READ_COMMITTED, READ_UNCOMMITTED}
 import org.apache.kafka.common.errors.{CorruptRecordException, CoordinatorNotAvailableException, FencedLeaderEpochException, InvalidRequestException, KafkaStorageException, NotLeaderOrFollowerException, OffsetNotAvailableException, OffsetOutOfRangeException, RecordTooLargeException, ThrottlingQuotaExceededException, TimeoutException, UnknownTopicIdException}
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.record.{FileRecords, MemoryRecords, Records}
@@ -48,11 +49,11 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Data]]()
   @volatile private var closed = false
 
-  def read(batch: PhysicalBatch, epoch: Int, deadlineNs: Long): CompletableFuture[Data] = {
+  def read(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] = {
     val result = new CompletableFuture[Data]()
     @volatile var timer: ScheduledFuture[_] = null
     val work: Runnable = () => {
-      if (!result.isDone) try result.complete(readBatch(batch, epoch, () => {
+      if (!result.isDone) try result.complete(readBatch(batch, epoch, isolation, () => {
         if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
           throw new TimeoutException("Global data fetch was cancelled or expired")
       })) catch {
@@ -86,7 +87,7 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
     result
   }
 
-  private def readBatch(expected: PhysicalBatch, leaderEpoch: Int, deadline: () => Unit): Data = {
+  private def readBatch(expected: PhysicalBatch, leaderEpoch: Int, isolation: IsolationLevel, deadline: () => Unit): Data = {
     deadline()
     require(leaderEpoch >= 0, "sourceLeaderEpoch must be non-negative")
     val key = expected.partition()
@@ -102,7 +103,7 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
         bytes, epoch, Optional.empty())
       source.fetchRecords(params, request, time.milliseconds(), bytes, minOneMessage = bytes > 0, updateFetchState = false)
     }
-    def validate(): Long = {
+    def validate(): LogReadInfo = {
       deadline()
       if ((replicas.getPartitionOrException(tp) ne source) || (source.localLogWithEpochOrThrow(epoch, requireLeader = true) ne log))
         throw new NotLeaderOrFollowerException("Source partition or log changed during global fetch")
@@ -118,9 +119,24 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
         throw new OffsetOutOfRangeException("The mapped physical batch is no longer available in the local source log")
       if (expected.lastOffset() >= offsets.highWatermark || expected.lastOffset() >= offsets.logEndOffset)
         throw new OffsetNotAvailableException("The current source leader has not exposed the entire mapped batch below HW")
-      offsets.highWatermark
+      if (offsets.lastStableOffset < 0)
+        throw new CorruptRecordException("Source LSO is negative")
+      offsets
     }
-    val highWatermark = validate()
+    val snapshot = validate()
+    // Partition captures HW before LSO. Replication may advance HW between those reads; cap LSO
+    // at the earlier HW rather than treating a valid advance as corruption or exposing newer data.
+    val stableOffset = math.min(snapshot.highWatermark, snapshot.lastStableOffset)
+    def revalidate(): Unit = {
+      val current = validate()
+      if (current.highWatermark < snapshot.highWatermark ||
+        (isolation == READ_COMMITTED && math.min(current.highWatermark, current.lastStableOffset) < stableOffset))
+        throw new NotLeaderOrFollowerException("Source HW or LSO regressed during global fetch")
+    }
+    if (isolation == READ_COMMITTED && expected.lastOffset() >= stableOffset) {
+      revalidate()
+      return Data(MemoryRecords.EMPTY, leaderEpoch, snapshot.highWatermark, stableOffset, Pending)
+    }
     try {
       val info = fetch(expected.baseOffset(), 1)
       if (info.divergingEpoch.isPresent) throw new NotLeaderOrFollowerException("Source log diverged during global fetch")
@@ -141,11 +157,20 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
           if (offset != expected.lastOffset() + 1) throw new CorruptRecordException("Mapped source record count is inconsistent")
         } finally iterator.close()
       } finally buffers.close()
-      if (validate() < highWatermark) throw new NotLeaderOrFollowerException("Source HW regressed during global fetch")
-      Data(original, leaderEpoch, highWatermark)
+      val batch = original.batches().iterator().next()
+      // Use full transaction ranges: matching only producer ID/first offset can confuse a previous
+      // aborted transaction with a later committed one from the same producer, especially across pages.
+      val aborted = isolation == READ_COMMITTED && batch.isTransactional &&
+        log.collectAbortedTransactions(expected.baseOffset(), expected.lastOffset() + 1).asScala.exists { txn =>
+          deadline()
+          txn.producerId() == batch.producerId() && txn.firstOffset() <= expected.baseOffset() && txn.lastOffset() >= expected.lastOffset()
+        }
+      revalidate()
+      Data(if (aborted) MemoryRecords.EMPTY else original, leaderEpoch, snapshot.highWatermark,
+        stableOffset, if (aborted) Aborted else Visible)
     } catch {
       case NonFatal(error) =>
-        validate()
+        revalidate()
         error match {
           case io: java.io.IOException => throw new KafkaStorageException("Failed to read mapped global sequence data", io)
           case _ => throw error

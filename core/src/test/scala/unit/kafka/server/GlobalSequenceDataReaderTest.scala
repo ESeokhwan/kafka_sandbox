@@ -18,7 +18,8 @@
 package kafka.server
 
 import kafka.cluster.AbstractPartitionTest
-import org.apache.kafka.common.TopicIdPartition
+import org.apache.kafka.common.{IsolationLevel, TopicIdPartition}
+import org.apache.kafka.common.IsolationLevel.{READ_COMMITTED, READ_UNCOMMITTED}
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.errors.{CorruptRecordException, NotLeaderOrFollowerException, OffsetNotAvailableException, OffsetOutOfRangeException, RecordTooLargeException, TimeoutException, UnknownTopicIdException}
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.{BeforeEach, Test, Timeout}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import org.mockito.Mockito.{mock, when}
+import org.mockito.ArgumentMatchers.{any, anyBoolean, anyInt, anyLong}
 
 import java.util.{List => JList, Optional, Properties}
 
@@ -67,8 +69,8 @@ class GlobalSequenceDataReaderTest extends AbstractPartitionTest {
 
   private def log = partition.localLogOrException
   private def commit(): Unit = { log.updateHighWatermark(log.logEndOffset) }
-  private def read(base: Long = 0, last: Long = 2, leaderEpoch: Int = epoch): java.util.concurrent.CompletableFuture[GlobalSequenceFetch.Data] =
-    reader.read(new PhysicalBatch(key, base, last, (last - base + 1).toInt), leaderEpoch, time.nanoseconds() + 100000000L)
+  private def read(base: Long = 0, last: Long = 2, leaderEpoch: Int = epoch, isolation: IsolationLevel = READ_UNCOMMITTED): java.util.concurrent.CompletableFuture[GlobalSequenceFetch.Data] =
+    reader.read(new PhysicalBatch(key, base, last, (last - base + 1).toInt), leaderEpoch, time.nanoseconds() + 100000000L, isolation)
   private def finish(future: java.util.concurrent.CompletableFuture[GlobalSequenceFetch.Data]): GlobalSequenceFetch.Data = {
     workers.runAll()
     future.join()
@@ -201,5 +203,103 @@ class GlobalSequenceDataReaderTest extends AbstractPartitionTest {
     val future = read(0, 0)
     workers.runAll()
     assertFutureThrows(classOf[RecordTooLargeException], future)
+  }
+
+  private def transaction(producerId: Long, sequence: Int, count: Int = 2): Long = {
+    val records = MemoryRecords.withTransactionalRecords(Compression.gzip().build(), producerId, 0.toShort, sequence,
+      (0 until count).map(_ => new SimpleRecord(time.milliseconds(), Array[Byte](7))): _*)
+    val guard = log.maybeStartTransactionVerification(producerId, sequence, 0.toShort, false)
+    log.appendAsLeader(records, epoch, AppendOrigin.CLIENT, RequestLocal.noCaching(), guard).firstOffset()
+  }
+
+  private def end(producerId: Long, kind: ControlRecordType): Unit = {
+    log.appendAsLeader(MemoryRecords.withEndTransactionMarker(producerId, 0.toShort, new EndTransactionMarker(kind, 0)),
+      epoch, AppendOrigin.COORDINATOR)
+  }
+
+  @Test
+  def testCommittedReadWaitsForReplicatedMarkerThenReturnsOriginalBatch(): Unit = {
+    transaction(17, 0)
+    append(1) // Even non-transactional data behind the open transaction is at or above LSO.
+    commit()
+    val open = finish(read(0, 1, isolation = READ_COMMITTED))
+    assertEquals(GlobalSequenceFetch.Pending, open.status)
+    assertEquals(0L, open.lastStableOffset)
+    assertEquals(0, open.records.sizeInBytes())
+    assertEquals(GlobalSequenceFetch.Pending, finish(read(2, 2, isolation = READ_COMMITTED)).status)
+    end(17, ControlRecordType.COMMIT)
+    assertEquals(GlobalSequenceFetch.Pending, finish(read(0, 1, isolation = READ_COMMITTED)).status,
+      "A marker outside HW cannot make the transaction visible")
+    commit()
+    val decided = finish(read(0, 1, isolation = READ_COMMITTED))
+    assertEquals(GlobalSequenceFetch.Visible, decided.status)
+    assertEquals(4L, decided.lastStableOffset)
+    assertEquals(finish(read(0, 1)).records.buffer(), decided.records.buffer())
+    assertEquals(GlobalSequenceFetch.Visible, finish(read(2, 2, isolation = READ_COMMITTED)).status)
+  }
+
+  @Test
+  def testAbortedRangesAcrossSegmentsDoNotHideLaterTransactionsFromTheSameProducer(): Unit = {
+    transaction(17, 0) // 0..1
+    log.roll()
+    transaction(18, 0, 1) // 2, interleaved different producer
+    transaction(17, 2) // 3..4, same first transaction
+    log.roll()
+    end(17, ControlRecordType.ABORT) // 5
+    end(18, ControlRecordType.COMMIT) // 6
+    commit()
+    for ((base, last) <- Seq((0L, 1L), (3L, 4L))) {
+      val aborted = finish(read(base, last, isolation = READ_COMMITTED))
+      assertEquals(GlobalSequenceFetch.Aborted, aborted.status)
+      assertEquals(0, aborted.records.sizeInBytes())
+      assertTrue(finish(read(base, last)).records.sizeInBytes() > 0)
+    }
+    assertEquals(GlobalSequenceFetch.Visible, finish(read(2, 2, isolation = READ_COMMITTED)).status)
+    transaction(17, 4) // 7..8, new transaction from the same producer
+    end(17, ControlRecordType.COMMIT) // 9
+    commit()
+    val committed = finish(read(7, 8, isolation = READ_COMMITTED))
+    assertEquals(GlobalSequenceFetch.Visible, committed.status)
+    assertEquals(finish(read(7, 8)).records.buffer(), committed.records.buffer())
+  }
+
+  @Test
+  def testAbortCannotAdvanceBeforeMarkerReplicationAndRetentionStillFails(): Unit = {
+    transaction(17, 0)
+    commit()
+    end(17, ControlRecordType.ABORT)
+    assertEquals(GlobalSequenceFetch.Pending, finish(read(0, 1, isolation = READ_COMMITTED)).status)
+    commit()
+    assertEquals(GlobalSequenceFetch.Aborted, finish(read(0, 1, isolation = READ_COMMITTED)).status)
+    log.updateGlobalSequenceIndexedOffset(topicId.get, 3L)
+    log.maybeIncrementLogStartOffset(3L, LogStartOffsetIncrementReason.ClientRecordDeletion)
+    val missing = read(0, 1, isolation = READ_COMMITTED)
+    workers.runAll()
+    assertFutureThrows(classOf[OffsetOutOfRangeException], missing)
+  }
+
+  @Test
+  def testConcurrentHighWatermarkAdvanceCapsLsoAtTheCapturedBoundary(): Unit = {
+    append()
+    append()
+    append()
+    commit()
+    val reading = org.mockito.Mockito.spy(partition)
+    when(replicaManager.getPartitionOrException(new TopicIdPartition(topicId.get, topicPartition))).thenReturn(reading)
+    var firstSnapshot = true
+    org.mockito.Mockito.doAnswer((call: org.mockito.invocation.InvocationOnMock) => {
+      val actual = call.callRealMethod().asInstanceOf[org.apache.kafka.storage.internals.log.LogReadInfo]
+      if (call.getArgument[Int](3) == 0 && firstSnapshot) {
+        firstSnapshot = false
+        // Partition observed HW=1, then replication advanced it before it observed LSO=2.
+        new org.apache.kafka.storage.internals.log.LogReadInfo(actual.fetchedData, actual.divergingEpoch,
+          1L, actual.logStartOffset, actual.logEndOffset, 2L)
+      } else actual
+    }).when(reading).fetchRecords(any(), any(), anyLong(), anyInt(), anyBoolean(), anyBoolean())
+    val data = finish(read(0, 0, isolation = READ_COMMITTED))
+    assertEquals(GlobalSequenceFetch.Visible, data.status)
+    assertEquals(1L, data.dataHighWatermark)
+    assertEquals(1L, data.lastStableOffset)
+    assertEquals(0L, data.records.batches().iterator().next().baseOffset())
   }
 }

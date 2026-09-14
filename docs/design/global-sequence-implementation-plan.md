@@ -17,11 +17,11 @@
 
 # Global sequence topic 구현 계획
 
-작성 기준: 2026-09-14, `proj/globally_ordered_topic/develop_v4`, 15번 구현 커밋 기준.
+작성 기준: 2026-09-15, `proj/globally_ordered_topic/develop_v4`, 16번 구현 커밋 기준.
 출발점은 Kafka 4.1.1의 vanilla 코드인 `be816b82d2`다.
 
 기존 1~18번 구현 순서를 유지하여 완료한 작업과 남은 작업을 커밋 단위로 정리한다.
-**1~15번은 구현 완료, 16~18번은 미구현이다.** 완료한 단계의 설명은 현재까지의
+**1~16번은 구현 완료, 17~18번은 미구현이다.** 완료한 단계의 설명은 현재까지의
 후속 보완을 포함한 구현 상태를 기준으로 한다. 남은 단계의 커밋 제목과 새 API 이름은 계획안이다.
 이 문서의 단계 번호는 [상세 설계 문서](global-sequence.md)의 장 번호와 별개다.
 
@@ -62,8 +62,8 @@ Global Consumer Group, 데이터 compaction, 기존 토픽 이력 전환, 인덱
 | 12 | 모든 replica의 미인덱싱 원본 보존 | 완료 | `7fcff61d64` |
 | 13 | Produce 응답의 인덱스 커밋 대기 | 완료 | `1fe98f1b68` |
 | 14 | Global offset 범위의 인덱스 조회 API | 완료 | `d9d6f7179b` |
-| 15 | Global offset 기반 데이터 Fetch API | 완료 | 본 커밋 |
-| 16 | Global Fetch의 트랜잭션 격리 | 미구현 | 예정 |
+| 15 | Global offset 기반 데이터 Fetch API | 완료 | `0e85c08e77` |
+| 16 | Global Fetch의 트랜잭션 격리 | 완료 | 본 커밋 |
 | 17 | 작업량·메모리 제한, backpressure, 상세 지표 | 미구현 | 예정 |
 | 18 | 종합 장애 테스트와 사용·운영 문서 | 미구현 | 예정 |
 
@@ -71,7 +71,7 @@ Global Consumer Group, 데이터 compaction, 기존 토픽 이력 전환, 인덱
 |---|---|---|---|
 | A. 인덱싱 기반 | 1~9 | 저장 형식, coordinator, RPC, 라우팅, 원본 Reader 연결 | 완료 |
 | B. 쓰기와 복구 | 10~13 | 자동 인덱싱·복구·원본 보존·Produce 대기 연결 | 완료 |
-| C. Global 읽기 | 14~16 | 범위 조회, 데이터 Fetch, 두 격리 수준 제공 | 조회·READ_UNCOMMITTED Fetch 완료 |
+| C. Global 읽기 | 14~16 | 범위 조회, 데이터 Fetch, 두 격리 수준 제공 | 완료 |
 | D. 자원 제한과 종합 검증 | 17~18 | 과부하 제어, 관측 지표, 장애 검증과 사용 문서 | 미구현 |
 
 ## 완료한 단계
@@ -318,16 +318,11 @@ coordinator 조회 경로, `IndexRoutingManager`, 필요 시 별도 인덱스 �
 원본 압축별 바이트·CRC, 열린/abort 트랜잭션의 READ_UNCOMMITTED 읽기, 순서·cursor,
 리더 이동·재시작·retention·timeout·ACL·quota와 기존 쓰기·복구·조회 회귀를 확인했다.
 
-## 남은 단계
-
-16번부터 순서대로 구현하고, 각 단계의 테스트와 설계 문서를 함께 별도 커밋한다.
-새 프로토콜의 version·wire 필드·오류 코드와 필요한 신규 클래스 이름은 해당 단계에서 확정한다.
-
 ### 16. Global Fetch의 트랜잭션 격리
 
-상태: 미구현 · 의존: 15
+상태: 완료 · 의존: 15
 
-예정 커밋: `feat: honor transaction isolation in global sequence fetch`
+구현 커밋: `feat: honor transaction isolation in global sequence fetch`
 
 **목표:** global 순서를 지키면서 `READ_UNCOMMITTED`와 `READ_COMMITTED`를 제공한다.
 
@@ -339,12 +334,23 @@ coordinator 조회 경로, `IndexRoutingManager`, 필요 시 별도 인덱스 �
 - Control batch와 batch/page 경계에서도 필터링 결과와 `nextGlobalOffset`을 일치시킨다.
 - 인덱스 커밋을 사용자 트랜잭션 커밋으로 취급하지 않는다.
 
-주요 변경 위치: global fetch 조립 컴포넌트, physical fetch의 LSO/aborted transaction 처리,
-프로토콜의 isolation 및 cursor 표현.
+주요 위치: `GlobalSequenceFetch`, `GlobalSequenceDataReader`, `GlobalSequenceDataRouter`,
+`GlobalSequenceFetchManager`, `GlobalSequenceFetchApis`, 공개/내부 Fetch v1 프로토콜.
 
 완료 기준: 열린 앞 트랜잭션과 확정된 뒤 파티션 데이터가 있을 때 순서를 지키며 대기한다.
 Commit·abort 후 재개, 모두 필터링된 페이지, global 번호의 빈 구간, control batch,
 다중 파티션과 리더 변경 조합을 테스트한다. 15번의 일반 읽기 동작도 유지한다.
+
+검증: core 556개, clients 48개, global-sequence-coordinator 77개, 총 681개 회귀 테스트 통과.
+LSO·HW 경합과 marker 복제 경계, 같은 producer의 abort 후 commit, segment/page 경계,
+빈 필터링 페이지와 cursor, v0 호환성 및 v1 downgrade 거절을 검증했다.
+실제 3브로커에서 열린 트랜잭션의 source 리더 이동, commit/abort, 후속 transaction과
+source/index 리더 변경 후 두 격리 수준의 global 읽기를 확인했다.
+
+## 남은 단계
+
+17번부터 순서대로 구현하고, 각 단계의 테스트와 설계 문서를 함께 별도 커밋한다.
+추가 설정·지표 이름과 필요한 신규 클래스 이름은 해당 단계에서 확정한다.
 
 ### 17. 작업량·메모리 제한, backpressure, 상세 지표
 
@@ -399,7 +405,7 @@ Batch 묶기나 checkpoint 형식 변경은 자동으로 포함하지 않으며,
 
 ## 이후 작업을 진행하는 방법
 
-- 다음 구현 대상은 **16번 global Fetch의 READ_COMMITTED 격리**다. 17번은 처리량 제어·지표, 18번은 종합 검증·운영 문서다.
+- 다음 구현 대상은 **17번 처리량 제어·지표**다. 18번은 종합 검증·운영 문서다.
 - 단계마다 코드·필요한 테스트·설계 갱신을 함께 검증한 뒤 하나의 구현 커밋으로 저장한다.
 - 완료 후 이 문서의 상태와 실제 커밋 해시를 갱신한다. 예정 커밋 제목은 최종 구현 범위에 맞게 조정한다.
 - 상세 의미나 오류·offset 경계를 변경할 때는 [상세 설계 문서](global-sequence.md)와 함께 수정한다.

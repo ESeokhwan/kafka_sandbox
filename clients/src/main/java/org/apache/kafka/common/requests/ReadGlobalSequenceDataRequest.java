@@ -19,6 +19,7 @@ package org.apache.kafka.common.requests;
 
 import org.apache.kafka.common.message.ReadGlobalSequenceDataRequestData;
 import org.apache.kafka.common.message.ReadGlobalSequenceDataResponseData;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.Readable;
@@ -33,7 +34,14 @@ public class ReadGlobalSequenceDataRequest extends AbstractRequest {
         }
 
         @Override
+        public short oldestAllowedVersion() {
+            return data.isolationLevel() == 1 ? (short) 1 : (short) 0;
+        }
+
+        @Override
         public ReadGlobalSequenceDataRequest build(short version) {
+            if (data.isolationLevel() == 1 && version < 1)
+                throw new UnsupportedVersionException("READ_COMMITTED global fetch requires version 1");
             return new ReadGlobalSequenceDataRequest(data, version);
         }
 

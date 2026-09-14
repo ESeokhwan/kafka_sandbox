@@ -17,7 +17,7 @@
   "apiKey": 98,
   "type": "request",
   "name": "FetchGlobalSequenceRequest",
-  "validVersions": "0",
+  "validVersions": "0-1",
   "flexibleVersions": "0+",
   "fields": [
     {
@@ -63,7 +63,7 @@
       "name": "IsolationLevel",
       "type": "int8",
       "versions": "0+",
-      "about": "Only READ_UNCOMMITTED (0) is supported by version 0.",
+      "about": "READ_UNCOMMITTED (0), or READ_COMMITTED (1) starting at version 1.",
       "default": 0
     }
   ],

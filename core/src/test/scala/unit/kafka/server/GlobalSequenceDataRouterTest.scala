@@ -18,6 +18,7 @@
 package kafka.server
 
 import org.apache.kafka.common.{Node, Uuid}
+import org.apache.kafka.common.IsolationLevel.{READ_COMMITTED, READ_UNCOMMITTED}
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors.{FencedLeaderEpochException, InvalidRequestException, OffsetOutOfRangeException, TimeoutException, UnknownTopicIdException}
@@ -88,7 +89,7 @@ class GlobalSequenceDataRouterTest {
   def testLocalAndRemoteReadValidateTheMappedBatchAndEpoch(): Unit = {
     val local = new Context(image(leader = 1))
     try {
-      when(local.reader.read(batch, 3, 1000000000L)).thenReturn(CompletableFuture.completedFuture(data()))
+      when(local.reader.read(batch, 3, 1000000000L, READ_UNCOMMITTED)).thenReturn(CompletableFuture.completedFuture(data()))
       assertEquals(data(), local.read().join())
       assertTrue(local.transport.sent.isEmpty)
     } finally local.close()
@@ -110,7 +111,7 @@ class GlobalSequenceDataRouterTest {
     try {
       val result = c.read()
       c.metadata = image(leader = 1, epoch = 4)
-      when(c.reader.read(any(), anyInt(), anyLong())).thenReturn(CompletableFuture.completedFuture(data(4)))
+      when(c.reader.read(any(), anyInt(), anyLong(), any())).thenReturn(CompletableFuture.completedFuture(data(4)))
       c.transport.sent.head.future.complete(GlobalSequenceFetch.dataResponse(batch, data()))
       assertFalse(result.isDone)
       c.time.sleep(100)
@@ -178,5 +179,69 @@ class GlobalSequenceDataRouterTest {
     }
     val disabled = new Context(image(enabled = false))
     try assertFutureThrows(classOf[InvalidRequestException], disabled.read()) finally disabled.close()
+  }
+
+  @Test
+  def testCommittedRemoteReadsRequireVersionOneAndPreservePendingAndAbortDecisions(): Unit = {
+    for (status <- Seq(GlobalSequenceFetch.Pending, GlobalSequenceFetch.Aborted, GlobalSequenceFetch.Visible)) {
+      val c = new Context
+      try {
+        val future = c.router.read(batch, 1000000000L, READ_COMMITTED)
+        val request = c.transport.sent.head.request.asInstanceOf[ReadGlobalSequenceDataRequest]
+        assertEquals(1.toShort, request.version())
+        assertEquals(1.toByte, request.data().isolationLevel())
+        val answer = GlobalSequenceFetch.Data(if (status == GlobalSequenceFetch.Visible) records else MemoryRecords.EMPTY,
+          3, 12, if (status == GlobalSequenceFetch.Pending) 10 else 12, status)
+        c.transport.sent.head.future.complete(GlobalSequenceFetch.dataResponse(batch, answer))
+        assertEquals(answer, future.join())
+        assertEquals(1, c.transport.sent.size, "Pending is a normal page boundary, not a routing error to retry")
+      } finally c.close()
+    }
+  }
+
+  @Test
+  def testCommittedResponsesCannotOmitOrContradictIsolationEvidence(): Unit = {
+    for (field <- Seq("lso", "status", "payload", "base", "last", "count", "pendingBelowLso", "visibleAtLso")) {
+      val response = GlobalSequenceFetch.dataResponse(batch, GlobalSequenceFetch.Data(MemoryRecords.EMPTY, 3, 12, 12, GlobalSequenceFetch.Aborted))
+      field match {
+        case "lso" => response.data().setLastStableOffset(-1)
+        case "status" => response.data().setReadStatus(3.toByte)
+        case "payload" => response.data().setRecords(records)
+        case "base" => response.data().setPhysicalBaseOffset(9)
+        case "last" => response.data().setPhysicalLastOffset(12)
+        case "count" => response.data().setRecordCount(1)
+        case "pendingBelowLso" => response.data().setReadStatus(GlobalSequenceFetch.Pending)
+        case "visibleAtLso" => response.data().setReadStatus(GlobalSequenceFetch.Visible).setRecords(records).setLastStableOffset(10)
+      }
+      assertThrows(classOf[InvalidRequestException], () => { GlobalSequenceFetch.decode(batch, 3, response, READ_COMMITTED); () }, field)
+    }
+    val old = GlobalSequenceFetch.dataResponse(batch, data())
+    assertThrows(classOf[InvalidRequestException], () => GlobalSequenceFetch.decode(batch, 3, old, READ_COMMITTED))
+    val builder = GlobalSequenceFetch.dataRequest(batch, 3, 1000, READ_COMMITTED)
+    assertEquals(1.toShort, builder.oldestAllowedVersion())
+    assertThrows(classOf[org.apache.kafka.common.errors.UnsupportedVersionException], () => builder.build(0.toShort))
+  }
+
+  @Test
+  def testVersionZeroKeepsOriginalWirePayloadAndVersionOneCarriesIsolationDecisions(): Unit = {
+    val ru = GlobalSequenceFetch.dataResponse(batch, data().copy(lastStableOffset = 12))
+    val oldData = new org.apache.kafka.common.message.ReadGlobalSequenceDataResponseData(
+      org.apache.kafka.common.protocol.MessageUtil.toByteBufferAccessor(ru.data(), 0.toShort), 0.toShort)
+    assertEquals(-1L, oldData.lastStableOffset())
+    assertEquals(-1L, oldData.physicalBaseOffset())
+    assertEquals(records, GlobalSequenceFetch.decode(batch, 3, new ReadGlobalSequenceDataResponse(oldData)).records)
+    val pending = GlobalSequenceFetch.dataResponse(batch,
+      GlobalSequenceFetch.Data(MemoryRecords.EMPTY, 3, 12, 10, GlobalSequenceFetch.Pending))
+    val current = new org.apache.kafka.common.message.ReadGlobalSequenceDataResponseData(
+      org.apache.kafka.common.protocol.MessageUtil.toByteBufferAccessor(pending.data(), 1.toShort), 1.toShort)
+    assertEquals(10L, current.physicalBaseOffset())
+    assertEquals(GlobalSequenceFetch.Pending,
+      GlobalSequenceFetch.decode(batch, 3, new ReadGlobalSequenceDataResponse(current), READ_COMMITTED).status)
+    val publicResponse = new org.apache.kafka.common.message.FetchGlobalSequenceResponseData().setTopicId(topicId)
+      .setTransactionPending(true).setNextGlobalOffset(7)
+    val parsed = new org.apache.kafka.common.message.FetchGlobalSequenceResponseData(
+      org.apache.kafka.common.protocol.MessageUtil.toByteBufferAccessor(publicResponse, 1.toShort), 1.toShort)
+    assertTrue(parsed.transactionPending())
+    assertEquals(7L, parsed.nextGlobalOffset())
   }
 }

@@ -17,6 +17,8 @@
 
 package kafka.server
 
+import org.apache.kafka.common.IsolationLevel
+import org.apache.kafka.common.IsolationLevel.READ_UNCOMMITTED
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, NotCoordinatorException, TimeoutException}
 import org.apache.kafka.common.message.FetchGlobalSequenceResponseData
 import org.apache.kafka.common.requests.FetchGlobalSequenceResponse
@@ -36,8 +38,8 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[FetchGlobalSequenceResponse]]()
   @volatile private var closed = false
 
-  def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long): CompletableFuture[Data] =
-    source.readLocal(batch, epoch, deadlineNs)
+  def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
+    source.readLocal(batch, epoch, deadlineNs, isolation)
 
   def fetch(request: Request): CompletableFuture[FetchGlobalSequenceResponse] = new Session(request).start()
 
@@ -99,6 +101,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
       if (result.isDone) return
       if (route != null && !index.isCurrent(new PartitionKey(request.lookup.topicId(), 0), route)) {
         response.batches().clear()
+        response.setTransactionPending(false)
         response.setNextGlobalOffset(request.lookup.startOffset())
         result.complete(GlobalSequenceFetch.fail(response, new NotCoordinatorException("Index route changed during global fetch")))
       } else result.complete(error.fold(new FetchGlobalSequenceResponse(response))(GlobalSequenceFetch.fail(response, _)))
@@ -117,6 +120,13 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
             completed -= consumed
             value match {
               case Left(error) => finish(Some(error))
+              case Right(data) if data.status == Pending =>
+                response.setTransactionPending(true)
+                finish(None)
+              case Right(data) if data.status == Aborted =>
+                response.setNextGlobalOffset(math.min(request.lookup.endOffset(), mappings(consumed).globalEndOffset()))
+                consumed += 1
+                progress = true
               case Right(data) =>
                 val size = data.records.sizeInBytes()
                 if (bytes > 0 && (bytes.toLong + size > request.maxBytes || bytes.toLong + size > MaxPayloadBytes)) finish(None)
@@ -138,7 +148,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
             issued += 1
             progress = true
             try {
-              val read = source.read(mappings(position).batch(), deadlineNs)
+              val read = source.read(mappings(position).batch(), deadlineNs, request.isolation)
               running += position -> read
               read.whenComplete { (data, error) => synchronized {
                 running -= position
