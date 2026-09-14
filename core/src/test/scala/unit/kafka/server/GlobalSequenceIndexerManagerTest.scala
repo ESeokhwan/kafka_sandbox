@@ -66,7 +66,7 @@ class GlobalSequenceIndexerManagerTest {
       result
     }
     val manager = new GlobalSequenceIndexerManager(1, replicas, mock(classOf[GlobalSequenceSourceReader]), router,
-      workers, time.scheduler, 1000, 1024)
+      workers, time.scheduler, 1000, 1024, mock(classOf[GlobalSequenceRetentionManager]))
     override def close(): Unit = { manager.close(); time.scheduler.clear() }
   }
 

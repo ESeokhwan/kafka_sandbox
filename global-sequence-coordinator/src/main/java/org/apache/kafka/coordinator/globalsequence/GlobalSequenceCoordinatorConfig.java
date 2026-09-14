@@ -71,6 +71,10 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int INDEXER_READ_MAX_BYTES_DEFAULT = 1024 * 1024;
     public static final String INDEXER_READ_MAX_BYTES_DOC = "Soft byte limit for each source log read. The first complete batch may exceed this limit.";
 
+    public static final String RETENTION_REFRESH_INTERVAL_MS_CONFIG = "global.sequence.retention.refresh.interval.ms";
+    public static final int RETENTION_REFRESH_INTERVAL_MS_DEFAULT = 1000;
+    public static final String RETENTION_REFRESH_INTERVAL_MS_DOC = "Interval between committed index progress queries for source replica retention. Unknown progress pins deletion at offset zero.";
+
     public static final String LOAD_BUFFER_SIZE_CONFIG = "global.sequence.coordinator.load.buffer.size";
     public static final int LOAD_BUFFER_SIZE_DEFAULT = 5 * 1024 * 1024;
     public static final String LOAD_BUFFER_SIZE_DOC = "Soft limit in bytes for index log reads during coordinator loading.";
@@ -91,6 +95,7 @@ public class GlobalSequenceCoordinatorConfig {
         .define(NUM_THREADS_CONFIG, INT, NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, NUM_THREADS_DOC)
         .define(INDEXER_NUM_THREADS_CONFIG, INT, INDEXER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, INDEXER_NUM_THREADS_DOC)
         .define(INDEXER_READ_MAX_BYTES_CONFIG, INT, INDEXER_READ_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, INDEXER_READ_MAX_BYTES_DOC)
+        .define(RETENTION_REFRESH_INTERVAL_MS_CONFIG, INT, RETENTION_REFRESH_INTERVAL_MS_DEFAULT, atLeast(1), MEDIUM, RETENTION_REFRESH_INTERVAL_MS_DOC)
         .define(LOAD_BUFFER_SIZE_CONFIG, INT, LOAD_BUFFER_SIZE_DEFAULT, atLeast(1), MEDIUM, LOAD_BUFFER_SIZE_DOC)
         .define(WRITE_TIMEOUT_MS_CONFIG, INT, WRITE_TIMEOUT_MS_DEFAULT, atLeast(1), MEDIUM, WRITE_TIMEOUT_MS_DOC)
         .define(APPEND_LINGER_MS_CONFIG, INT, APPEND_LINGER_MS_DEFAULT, atLeast(0), MEDIUM, APPEND_LINGER_MS_DOC);
@@ -135,6 +140,10 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int indexerReadMaxBytes() {
         return config.getInt(INDEXER_READ_MAX_BYTES_CONFIG);
+    }
+
+    public int retentionRefreshIntervalMs() {
+        return config.getInt(RETENTION_REFRESH_INTERVAL_MS_CONFIG);
     }
 
     public int writeTimeoutMs() {

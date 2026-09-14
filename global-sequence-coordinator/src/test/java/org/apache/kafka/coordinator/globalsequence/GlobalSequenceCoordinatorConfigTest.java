@@ -45,6 +45,7 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(1, config.numThreads());
         assertEquals(2, config.indexerNumThreads());
         assertEquals(1024 * 1024, config.indexerReadMaxBytes());
+        assertEquals(1000, config.retentionRefreshIntervalMs());
         assertEquals(5 * 1024 * 1024, config.loadBufferSize());
         assertEquals(5000, config.writeTimeoutMs());
         assertEquals(5, config.appendLingerMs());

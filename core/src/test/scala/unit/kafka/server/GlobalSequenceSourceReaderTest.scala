@@ -185,6 +185,8 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     append(2)
     append()
     commit()
+    // A stale reader can encounter a prefix already indexed and legitimately expired.
+    log.updateGlobalSequenceIndexedOffset(topicId.get, 2L)
     log.maybeIncrementLogStartOffset(2L, LogStartOffsetIncrementReason.ClientRecordDeletion)
     val gap = assertThrows(classOf[SourceLogGapException], () => read(0))
     assertEquals(key, gap.partition)

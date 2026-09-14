@@ -21,7 +21,8 @@
 Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연결까지 구현했다.
 내부 RPC·리더 라우팅·원본 로그 Reader와 파티션별 자동 Indexer까지 구현했다.
 장애 복구의 progress 재확인과 source leader 변경을 연결했다.
-원본 보존·Produce 대기 연동 및 global 읽기는 후속 구현 단계다.
+리더·follower·future replica의 원본 보존 경계를 연결했다.
+Produce 대기 연동 및 global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -273,7 +274,8 @@ lifecycle을 검증한다. 통합 테스트는 별도 수동 append 없이 Produ
 
 Source gap과 predecessor 불일치는 같은 등록 barrier 이후 authoritative progress를 재확인한다.
 재확인 후에도 복구할 수 없으면 읽기 위치를 건너뛰지 않고 오류로 중단한다.
-Retention/DeleteRecords 보존 경계는 12번 단계다. Produce 응답은 아직 인덱스 커밋을 기다리지 않으며, 해당 대기는
+Retention/DeleteRecords에는 committed progress 기반 보존 경계를 적용한다.
+Produce 응답은 아직 인덱스 커밋을 기다리지 않으며, 해당 대기는
 13번에서 연결한다. Global 조회/Fetch API도 후속 단계다.
 
 ### 원본 로그 Reader 구현
@@ -689,6 +691,62 @@ Log start offset으로 임의 이동하여 누락 없는 prefix라는 보장을 
 추가하려면 파티션별 마지막 progress와 next global offset을 잃지 않는 checkpoint 계약을
 먼저 정의해야 한다. Checkpoint는 초기 구현의 정확성 전제 대신 복구 비용 최적화로 둔다.
 
+### Replica별 보존 경계 구현
+
+[UnifiedLog](../../storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java)는
+각 로그 인스턴스에 `globalSequenceIndexedOffset`을 보관한다. 이는 마지막으로 확인된
+committed index 배치의 `physicalLastOffset + 1`이다. 활성화된 데이터 토픽의 로그를 새로
+열 때마다 0으로 초기화한다. 기존 `logStartOffset`, data HW 또는 디스크의 index tail을
+보고 인덱스 완료를 추정하지 않는다. 일반 토픽에는 추가 삭제 제한을 적용하지 않는다.
+
+보존 경계는 다음 경로에 적용한다.
+
+| 삭제/복제 경로 | 동작 |
+|---|---|
+| 시간·크기 retention, log-start 이전 세그먼트 삭제 | 세그먼트의 exclusive 끝이 data HW와 인덱스 보존 경계 이하일 때만 삭제 |
+| Tiered storage 로컬 세그먼트 삭제 | 원본 Reader가 사용할 미인덱싱 로컬 데이터도 같은 경계로 보존 |
+| 클라이언트 DeleteRecords | 요청 위치가 경계를 넘으면 변경 없이 `POLICY_VIOLATION` 반환 |
+| Follower/future replica의 leader log-start 반영 | 로컬에서 확인한 인덱스 경계까지만 전진. 이후 fetch에서 다시 반영 |
+| Remote tier의 log-start 갱신 | 인덱스 경계까지만 전진 |
+| 뒤처진 replica가 leader의 새 시작 위치로 전체 로그를 초기화 | 건너뛸 prefix가 인덱싱됐는지 확인될 때까지 `OFFSET_NOT_AVAILABLE`로 fetch 재시도 |
+
+Retention은 세그먼트 단위이므로 인덱싱된 배치와 미인덱싱 배치가 같은 세그먼트에 있으면
+세그먼트 전체가 남는다. DeleteRecords의 일반적인 HW 초과 오류는 기존대로 유지한다.
+보존 경계 이후의 DeleteRecords는 부분 성공으로 처리하지 않으며, 호출자는 progress가
+갱신된 뒤 재요청할 수 있다. 정상적인 topic/replica 삭제 및 복제의 tail truncation은
+이 prefix retention 정책과 구분한다. 필요한 원본이 이미 없는 경우의 Indexer 중단은
+앞 절의 authoritative progress 재확인 절차를 따른다.
+
+[GlobalSequenceRetentionManager](../../core/src/main/scala/kafka/server/GlobalSequenceRetentionManager.scala)는
+활성화된 토픽의 모든 로컬 source replica에 대해 Describe RPC로 committed progress를
+주기적으로 조회한다. Leader, follower 및 디렉터리 이동 중인 future log를 포함한다.
+Indexer와 worker pool·broker scheduler를 공유하고, replica마다 하나의 조회만 진행한다.
+Follower는 조회를 위해 Indexer ownership을 등록하거나 기존 소유권을 변경하지 않는다.
+
+| 브로커 설정 | 기본값 | 의미 |
+|---|---|---|
+| `global.sequence.retention.refresh.interval.ms` | 1000 | 진행 위치 조회 완료 후 다음 조회까지의 간격. 양수인 정적 설정 |
+
+최초 조회는 replica를 발견하면 바로 예약한다. 조회 deadline에는
+`global.sequence.coordinator.write.timeout.ms`를 사용한다. RPC 완료 callback은 worker에
+적용 작업을 예약하며, 그 작업에서 index route token, 실제 Partition 인스턴스, 캡처한
+current/future log 인스턴스와 topic UUID를 재확인한다. 새로 생기거나 교체된 로그는 자신의
+다음 조회가 완료될 때까지 0에 고정한다. 디렉터리 이동으로 future log가 current log가 된
+경우에도 같은 로그 객체라면 확인된 경계를 적용할 수 있다.
+
+Progress 조회가 새 인덱스 리더의 HW 지연 때문에 뒤처져 보여도 이미 확인한 경계는
+후퇴시키지 않는다. 보존에는 확인된 committed prefix가 작은 것이 보수적이므로 데이터
+Indexer의 재개와 달리 별도의 소유권 등록 barrier가 필요하지 않다. 조회 실패·지연 또는
+종료는 경계를 풀지 않는다. Retryable 실패는 재조회하고, 권한/이력 오류 같은 영구 오류는
+마지막 경계를 유지한 채 조회를 중단한다. 제어 레코드만 있는 suffix도 다음 데이터 배치의
+인덱스가 커밋될 때까지 남을 수 있다.
+
+단위 테스트는 시간·크기 retention, DeleteRecords, follower log-start 반영, 재시작의
+초기 pin, control-only suffix, remote/local 보존, 전체 로그 초기화 및 UUID/route/log 교체
+경합을 검증한다. 통합 테스트는 `retention.ms=0`에서 미인덱싱 배치를 보존한 채 follower를
+재시작·승격하여 인덱싱을 복구하고, 이후 삭제가 허용되는지 확인한다. 이미 만료된 인덱싱
+prefix 뒤로 새 follower가 정상적으로 복제를 시작하는 경로도 검증한다.
+
 ## 11. Global 읽기 계약
 
 ### 인덱스 조회
@@ -795,8 +853,8 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
   복구에 필요한 데이터가 삭제되지 않도록 retention 경계를 연결한다.
 
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
-복구의 progress 재확인과 source leader 변경을 연결했으며, 후속 구현 순서는
-원본 보존, Produce 대기, global 조회/읽기,
+복구의 progress 재확인과 source leader 변경, 모든 source replica의 보존 경계를 연결했다.
+후속 구현 순서는 Produce 대기, global 조회/읽기,
 트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.

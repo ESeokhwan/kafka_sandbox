@@ -38,7 +38,8 @@ object GlobalSequenceIndexerManager {
     val workers = Executors.newFixedThreadPool(config.indexerNumThreads(), runnable =>
       KafkaThread.daemon(s"global-sequence-indexer-$brokerId-${threadId.getAndIncrement()}", runnable))
     new GlobalSequenceIndexerManager(brokerId, replicaManager, new GlobalSequenceSourceReader(replicaManager),
-      router, workers, scheduler, config.writeTimeoutMs(), config.indexerReadMaxBytes())
+      router, workers, scheduler, config.writeTimeoutMs(), config.indexerReadMaxBytes(),
+      new GlobalSequenceRetentionManager(replicaManager, router, workers, scheduler, config.writeTimeoutMs(), config.retentionRefreshIntervalMs()))
   }
 }
 
@@ -51,7 +52,8 @@ class GlobalSequenceIndexerManager private[server](
   workers: ExecutorService,
   scheduler: Scheduler,
   requestTimeoutMs: Int,
-  readMaxBytes: Int
+  readMaxBytes: Int,
+  retention: GlobalSequenceRetentionManager
 ) extends AutoCloseable {
   private val indexers = mutable.Map.empty[PartitionKey, GlobalSequencePartitionIndexer]
   private var closed = false
@@ -59,6 +61,7 @@ class GlobalSequenceIndexerManager private[server](
   /** Called by the metadata publisher after replica and log configuration updates. No log I/O or RPC here. */
   def onMetadataUpdate(image: MetadataImage): Unit = synchronized {
     if (closed) return
+    retention.onMetadataUpdate(image)
     val desired = mutable.Set.empty[PartitionKey]
     image.topics().topicsById().values().asScala.foreach { topic =>
       val configs = image.configs().configProperties(new ConfigResource(ConfigResource.Type.TOPIC, topic.name()))
@@ -96,6 +99,7 @@ class GlobalSequenceIndexerManager private[server](
   override def close(): Unit = {
     synchronized {
       closed = true
+      retention.close()
       indexers.values.foreach(_.close())
       indexers.clear()
       workers.shutdown()

@@ -751,6 +751,7 @@ abstract class AbstractFetcherThread(name: String,
         onPartitionFenced(topicPartition, leaderEpochInRequest)
 
       case e@(_: UnknownTopicOrPartitionException |
+              _: OffsetNotAvailableException |
               _: UnknownLeaderEpochException |
               _: NotLeaderOrFollowerException) =>
         info(s"Could not fetch offset for $topicPartition due to error: ${e.getMessage}")
@@ -795,6 +796,7 @@ abstract class AbstractFetcherThread(name: String,
       case _: FencedLeaderEpochException =>
         onPartitionFenced(topicPartition, leaderEpochInRequest)
       case e@(_: UnknownTopicOrPartitionException |
+              _: OffsetNotAvailableException |
               _: UnknownLeaderEpochException |
               _: NotLeaderOrFollowerException) =>
         info(s"Could not build remote log auxiliary state for $topicPartition due to error: ${e.getMessage}")

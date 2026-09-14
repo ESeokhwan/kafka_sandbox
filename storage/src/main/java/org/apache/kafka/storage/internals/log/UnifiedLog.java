@@ -26,7 +26,9 @@ import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.common.errors.InvalidProducerEpochException;
 import org.apache.kafka.common.errors.InvalidTxnStateException;
 import org.apache.kafka.common.errors.KafkaStorageException;
+import org.apache.kafka.common.errors.OffsetNotAvailableException;
 import org.apache.kafka.common.errors.OffsetOutOfRangeException;
+import org.apache.kafka.common.errors.PolicyViolationException;
 import org.apache.kafka.common.errors.RecordBatchTooLargeException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
 import org.apache.kafka.common.internals.Topic;
@@ -158,6 +160,9 @@ public class UnifiedLog implements AutoCloseable {
     private volatile LogOffsetMetadata highWatermarkMetadata;
     private volatile long localLogStartOffset;
     private volatile long logStartOffset;
+    // Exclusive committed index prefix. Every newly opened replica starts pinned at zero until the
+    // coordinator confirms progress, including followers and future logs during directory migration.
+    private volatile long globalSequenceIndexedOffset = 0L;
     private volatile LeaderEpochFileCache leaderEpochCache;
     private volatile Optional<Uuid> topicId;
     private volatile LogOffsetsListener logOffsetsListener;
@@ -437,6 +442,28 @@ public class UnifiedLog implements AutoCloseable {
 
     public boolean remoteLogEnabled() {
         return UnifiedLog.isRemoteLogEnabled(remoteStorageSystemEnable, config(), topicPartition().topic());
+    }
+
+    /** Maximum prefix that retention may remove; ordinary topics keep their existing deletion policy. */
+    public long globalSequenceDeletionLimit() {
+        return config().globalSequenceEnabled() ? globalSequenceIndexedOffset : Long.MAX_VALUE;
+    }
+
+    /**
+     * Publish an authoritative committed index prefix for this exact topic identity. Stale reads may
+     * delay deletion but must never move the boundary backwards. This method performs no log I/O.
+     */
+    public boolean updateGlobalSequenceIndexedOffset(Uuid expectedTopicId, long nextOffset) {
+        if (nextOffset < 0 || expectedTopicId == null || expectedTopicId.equals(Uuid.ZERO_UUID)) {
+            throw new IllegalArgumentException("A valid topic ID and non-negative indexed offset are required");
+        }
+        synchronized (lock) {
+            if (!config().globalSequenceEnabled() || !topicId.equals(Optional.of(expectedTopicId))) {
+                return false;
+            }
+            globalSequenceIndexedOffset = Math.max(globalSequenceIndexedOffset, nextOffset);
+            return true;
+        }
     }
 
     public ScheduledFuture<?> producerExpireCheck() {
@@ -1290,8 +1317,9 @@ public class UnifiedLog implements AutoCloseable {
         }
     }
 
-    public void maybeIncrementLocalLogStartOffset(long newLocalLogStartOffset, LogStartOffsetIncrementReason reason) {
+    public void maybeIncrementLocalLogStartOffset(long requestedOffset, LogStartOffsetIncrementReason reason) {
         synchronized (lock) {
+            long newLocalLogStartOffset = Math.min(requestedOffset, globalSequenceDeletionLimit());
             if (newLocalLogStartOffset > localLogStartOffset()) {
                 localLogStartOffset = newLocalLogStartOffset;
                 logger.info("Incremented local log start offset to {} due to reason {}", localLogStartOffset(), reason);
@@ -1309,18 +1337,27 @@ public class UnifiedLog implements AutoCloseable {
      * @throws OffsetOutOfRangeException if the log start offset is greater than the high watermark
      * @return true if the log start offset was updated; otherwise false
      */
-    public boolean maybeIncrementLogStartOffset(long newLogStartOffset, LogStartOffsetIncrementReason reason) {
+    public boolean maybeIncrementLogStartOffset(long requestedOffset, LogStartOffsetIncrementReason reason) {
         // We don't have to write the log start offset to log-start-offset-checkpoint immediately.
         // The deleteRecordsOffset may be lost only if all in-sync replicas of this broker are shutdown
         // in an unclean manner within log.flush.start.offset.checkpoint.interval.ms. The chance of this happening is low.
         return maybeHandleIOException(
-                () -> "Exception while increasing log start offset for " + topicPartition() + " to " + newLogStartOffset + " in dir " + dir().getParent(),
+                () -> "Exception while increasing log start offset for " + topicPartition() + " to " + requestedOffset + " in dir " + dir().getParent(),
                 () -> {
                     synchronized (lock)  {
-                        if (newLogStartOffset > highWatermark()) {
-                            throw new OffsetOutOfRangeException("Cannot increment the log start offset to " + newLogStartOffset + " of partition " + topicPartition() +
+                        if (requestedOffset > highWatermark()) {
+                            throw new OffsetOutOfRangeException("Cannot increment the log start offset to " + requestedOffset + " of partition " + topicPartition() +
                                     " since it is larger than the high watermark " + highWatermark());
                         }
+                        long deletionLimit = globalSequenceDeletionLimit();
+                        if (reason == LogStartOffsetIncrementReason.ClientRecordDeletion &&
+                                requestedOffset > logStartOffset && requestedOffset > deletionLimit) {
+                            throw new PolicyViolationException("Cannot delete unindexed global sequence data for " + topicPartition() +
+                                    ": requested offset " + requestedOffset + ", committed index prefix " + deletionLimit);
+                        }
+                        // A follower may learn the leader's log start before its index progress refresh.
+                        // Keep its own prefix until that independent committed-progress check catches up.
+                        long newLogStartOffset = Math.min(requestedOffset, deletionLimit);
 
                         if (remoteLogEnabled()) {
                             // This should be set log-start-offset is set more than the current local-log-start-offset
@@ -1819,7 +1856,8 @@ public class UnifiedLog implements AutoCloseable {
                 long upperBoundOffset = nextSegmentOpt.map(LogSegment::baseOffset).orElseGet(this::logEndOffset);
                 // We don't delete segments with offsets at or beyond the high watermark to ensure that the log start
                 // offset can never exceed it.
-                boolean predicateResult = highWatermark() >= upperBoundOffset && predicate.execute(segment, nextSegmentOpt);
+                boolean predicateResult = highWatermark() >= upperBoundOffset &&
+                        globalSequenceDeletionLimit() >= upperBoundOffset && predicate.execute(segment, nextSegmentOpt);
 
                 // Roll the active segment when it breaches the configured retention policy. The rolled segment will be
                 // eligible for deletion and gets removed in the next iteration.
@@ -2290,6 +2328,13 @@ public class UnifiedLog implements AutoCloseable {
                 () -> {
                     logger.debug("Truncate and start at offset {}, logStartOffset: {}", newOffset, logStartOffsetOpt.orElse(newOffset));
                     synchronized (lock)  {
+                        long restartOffset = Math.max(newOffset, logStartOffsetOpt.orElse(newOffset));
+                        if (restartOffset > logStartOffset && restartOffset > globalSequenceDeletionLimit()) {
+                            // Do not skip an unindexed prefix when a lagging/future replica catches up to
+                            // a retained leader start. Fetchers retry until committed progress authorizes it.
+                            throw new OffsetNotAvailableException("Global sequence index progress has not authorized " +
+                                    "starting " + topicPartition() + " at offset " + restartOffset);
+                        }
                         localLog.truncateFullyAndStartAt(newOffset);
                         leaderEpochCache.clearAndFlush();
                         producerStateManager.truncateFullyAndStartAt(newOffset);
