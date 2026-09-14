@@ -20,7 +20,8 @@
 상태: 1차 구현을 위한 설계 계약. 모듈·설정, 저장 형식, Runtime context/hook,
 Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연결까지 구현했다.
 내부 RPC·리더 라우팅·원본 로그 Reader와 파티션별 자동 Indexer까지 구현했다.
-장애 복구 보강·원본 보존·Produce 대기 연동 및 global 읽기는 후속 구현 단계다.
+장애 복구의 progress 재확인과 source leader 변경을 연결했다.
+원본 보존·Produce 대기 연동 및 global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -203,7 +204,8 @@ expected generation, physical batch 및 predecessor, source identity는 그대�
 등록 CAS 거절과 `FENCED`, `OWNER_NOT_COMMITTED`, `OUT_OF_ORDER`는 호출자에게
 반환한다. 특히 fencing/등록 거절은 인덱스 리더가 바뀌었더라도 자동 재시도로 숨기지 않는다.
 Indexer는 이 결과에 맞춰 중단하거나 같은 등록 barrier를 재확인한 뒤 진행 위치를 조회한다.
-현재 `OUT_OF_ORDER`는 cursor를 이동하지 않고 오류로 중단하며, 복구 단계에서 원인 재확인을 보강한다.
+`OUT_OF_ORDER`도 같은 등록 barrier와 committed progress를 재확인한다. 동일 리더에서
+재확인한 뒤에도 같은 순서 오류가 반복되면 cursor를 건너뛰지 않고 중단한다.
 Deadline·호출 취소·브로커 종료는 대기 Future와 예약된 재시도를 해제하며, 이미 coordinator가
 수락한 write의 rollback이나 할당 취소를 의미하지 않는다. Broker 종료 시 라우터와 네트워크를
 coordinator 및 scheduler보다 먼저 닫는다. 관측한 인덱스 토픽의 삭제·UUID/partition 수 변경은
@@ -269,9 +271,9 @@ lifecycle을 검증한다. 통합 테스트는 별도 수동 append 없이 Produ
 인덱싱되는지, 인덱스 리더 이동 후에도 실제 index log의 global 범위가 중복 없이 연속적인지,
 브로커 재시작 후 committed progress에서 자동 인덱싱이 재개되는지 확인한다.
 
-현재 source gap과 predecessor 불일치는 읽기 위치를 건너뛰지 않고 오류로 중단한다.
-이 오류의 authoritative progress 재확인과 장애 복구 보강은 11번, retention/DeleteRecords
-보존 경계는 12번 단계다. Produce 응답은 아직 인덱스 커밋을 기다리지 않으며, 해당 대기는
+Source gap과 predecessor 불일치는 같은 등록 barrier 이후 authoritative progress를 재확인한다.
+재확인 후에도 복구할 수 없으면 읽기 위치를 건너뛰지 않고 오류로 중단한다.
+Retention/DeleteRecords 보존 경계는 12번 단계다. Produce 응답은 아직 인덱스 커밋을 기다리지 않으며, 해당 대기는
 13번에서 연결한다. Global 조회/Fetch API도 후속 단계다.
 
 ### 원본 로그 Reader 구현
@@ -639,6 +641,31 @@ Coordinator는 실제 write 이벤트의 current committed/pending 상태로 재
 Index HW가 증가한 경우 다른 파티션의 진행만으로 복구를 무조건 처음부터 반복할 필요는
 없지만, 현재 진행 상태를 확인하지 않은 오래된 결과로 신규 범위를 만들 수는 없다.
 
+### 데이터 Indexer 복구 구현
+
+원본 Reader에서 `SourceLogGapException`을 받으면 바로 `logStartOffset`으로 이동하지 않는다.
+같은 registration UUID/generation으로 등록 barrier를 재확인하고, 그 barrier의 route token과
+일치하는 committed progress를 조회한다. 진행 위치가 더 앞서 있다면 그 prefix 이후로
+이동하여 원본 로그를 다시 확인한다. Control-only 구간을 이미 검증한 같은 source 수명에서는
+그 임시 읽기 위치를 유지하며, 새 source 수명에서는 영속 progress 다음부터 다시 읽는다.
+
+권위 있는 진행 위치를 확인한 뒤에도 Reader가 동일 인덱스 리더에서 gap을 보고하면
+해당 Indexer를 오류로 중단한다. 재확인 사이에 인덱스 리더가 바뀌면 이전 조회로 손실을
+확정하지 않고 새 리더의 barrier와 progress를 다시 확인한다. 복구 중 CAS 거절이나
+ownership 변경을 받으면 이전 Indexer를 중단하며 다른 generation으로 소유권을 되찾지 않는다.
+
+Append의 `OUT_OF_ORDER`도 같은 복구 절차를 적용한다. 확정 progress가 진행 중 배치를
+포함하면 이미 처리된 배치를 제거하고 다음 위치로 진행한다. 그렇지 않으면 원래 배치·
+predecessor·identity를 유지해 재전송하며, 재확인한 동일 리더에서도 순서 오류가 반복되면
+중단한다. Progress의 후퇴나 확정 prefix와 pending predecessor의 모순도 오류로 처리한다.
+단순 timeout과 `OWNER_NOT_COMMITTED`는 이 unrecoverable 판정과 구분하여 기존 재시도/
+등록 barrier 경로를 따른다.
+
+통합 테스트는 A 브로커에서 이미 인덱싱한 prefix 뒤에 데이터만 복제한 상태를 만든 뒤,
+데이터 리더를 B로 옮겨 미인덱싱 배치를 복구하고 다시 A로 옮겨 다음 배치까지 진행한다.
+이전 Indexer의 source epoch와 실행 수명을 재사용하지 않으며, 늦은 callback은 새 수명에
+적용되지 않는다. 브로커 재시작 및 인덱스 리더 이동 테스트와 함께 이 경로를 검증한다.
+
 ## 10. 보존과 데이터 손실 감지
 
 미인덱싱 대상 배치가 retention 또는 DeleteRecords로 먼저 사라지지 않도록 삭제 경계를
@@ -768,7 +795,8 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
   복구에 필요한 데이터가 삭제되지 않도록 retention 경계를 연결한다.
 
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
-후속 구현 순서는 장애 복구 보강과 보존, Produce 대기, global 조회/읽기,
+복구의 progress 재확인과 source leader 변경을 연결했으며, 후속 구현 순서는
+원본 보존, Produce 대기, global 조회/읽기,
 트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.

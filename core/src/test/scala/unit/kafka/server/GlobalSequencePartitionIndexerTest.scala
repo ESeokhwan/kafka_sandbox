@@ -336,20 +336,18 @@ class GlobalSequencePartitionIndexerTest {
   }
 
   @Test
-  def testFatalAppendErrorsStopWithoutSkippingOrRetrying(): Unit = {
-    for (status <- Seq(AppendStatus.FENCED, AppendStatus.OUT_OF_ORDER)) {
-      val c = new Context
-      try {
-        c.read = _ => c.batch(a)
-        c.start()
-        c.completeAppend(status)
-        c.time.sleep(10000)
-        c.executor.runAll()
-        assertTrue(c.indexer.isStopped)
-        assertEquals(1, c.appends.size)
-        assertEquals(Seq(0L), c.reads.toSeq)
-      } finally c.close()
-    }
+  def testFencedAppendStopsWithoutSkippingOrRetrying(): Unit = {
+    val c = new Context
+    try {
+      c.read = _ => c.batch(a)
+      c.start()
+      c.completeAppend(AppendStatus.FENCED)
+      c.time.sleep(10000)
+      c.executor.runAll()
+      assertTrue(c.indexer.isStopped)
+      assertEquals(1, c.appends.size)
+      assertEquals(Seq(0L), c.reads.toSeq)
+    } finally c.close()
   }
 
   @Test
@@ -423,6 +421,106 @@ class GlobalSequencePartitionIndexerTest {
       assertEquals(Seq(0L, 3L), c.reads.toSeq)
       assertEquals(b, c.appends.last._1.batch())
       assertEquals(0L, c.appends.last._1.predecessorBaseOffset())
+    } finally c.close()
+  }
+
+  @Test
+  def testSourceGapRechecksAuthoritativeProgressBeforeResuming(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => if (offset == 0) throw new SourceLogGapException(key, 0, 3, 3, 5, "retained prefix moved") else c.batch(b)
+      c.start()
+      assertFalse(c.indexer.isStopped)
+      assertEquals(Seq(0L), c.reads.toSeq)
+      assertSame(c.registrations.head._1, c.registrations.last._1)
+      c.registered()
+      c.describe(Some(a), Some(c.owner))
+      assertEquals(Seq(0L, 3L), c.reads.toSeq)
+      assertEquals(b, c.appends.last._1.batch())
+      assertEquals(0L, c.appends.last._1.predecessorBaseOffset())
+    } finally c.close()
+  }
+
+  @Test
+  def testUnrecoverableGapStopsAfterBarrierAndRecheckWithoutJumpingToLogStart(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => throw new SourceLogGapException(key, offset, 3, 3, 5, "missing required batch")
+      c.start()
+      c.registered()
+      c.describe(None, Some(c.owner))
+      assertTrue(c.indexer.isStopped)
+      assertTrue(c.indexer.failure.get.isInstanceOf[SourceLogGapException])
+      assertEquals(Seq(0L, 0L), c.reads.toSeq)
+      assertTrue(c.appends.isEmpty)
+      assertEquals(2, c.registrations.size)
+    } finally c.close()
+  }
+
+  @Test
+  def testOrderingRejectionRechecksProgressThenRetriesTheSamePendingRequest(): Unit = {
+    val c = new Context
+    try {
+      c.read = _ => c.batch(a)
+      c.start()
+      val request = c.appends.head._1
+      c.completeAppend(AppendStatus.OUT_OF_ORDER)
+      assertFalse(c.indexer.isStopped)
+      c.registered()
+      c.describe(None, Some(c.owner))
+      assertSame(request, c.appends.last._1)
+      c.completeAppend(AppendStatus.OUT_OF_ORDER)
+      assertTrue(c.indexer.isStopped)
+      assertTrue(c.indexer.failure.get.isInstanceOf[InvalidRequestException])
+      assertEquals(Seq(0L), c.reads.toSeq)
+    } finally c.close()
+  }
+
+  @Test
+  def testLeaderChangeDuringGapRecheckRequiresAnotherCurrentBarrier(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => throw new SourceLogGapException(key, offset, 3, 3, 5, "missing prefix")
+      c.start()
+      c.registered()
+      c.descriptions.last.complete(RoutedResult(new PartitionDescription(Optional.empty(), Optional.of(c.owner)), route))
+      c.currentRoute = route.copy(leaderEpoch = 11)
+      c.executor.runAll()
+      assertFalse(c.indexer.isStopped)
+      assertEquals(Seq(0L), c.reads.toSeq)
+      c.registered()
+      c.describe(None, Some(c.owner))
+      assertTrue(c.indexer.isStopped)
+      assertEquals(Seq(0L, 0L), c.reads.toSeq)
+    } finally c.close()
+  }
+
+  @Test
+  def testGapRecoveryCanFenceTheOldOwnerWithoutReadingAgain(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => throw new SourceLogGapException(key, offset, 3, 3, 5, "missing prefix")
+      c.start()
+      c.registrations.last._2.complete(RoutedResult(new RegistrationResponse(false, Optional.of(c.owner), 10), route))
+      c.executor.runAll()
+      assertTrue(c.indexer.isStopped)
+      assertEquals(Seq(0L), c.reads.toSeq)
+    } finally c.close()
+  }
+
+  @Test
+  def testGapRecoveryPreservesValidatedControlOnlyCursorWithinTheSameSourceLifetime(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => if (offset == 0) ReadResult(key, 3, 5, 3, None, CONTINUE)
+        else throw new SourceLogGapException(key, offset, 4, 4, 5, "missing data after control prefix")
+      c.start()
+      assertEquals(Seq(0L, 3L), c.reads.toSeq)
+      c.registered()
+      c.describe(None, Some(c.owner))
+      assertTrue(c.indexer.isStopped)
+      assertEquals(Seq(0L, 3L, 3L), c.reads.toSeq)
+      assertTrue(c.appends.isEmpty)
     } finally c.close()
   }
 

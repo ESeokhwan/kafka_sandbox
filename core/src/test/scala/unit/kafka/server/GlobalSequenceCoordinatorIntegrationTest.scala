@@ -24,6 +24,10 @@ import org.apache.kafka.common.{ElectionType, TopicPartition, Uuid}
 import org.apache.kafka.common.message.{AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData, RegisterGlobalSequenceIndexerResponseData}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
+import org.apache.kafka.common.compress.Compression
+import org.apache.kafka.common.record.{MemoryRecords, SimpleRecord}
+import org.apache.kafka.server.common.RequestLocal
+import org.apache.kafka.storage.internals.log.AppendOrigin
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, InvalidConfigurationException, InvalidPartitionsException}
@@ -370,6 +374,74 @@ class GlobalSequenceCoordinatorIntegrationTest {
             assertTrue(batches.forall(batch => batch.physicalLastOffset() == batch.physicalBaseOffset() && batch.recordCount() == 1))
           }
         } finally consumer.close()
+      } finally admin.close()
+    } finally cluster.close()
+  }
+
+  @Test
+  def testSourceLeaderRoundTripRecoversCommittedButUnindexedBatches(): Unit = {
+    val cluster = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder()
+      .setNumBrokerNodes(3).setNumControllerNodes(1).build())
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "2")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, "3")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, "2")
+      .build()
+    try {
+      cluster.format()
+      cluster.startup()
+      cluster.waitForReadyBrokers()
+      val brokers = cluster.brokers().values().asScala.toSeq.sortBy(_.config.brokerId)
+      val ids = brokers.map(b => Int.box(b.config.brokerId))
+      val tp = new TopicPartition("recovery", 0)
+      val admin = Admin.create(cluster.clientProperties())
+      try {
+        admin.createTopics(util.List.of(new NewTopic(tp.topic(), util.Map.of(Int.box(0), ids.asJava))
+          .configs(util.Map.of(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true", TopicConfig.CLEANUP_POLICY_CONFIG, "delete"))))
+          .all().get(30, TimeUnit.SECONDS)
+        TestUtils.waitUntilTrue(() => brokers.forall(_.metadataCache.contains(tp)), "Source metadata was not published", 30000)
+        val id = admin.describeTopics(util.List.of(tp.topic())).allTopicNames().get(30, TimeUnit.SECONDS).get(tp.topic()).topicId()
+        val key = new PartitionKey(id, 0)
+        val source = brokers.head
+        def awaitProgress(last: Long): Unit = TestUtils.waitUntilTrue(() => Try(source.indexRoutingManager.describePartition(key, 5000)
+          .get(6, TimeUnit.SECONDS)).toOption.exists(r => r.value.committedProgress().isPresent &&
+          r.value.committedProgress().get().lastOffset() == last), s"Recovery did not index through $last", 30000)
+        def appendOn(broker: BrokerServer, count: Int): Long = {
+          val records = MemoryRecords.withRecords(Compression.NONE, (0 until count).map(_ => new SimpleRecord(Array[Byte](1))): _*)
+          val info = broker.replicaManager.onlinePartition(tp).get.appendRecordsToLeader(records, AppendOrigin.CLIENT, -1, RequestLocal.noCaching)
+          info.lastOffset()
+        }
+        assertEquals(0, appendOn(source, 1))
+        awaitProgress(0)
+        val firstIndexer = source.globalSequenceIndexerManager.indexer(key).get
+        firstIndexer.close()
+        // Commit source data with indexing stopped, independently of the Produce waiter added in step 13.
+        assertEquals(2, appendOn(source, 2))
+        TestUtils.waitUntilTrue(() => source.replicaManager.localLog(tp).get.highWatermark >= 3,
+          "Source data did not replicate before leader movement", 30000)
+        assertEquals(0L, source.indexRoutingManager.describePartition(key, 5000).get(6, TimeUnit.SECONDS)
+          .value.committedProgress().get().lastOffset())
+        def move(target: BrokerServer): Unit = {
+          val targetId = Int.box(target.config.brokerId)
+          val replicas = (Seq(targetId) ++ ids.filterNot(_ == targetId)).asJava
+          admin.alterPartitionReassignments(util.Map.of(tp, util.Optional.of(new NewPartitionReassignment(replicas))))
+            .all().get(30, TimeUnit.SECONDS)
+          TestUtils.waitUntilTrue(() => admin.listPartitionReassignments().reassignments().get(10, TimeUnit.SECONDS).isEmpty,
+            "Source reassignment did not finish", 30000)
+          admin.electLeaders(ElectionType.PREFERRED, util.Set.of(tp)).all().get(30, TimeUnit.SECONDS)
+          TestUtils.waitUntilTrue(() => brokers.forall(_.metadataCache.getImage().topics().getTopic(id)
+            .partitions().get(0).leader == target.config.brokerId), "Source leader did not move", 30000)
+        }
+        move(brokers(1))
+        awaitProgress(2)
+        val secondIndexer = brokers(1).globalSequenceIndexerManager.indexer(key).get
+        assertTrue(secondIndexer.sourceLeaderEpoch > firstIndexer.sourceLeaderEpoch)
+        move(source)
+        TestUtils.waitUntilTrue(() => source.globalSequenceIndexerManager.indexer(key)
+          .exists(_.sourceLeaderEpoch > secondIndexer.sourceLeaderEpoch), "Returning source did not create a new lifetime", 30000)
+        assertTrue(secondIndexer.isStopped)
+        assertNotSame(firstIndexer, source.globalSequenceIndexerManager.indexer(key).get)
+        assertEquals(3, appendOn(source, 1))
+        awaitProgress(3)
       } finally admin.close()
     } finally cluster.close()
   }

@@ -68,6 +68,8 @@ private[server] class GlobalSequencePartitionIndexer(
   private var progress: Option[PhysicalBatch] = None
   private var cursor = 0L
   private var pending: Option[AppendRequest] = None
+  private var recoveryError: Option[Throwable] = None
+  private var recoveryCheckedAt: Option[CoordinatorLocation] = None
 
   private val listener = new PartitionListener {
     override def onHighWatermarkUpdated(tp: TopicPartition, offset: Long): Unit = {
@@ -175,13 +177,25 @@ private[server] class GlobalSequencePartitionIndexer(
       if (committed.map(_.lastOffset()).getOrElse(-1L) < progress.map(_.lastOffset()).getOrElse(-1L))
         throw new InvalidRequestException("Committed global sequence progress regressed after a registration barrier")
       progress = committed
-      cursor = committed.map(_.resumeOffset()).getOrElse(0L)
+      // Preserve already validated control-only progress within this source lifetime.
+      // A new lifetime still starts at the durable cursor (or zero).
+      cursor = math.max(cursor, committed.map(_.resumeOffset()).getOrElse(0L))
       pending.foreach { request =>
         if (committed.exists(_.lastOffset() >= request.batch().lastOffset())) pending = None
         else if (request.predecessorBaseOffset() != committed.map(_.baseOffset()).getOrElse(-1L))
           throw new InvalidRequestException("Pending global sequence append disagrees with committed progress")
       }
+      recoveryCheckedAt = recoveryError.map(_ => result.coordinator)
       enqueue { pump() }
+    }
+  }
+
+  private def recover(cause: Throwable): Unit = {
+    if (recoveryCheckedAt.exists(router.isCurrent(partition, _))) fail(cause)
+    else {
+      recoveryError = Some(cause)
+      recoveryCheckedAt = None
+      register()
     }
   }
 
@@ -190,7 +204,14 @@ private[server] class GlobalSequencePartitionIndexer(
     pending match {
       case Some(request) => append(request)
       case None =>
-        val read = reader.read(partition, sourceLeaderEpoch, cursor, readMaxBytes)
+        val read = try reader.read(partition, sourceLeaderEpoch, cursor, readMaxBytes)
+        catch {
+          case gap: SourceLogGapException =>
+            if (!isStopped) recover(gap)
+            return
+        }
+        recoveryError = None
+        recoveryCheckedAt = None
         if (!isStopped) read.status match {
           case BATCH =>
             val request = new AppendRequest(read.batch.get, progress.map(_.baseOffset()).getOrElse(-1L), read.dataHighWatermark, owner)
@@ -217,13 +238,15 @@ private[server] class GlobalSequencePartitionIndexer(
       case AppendStatus.FENCED => fail(new FencedLeaderEpochException("Global sequence append was fenced"))
       case AppendStatus.OWNER_NOT_COMMITTED => register()
       case AppendStatus.OUT_OF_ORDER =>
-        fail(new InvalidRequestException("Global sequence coordinator rejected the source predecessor"))
+        recover(new InvalidRequestException("Global sequence coordinator rejected the source predecessor after progress recovery"))
       case AppendStatus.INDEXED | AppendStatus.ALREADY_INDEXED =>
         if (!router.isCurrent(partition, result.coordinator)) register()
         else {
           progress = result.value.indexedThrough().toScala
           cursor = progress.get.resumeOffset()
           pending = None
+          recoveryError = None
+          recoveryCheckedAt = None
           enqueue { pump() }
         }
     }
