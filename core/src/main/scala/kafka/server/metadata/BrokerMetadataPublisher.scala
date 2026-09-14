@@ -21,7 +21,7 @@ import java.util.OptionalInt
 import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.log.LogManager
 import kafka.server.share.SharePartitionManager
-import kafka.server.{KafkaConfig, ReplicaManager}
+import kafka.server.{GlobalSequenceIndexerManager, KafkaConfig, ReplicaManager}
 import kafka.utils.Logging
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.TimeoutException
@@ -76,6 +76,7 @@ class BrokerMetadataPublisher(
   txnCoordinator: TransactionCoordinator,
   shareCoordinator: ShareCoordinator,
   globalSequenceCoordinator: GlobalSequenceCoordinator,
+  globalSequenceIndexerManager: GlobalSequenceIndexerManager,
   sharePartitionManager: SharePartitionManager,
   var dynamicConfigPublisher: DynamicConfigPublisher,
   dynamicClientQuotaPublisher: DynamicClientQuotaPublisher,
@@ -236,6 +237,16 @@ class BrokerMetadataPublisher(
 
       // Apply configuration deltas.
       dynamicConfigPublisher.onMetadataUpdate(delta, newImage)
+
+      // Source indexing starts only after local replicas and their topic configurations are ready.
+      if (_firstPublish || delta.topicsDelta() != null || delta.configsDelta() != null) {
+        try {
+          globalSequenceIndexerManager.onMetadataUpdate(newImage)
+        } catch {
+          case t: Throwable => metadataPublishingFaultHandler.handleFault("Error updating global sequence " +
+            s"indexers in $deltaName", t)
+        }
+      }
 
       // Apply client quotas delta.
       dynamicClientQuotaPublisher.onMetadataUpdate(delta, newImage)

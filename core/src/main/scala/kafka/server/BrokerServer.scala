@@ -132,6 +132,7 @@ class BrokerServer(
   var shareCoordinator: ShareCoordinator = _
   var globalSequenceCoordinator: GlobalSequenceCoordinator = _
   var indexRoutingManager: IndexRoutingManager = _
+  var globalSequenceIndexerManager: GlobalSequenceIndexerManager = _
 
   var clientToControllerChannelManager: NodeToControllerChannelManager = _
 
@@ -407,6 +408,8 @@ class BrokerServer(
         new GlobalSequenceNetworkClient(NetworkUtils.buildNetworkClient("GlobalSequence", config, metrics, time,
           new LogContext(s"[GlobalSequence broker=${config.brokerId}]")), config.requestTimeoutMs, time), kafkaScheduler, time)
       indexRoutingManager.startup()
+      globalSequenceIndexerManager = GlobalSequenceIndexerManager(config.brokerId, config.globalSequenceCoordinatorConfig,
+        replicaManager, indexRoutingManager, kafkaScheduler)
 
       dynamicConfigHandlers = Map[ConfigType, ConfigHandler](
         ConfigType.TOPIC -> new TopicConfigHandler(replicaManager, config, quotaManagers),
@@ -498,6 +501,7 @@ class BrokerServer(
         transactionCoordinator,
         shareCoordinator,
         globalSequenceCoordinator,
+        globalSequenceIndexerManager,
         sharePartitionManager,
         new DynamicConfigPublisher(
           config,
@@ -816,6 +820,8 @@ class BrokerServer(
        * not flush the remaining partitions or write the clean shutdown marker. Ultimately, the
        * broker would have to take hours to recover the log during restart.
        */
+      if (globalSequenceIndexerManager != null)
+        CoreUtils.swallow(globalSequenceIndexerManager.close(), this)
       if (indexRoutingManager != null)
         CoreUtils.swallow(indexRoutingManager.close(), this)
       if (kafkaScheduler != null)

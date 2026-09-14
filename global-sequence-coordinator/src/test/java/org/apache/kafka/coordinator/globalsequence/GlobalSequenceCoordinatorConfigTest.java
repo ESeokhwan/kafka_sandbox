@@ -43,6 +43,8 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(2, config.indexTopicMinIsr());
         assertEquals(100 * 1024 * 1024, config.indexTopicSegmentBytes());
         assertEquals(1, config.numThreads());
+        assertEquals(2, config.indexerNumThreads());
+        assertEquals(1024 * 1024, config.indexerReadMaxBytes());
         assertEquals(5 * 1024 * 1024, config.loadBufferSize());
         assertEquals(5000, config.writeTimeoutMs());
         assertEquals(5, config.appendLingerMs());
@@ -66,12 +68,16 @@ class GlobalSequenceCoordinatorConfigTest {
             GlobalSequenceCoordinatorConfig.NUM_THREADS_CONFIG, 2,
             GlobalSequenceCoordinatorConfig.LOAD_BUFFER_SIZE_CONFIG, 4096,
             GlobalSequenceCoordinatorConfig.WRITE_TIMEOUT_MS_CONFIG, 100,
-            GlobalSequenceCoordinatorConfig.APPEND_LINGER_MS_CONFIG, 0
+            GlobalSequenceCoordinatorConfig.APPEND_LINGER_MS_CONFIG, 0,
+            GlobalSequenceCoordinatorConfig.INDEXER_NUM_THREADS_CONFIG, 3,
+            GlobalSequenceCoordinatorConfig.INDEXER_READ_MAX_BYTES_CONFIG, 1024
         ));
         assertEquals(1, config.indexTopicNumPartitions());
         assertEquals(1, config.indexTopicReplicationFactor());
         assertEquals(1, config.indexTopicMinIsr());
         assertEquals(2, config.numThreads());
+        assertEquals(3, config.indexerNumThreads());
+        assertEquals(1024, config.indexerReadMaxBytes());
         assertEquals(4096, config.loadBufferSize());
         assertEquals(100, config.writeTimeoutMs());
         assertEquals(0, config.appendLingerMs());

@@ -45,6 +45,9 @@ object IndexRoutingManager {
     Errors.COORDINATOR_LOAD_IN_PROGRESS, Errors.NOT_LEADER_OR_FOLLOWER, Errors.LEADER_NOT_AVAILABLE,
     Errors.REQUEST_TIMED_OUT, Errors.NETWORK_EXCEPTION, Errors.UNKNOWN_TOPIC_OR_PARTITION,
     Errors.KAFKA_STORAGE_ERROR, Errors.NOT_ENOUGH_REPLICAS, Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND)
+
+  private[server] def isRetryable(cause: Throwable): Boolean =
+    cause.isInstanceOf[DisconnectException] || retryable.contains(Errors.forException(cause))
 }
 
 /**
@@ -179,7 +182,7 @@ class IndexRoutingManager private[server](
       scheduler.scheduleOnce("global-sequence-routing", () => if (!result.isDone) work, delayMs)
     def retry(error: Throwable, attempt: Int): Unit = {
       val cause = Errors.maybeUnwrapException(error)
-      if (cause.isInstanceOf[DisconnectException] || retryable.contains(Errors.forException(cause))) {
+      if (isRetryable(cause)) {
         val remaining = deadlineMs - time.hiResClockMs()
         if (remaining <= 0) timeout()
         else {

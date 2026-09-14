@@ -18,22 +18,26 @@ package kafka.server
 
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry, NewPartitionReassignment, NewPartitions, NewTopic}
+import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.{ElectionType, TopicPartition, Uuid}
 import org.apache.kafka.common.message.{AppendGlobalSequenceIndexRequestData, DescribeGlobalSequencePartitionRequestData, RegisterGlobalSequenceIndexerRequestData, RegisterGlobalSequenceIndexerResponseData}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
-import org.apache.kafka.common.serialization.ByteArraySerializer
+import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, InvalidConfigurationException, InvalidPartitionsException}
 import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.test.{KafkaClusterTestKit, TestKitNodes}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorConfig, GlobalSequenceCoordinatorRecordSerde}
+import org.apache.kafka.coordinator.globalsequence.generated.{BatchIndexKey, BatchIndexValue}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{AppendRequest, AppendStatus, PartitionKey, RegistrationRequest}
 import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotSame, assertTrue}
 import org.junit.jupiter.api.{Test, Timeout}
 
+import java.nio.ByteBuffer
+import java.time.Duration
 import java.util
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters._
@@ -55,6 +59,8 @@ class GlobalSequenceCoordinatorIntegrationTest {
       cluster.startup()
       cluster.waitForReadyBrokers()
       val broker = cluster.brokers().values().iterator().next()
+      // This test exercises the low-level RPCs with an explicit owner. Automatic indexing is tested below.
+      broker.globalSequenceIndexerManager.close()
       val admin = Admin.create(cluster.clientProperties())
       try {
         assertFalse(admin.listTopics().names().get(30, TimeUnit.SECONDS).contains(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME))
@@ -141,11 +147,20 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(mappedPartition, broker.globalSequenceCoordinator.partitionFor(topicId))
         TestUtils.waitUntilTrue(() => Try(broker.globalSequenceCoordinator.committedProgress(partition).get(10, TimeUnit.SECONDS)).toOption.exists(p => p.isPresent && p.get().lastOffset() == physicalOffset),
           "Global sequence shard did not reload after broker restart", 30000)
+        TestUtils.waitUntilTrue(() => Try(describe().data()).toOption.exists(_.indexerGeneration() > 0),
+          "The restarted broker did not register its automatic indexer", 30000)
         val recovered = describe().data()
         assertEquals(Errors.NONE.code(), recovered.errorCode())
         assertEquals(physicalOffset, recovered.physicalLastOffset())
-        assertEquals(registrationId, recovered.registrationId())
-        assertEquals(0L, recovered.indexerGeneration())
+        assertTrue(recovered.registrationId() != registrationId)
+        assertTrue(recovered.indexerGeneration() > 0)
+        val resumedProducer = new KafkaProducer[Array[Byte], Array[Byte]](props)
+        val nextOffset = try {
+          resumedProducer.send(new ProducerRecord[Array[Byte], Array[Byte]]("ordered", 0, null, Array[Byte](4)))
+            .get(30, TimeUnit.SECONDS).offset()
+        } finally resumedProducer.close()
+        TestUtils.waitUntilTrue(() => Try(describe().data()).toOption.exists(_.physicalLastOffset() == nextOffset),
+          "Automatic indexing did not resume from the committed batch after restart", 30000)
       } finally {
         admin.close()
       }
@@ -167,6 +182,8 @@ class GlobalSequenceCoordinatorIntegrationTest {
       cluster.startup()
       cluster.waitForReadyBrokers()
       val brokers = cluster.brokers().values().asScala.toSeq.sortBy(_.config.brokerId)
+      // Keep manual routing/registration coverage independent of the automatic owner.
+      brokers.foreach(_.globalSequenceIndexerManager.close())
       val ids = brokers.map(b => Int.box(b.config.brokerId))
       val source = brokers.head
       val admin = Admin.create(cluster.clientProperties())
@@ -250,6 +267,109 @@ class GlobalSequenceCoordinatorIntegrationTest {
           assertEquals(AppendStatus.INDEXED, next.value.status())
           assertEquals(1L, next.value.globalBaseOffset().getAsLong)
         } finally producer.close()
+      } finally admin.close()
+    } finally cluster.close()
+  }
+
+  @Test
+  def testAutomaticIndexingAcrossSourcePartitionsAndIndexLeaderChange(): Unit = {
+    val cluster = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder()
+      .setNumBrokerNodes(3).setNumControllerNodes(1).build())
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "2")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, "3")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, "2")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEXER_NUM_THREADS_CONFIG, "1")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEXER_READ_MAX_BYTES_CONFIG, "1")
+      .build()
+    try {
+      cluster.format()
+      cluster.startup()
+      cluster.waitForReadyBrokers()
+      val brokers = cluster.brokers().values().asScala.toSeq.sortBy(_.config.brokerId)
+      val ids = brokers.map(b => Int.box(b.config.brokerId))
+      val admin = Admin.create(cluster.clientProperties())
+      try {
+        val assignments = util.Map.of(Int.box(0), ids.asJava, Int.box(1), (ids.tail :+ ids.head).asJava)
+        admin.createTopics(util.List.of(
+          new NewTopic("automatic", assignments).configs(util.Map.of(
+            TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true", TopicConfig.CLEANUP_POLICY_CONFIG, "delete")),
+          new NewTopic("ordinary", 1, 1.toShort))).all().get(30, TimeUnit.SECONDS)
+        TestUtils.waitUntilTrue(() => brokers.forall(b => b.metadataCache.contains(new TopicPartition("automatic", 1)) &&
+          b.metadataCache.numPartitions(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).isPresent),
+          "Automatic source/index metadata did not reach the brokers", 30000)
+        val topics = admin.describeTopics(util.List.of("automatic", "ordinary")).allTopicNames().get(30, TimeUnit.SECONDS)
+        val topicId = topics.get("automatic").topicId()
+        val ordinary = new PartitionKey(topics.get("ordinary").topicId(), 0)
+        assertTrue(brokers.forall(_.globalSequenceIndexerManager.indexer(ordinary).isEmpty))
+        val keys = (0 to 1).map(p => new PartitionKey(topicId, p))
+        TestUtils.waitUntilTrue(() => keys.indices.forall(p => brokers(p).globalSequenceIndexerManager.indexer(keys(p)).isDefined),
+          "Source leaders did not start automatic indexers", 30000)
+        assertTrue(keys.indices.forall(p => brokers.filterNot(_ == brokers(p)).forall(_.globalSequenceIndexerManager.indexer(keys(p)).isEmpty)))
+        val indexPartition = new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, brokers.head.globalSequenceCoordinator.partitionFor(topicId))
+        val props = cluster.clientProperties()
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
+        props.put(ProducerConfig.ACKS_CONFIG, "all")
+        val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
+        def produceAndAwait(start: Int): Unit = {
+          for (offset <- start until start + 3; partition <- 0 to 1) {
+            val result = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("automatic", partition, null, Array[Byte](1)))
+              .get(30, TimeUnit.SECONDS)
+            assertEquals(offset.toLong, result.offset(), "Produce still returns the physical offset")
+          }
+          keys.foreach { key =>
+            TestUtils.waitUntilTrue(() => Try(brokers.head.indexRoutingManager.describePartition(key, 5000)
+              .get(6, TimeUnit.SECONDS)).toOption.exists(r => r.value.committedProgress().isPresent &&
+              r.value.committedProgress().get().lastOffset() == start + 2),
+              s"Automatic indexing did not commit $key through ${start + 2}", 30000)
+          }
+        }
+        try {
+          produceAndAwait(0)
+          val currentLeader = admin.describeTopics(util.List.of(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)).allTopicNames()
+            .get(30, TimeUnit.SECONDS).get(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).partitions().get(indexPartition.partition()).leader().id()
+          val target = ids.find(_.intValue() != currentLeader).get
+          val replicas = (Seq(target) ++ ids.filterNot(_ == target)).asJava
+          admin.alterPartitionReassignments(util.Map.of(indexPartition, util.Optional.of(new NewPartitionReassignment(replicas))))
+            .all().get(30, TimeUnit.SECONDS)
+          TestUtils.waitUntilTrue(() => admin.listPartitionReassignments().reassignments().get(10, TimeUnit.SECONDS).isEmpty,
+            "Index reassignment did not finish", 30000)
+          admin.electLeaders(ElectionType.PREFERRED, util.Set.of(indexPartition)).all().get(30, TimeUnit.SECONDS)
+          TestUtils.waitUntilTrue(() => brokers.forall(_.metadataCache.getImage().topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME)
+            .partitions().get(indexPartition.partition()).leader == target.intValue()), "Index leader did not change", 30000)
+          produceAndAwait(3)
+        } finally producer.close()
+
+        // Inspect the durable index records independently of the in-memory committed-progress view.
+        val consumerProps = cluster.clientProperties()
+        consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
+        consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
+        consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false")
+        val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](consumerProps)
+        try {
+          consumer.assign(util.List.of(indexPartition))
+          consumer.seekToBeginning(util.List.of(indexPartition))
+          val end = consumer.endOffsets(util.List.of(indexPartition)).get(indexPartition)
+          val indexes = scala.collection.mutable.ArrayBuffer.empty[(Long, BatchIndexValue)]
+          val serde = new GlobalSequenceCoordinatorRecordSerde
+          TestUtils.waitUntilTrue(() => {
+            consumer.poll(Duration.ofMillis(100)).asScala.foreach { record =>
+              val decoded = serde.deserialize(ByteBuffer.wrap(record.key()), ByteBuffer.wrap(record.value()))
+              decoded.key() match {
+                case key: BatchIndexKey if key.topicId() == topicId =>
+                  indexes += ((key.globalBaseOffset(), decoded.value().message().asInstanceOf[BatchIndexValue]))
+                case _ =>
+              }
+            }
+            consumer.position(indexPartition) >= end
+          }, "Could not read the committed index log", 30000)
+          assertEquals((0L until 12L).toSeq, indexes.map(_._1).toSeq)
+          for (partition <- 0 to 1) {
+            val batches = indexes.map(_._2).filter(_.physicalPartition() == partition)
+            assertEquals((0L until 6L).toSeq, batches.map(_.physicalBaseOffset()).toSeq)
+            assertTrue(batches.forall(batch => batch.physicalLastOffset() == batch.physicalBaseOffset() && batch.recordCount() == 1))
+          }
+        } finally consumer.close()
       } finally admin.close()
     } finally cluster.close()
   }

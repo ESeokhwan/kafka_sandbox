@@ -19,7 +19,8 @@
 
 상태: 1차 구현을 위한 설계 계약. 모듈·설정, 저장 형식, Runtime context/hook,
 Coordinator shard의 할당·진행 상태와 브로커 서비스/lifecycle 연결까지 구현했다.
-내부 RPC·리더 라우팅·원본 로그 Reader까지 구현했으며, Indexer·Produce 연동 및 global 읽기는 후속 구현 단계다.
+내부 RPC·리더 라우팅·원본 로그 Reader와 파티션별 자동 Indexer까지 구현했다.
+장애 복구 보강·원본 보존·Produce 대기 연동 및 global 읽기는 후속 구현 단계다.
 
 기준 코드: Kafka 4.1.1, commit `be816b82d2`.
 
@@ -201,7 +202,8 @@ expected generation, physical batch 및 predecessor, source identity는 그대�
 
 등록 CAS 거절과 `FENCED`, `OWNER_NOT_COMMITTED`, `OUT_OF_ORDER`는 호출자에게
 반환한다. 특히 fencing/등록 거절은 인덱스 리더가 바뀌었더라도 자동 재시도로 숨기지 않는다.
-Indexer가 이 결과에 맞춰 중단·등록 barrier 확인·진행 위치 조회를 수행하는 것은 다음 단계다.
+Indexer는 이 결과에 맞춰 중단하거나 같은 등록 barrier를 재확인한 뒤 진행 위치를 조회한다.
+현재 `OUT_OF_ORDER`는 cursor를 이동하지 않고 오류로 중단하며, 복구 단계에서 원인 재확인을 보강한다.
 Deadline·호출 취소·브로커 종료는 대기 Future와 예약된 재시도를 해제하며, 이미 coordinator가
 수락한 write의 rollback이나 할당 취소를 의미하지 않는다. Broker 종료 시 라우터와 네트워크를
 coordinator 및 scheduler보다 먼저 닫는다. 관측한 인덱스 토픽의 삭제·UUID/partition 수 변경은
@@ -213,6 +215,64 @@ coordinator 및 scheduler보다 먼저 닫는다. 관측한 인덱스 토픽의 
 같은 registration UUID·조건으로 등록 barrier를 다시 확인한 후 progress를 조회한다.
 3개 브로커 통합 테스트는 원격 등록/append, 인덱스 리더 이동, 같은 등록의 재확인,
 중복 append의 `ALREADY_INDEXED`, 다음 배치의 연속 global offset 할당을 검증한다.
+
+### 파티션별 자동 Indexer 구현
+
+[GlobalSequenceIndexerManager](../../core/src/main/scala/kafka/server/GlobalSequenceIndexerManager.scala)는
+활성화된 데이터 토픽의 로컬 리더 파티션마다
+[GlobalSequencePartitionIndexer](../../core/src/main/scala/kafka/server/GlobalSequencePartitionIndexer.scala)를 만든다.
+`BrokerMetadataPublisher`가 ReplicaManager의 replica 변경과 동적 로그 설정 적용을 마친 뒤
+manager에 metadata를 전달한다. Topic UUID·실제 Partition 인스턴스·source leader epoch로
+실행 수명을 구분한다. 같은 수명에서 실패하거나 fenced된 Indexer는 무관한 metadata
+갱신만으로 재시작하지 않는다. source epoch 변경은 이전 인스턴스를 닫고 새 인스턴스를 만든다.
+
+각 Indexer는 다음 순서로 진행한다.
+
+1. Describe로 현재 generation을 확인하고, UUID를 한 번 생성하여 CAS 등록을 요청한다.
+   이 최초 Describe의 progress는 원본 읽기 위치로 사용하지 않는다.
+2. 등록 Future가 완료된 뒤 같은 인덱스 리더에서 committed progress를 다시 조회한다.
+   Progress가 없으면 physical 0, 있으면 마지막 배치의 `lastOffset + 1`에서 읽는다.
+3. Reader가 반환한 완전한 데이터 배치를 직전 인덱싱 배치의 base offset과 함께 append한다.
+   등록 identity·물리 배치·predecessor·captured data HW를 하나의 immutable 요청으로 유지한다.
+4. `INDEXED` 또는 `ALREADY_INDEXED` Future가 완료되어 committed prefix를 확인한 뒤에만
+   다음 데이터 배치를 읽는다. Control-only `CONTINUE` 결과는 global 번호를 할당하지 않고
+   읽기 위치만 전진시킨다. `AWAIT_HIGH_WATERMARK`이면 다음 HW 알림까지 대기한다.
+
+파티션마다 별도 스레드를 만들지 않는다. 브로커의 고정 worker pool에 파티션별 직렬 작업을
+예약하고, 한 차례 실행에 원본 읽기를 최대 한 번 수행하여 다른 파티션에도 실행 기회를 준다.
+RPC Future를 기다리는 동안 worker를 점유하지 않는다. HW listener는 최대 한 개의 wakeup을
+예약하며 로그를 읽거나 RPC를 보내지 않는다. 읽는 동안 HW가 증가했다면 알림 HW와 Reader가
+캡처한 HW를 비교하여 다시 읽는다. 배치 중간 HW에서 `cursor < HW`라는 이유로 반복 실행하지 않는다.
+
+| 브로커 설정 | 기본값 | 의미 |
+|---|---|---|
+| `global.sequence.indexer.num.threads` | 2 | 원본 읽기와 Indexer 작업을 수행하는 공유 worker 수 |
+| `global.sequence.indexer.read.max.bytes` | 1048576 | 한 번의 원본 읽기 byte soft limit. 첫 완전한 배치는 초과 가능 |
+
+두 설정은 양수인 정적 설정이다. 각 라우팅 호출의 deadline에는
+`global.sequence.coordinator.write.timeout.ms`를 사용한다. 라우터가 retryable 오류로
+호출을 끝내면 브로커 scheduler에서 100ms 뒤 동일 요청을 재전송한다. 등록 timeout은
+새 UUID/generation을 만들지 않으며 append timeout도 다음 배치로 넘어가지 않는다.
+인덱스 리더가 바뀌어 queued 응답의 route token이 만료되었거나 `OWNER_NOT_COMMITTED`를
+받으면 같은 등록 요청으로 barrier를 재확인하고 committed progress를 조회한다.
+`FENCED` 및 CAS 거절은 중단 조건이며 새 generation을 획득하는 재시도로 바꾸지 않는다.
+
+Follower 전환·partition 실패·삭제는 인스턴스를 즉시 중단 상태로 만들고 listener와
+대기 중인 라우팅 Future, 예약한 재시도를 해제한다. 이미 큐에 있거나 실행 중인 읽기/RPC의
+늦은 결과로 다음 append를 시작하지 않는다. 브로커 종료는 Indexer와 worker를 먼저 닫고
+그 뒤 라우터·scheduler·coordinator·ReplicaManager를 닫는다. 라우팅 Future 취소는 이미
+coordinator가 수락한 write를 rollback하지 않는다.
+
+단위 테스트는 한 논리적 append 제한, 등록/append timeout의 동일 요청 재사용, HW 알림
+경합, control-only 전진, route token 만료와 ownership 중단, 공유 worker 및 metadata
+lifecycle을 검증한다. 통합 테스트는 별도 수동 append 없이 Produce된 두 파티션의 데이터가
+인덱싱되는지, 인덱스 리더 이동 후에도 실제 index log의 global 범위가 중복 없이 연속적인지,
+브로커 재시작 후 committed progress에서 자동 인덱싱이 재개되는지 확인한다.
+
+현재 source gap과 predecessor 불일치는 읽기 위치를 건너뛰지 않고 오류로 중단한다.
+이 오류의 authoritative progress 재확인과 장애 복구 보강은 11번, retention/DeleteRecords
+보존 경계는 12번 단계다. Produce 응답은 아직 인덱스 커밋을 기다리지 않으며, 해당 대기는
+13번에서 연결한다. Global 조회/Fetch API도 후속 단계다.
 
 ### 원본 로그 Reader 구현
 
@@ -344,7 +404,7 @@ context가 자동으로 최신 값으로 바뀌지는 않는다.
 담는다. Identity는 source broker/leader epoch, generation, registration UUID로 구성한다.
 요청 범위 검증과 실제 원본 로그·metadata 검증은 별개다. 서비스는 실행 시점 metadata의
 대상 토픽과 source leader/epoch를 검증한다. 원본 로그 순회와 네트워크 권한 검사는
-순차 reader/Indexer와 내부 RPC 구현에서 연결한다.
+순차 Reader/Indexer와 내부 RPC에서 각각 수행한다.
 
 `prepareAppend`는 상태를 직접 변경하지 않는다. 신규 배치에는 `BatchIndex`와
 `TopicMetadata`를 atomic `CoordinatorResult`로 반환하며, Runtime이 이를 replay할 때
@@ -394,7 +454,7 @@ startup이 실패했을 때도 생성한 loader·timer·event processor·executo
 
 Java 서비스의 `appendIndex`와 `committedProgress`는 비동기 Runtime 작업을 반환한다.
 진행 조회는 committed 상태만 읽고, append는 실행 시점의 source broker/leader epoch도
-확인한다. 이 API에 접근하는 네트워크 RPC와 Indexer 등록은 다음 단계에서 연결한다.
+확인한다. 내부 네트워크 RPC와 파티션별 Indexer는 이 비동기 API를 사용한다.
 
 데이터 topic ID의 shard는 `Utils.abs(topicId.hashCode()) % N`으로 정한다. 이 Kafka Uuid의
 hash는 UUID 상·하위 64비트의 XOR를 다시 상·하위 32비트 XOR로 접은 값이다. N은 정적
@@ -707,8 +767,8 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 - [UnifiedLog](../../storage/src/main/java/org/apache/kafka/storage/internals/log/UnifiedLog.java):
   복구에 필요한 데이터가 삭제되지 않도록 retention 경계를 연결한다.
 
-후속 구현 순서는 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC,
-순차 reader/Indexer, 장애 복구와 보존, Produce 대기, global 조회/읽기,
+저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
+후속 구현 순서는 장애 복구 보강과 보존, Produce 대기, global 조회/읽기,
 트랜잭션 격리, 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
 append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.

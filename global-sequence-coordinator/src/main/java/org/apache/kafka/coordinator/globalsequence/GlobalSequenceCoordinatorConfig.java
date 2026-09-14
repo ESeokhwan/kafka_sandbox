@@ -63,6 +63,14 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int NUM_THREADS_DEFAULT = 1;
     public static final String NUM_THREADS_DOC = "Number of coordinator event processing threads.";
 
+    public static final String INDEXER_NUM_THREADS_CONFIG = "global.sequence.indexer.num.threads";
+    public static final int INDEXER_NUM_THREADS_DEFAULT = 2;
+    public static final String INDEXER_NUM_THREADS_DOC = "Number of shared workers for source partition indexing and log reads.";
+
+    public static final String INDEXER_READ_MAX_BYTES_CONFIG = "global.sequence.indexer.read.max.bytes";
+    public static final int INDEXER_READ_MAX_BYTES_DEFAULT = 1024 * 1024;
+    public static final String INDEXER_READ_MAX_BYTES_DOC = "Soft byte limit for each source log read. The first complete batch may exceed this limit.";
+
     public static final String LOAD_BUFFER_SIZE_CONFIG = "global.sequence.coordinator.load.buffer.size";
     public static final int LOAD_BUFFER_SIZE_DEFAULT = 5 * 1024 * 1024;
     public static final String LOAD_BUFFER_SIZE_DOC = "Soft limit in bytes for index log reads during coordinator loading.";
@@ -81,6 +89,8 @@ public class GlobalSequenceCoordinatorConfig {
         .define(INDEX_TOPIC_MIN_ISR_CONFIG, INT, INDEX_TOPIC_MIN_ISR_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_MIN_ISR_DOC)
         .define(INDEX_TOPIC_SEGMENT_BYTES_CONFIG, INT, INDEX_TOPIC_SEGMENT_BYTES_DEFAULT, atLeast(1024 * 1024), MEDIUM, INDEX_TOPIC_SEGMENT_BYTES_DOC)
         .define(NUM_THREADS_CONFIG, INT, NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, NUM_THREADS_DOC)
+        .define(INDEXER_NUM_THREADS_CONFIG, INT, INDEXER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, INDEXER_NUM_THREADS_DOC)
+        .define(INDEXER_READ_MAX_BYTES_CONFIG, INT, INDEXER_READ_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, INDEXER_READ_MAX_BYTES_DOC)
         .define(LOAD_BUFFER_SIZE_CONFIG, INT, LOAD_BUFFER_SIZE_DEFAULT, atLeast(1), MEDIUM, LOAD_BUFFER_SIZE_DOC)
         .define(WRITE_TIMEOUT_MS_CONFIG, INT, WRITE_TIMEOUT_MS_DEFAULT, atLeast(1), MEDIUM, WRITE_TIMEOUT_MS_DOC)
         .define(APPEND_LINGER_MS_CONFIG, INT, APPEND_LINGER_MS_DEFAULT, atLeast(0), MEDIUM, APPEND_LINGER_MS_DOC);
@@ -117,6 +127,14 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int loadBufferSize() {
         return config.getInt(LOAD_BUFFER_SIZE_CONFIG);
+    }
+
+    public int indexerNumThreads() {
+        return config.getInt(INDEXER_NUM_THREADS_CONFIG);
+    }
+
+    public int indexerReadMaxBytes() {
+        return config.getInt(INDEXER_READ_MAX_BYTES_CONFIG);
     }
 
     public int writeTimeoutMs() {

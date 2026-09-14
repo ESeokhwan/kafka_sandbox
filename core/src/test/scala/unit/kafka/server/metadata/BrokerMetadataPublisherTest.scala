@@ -204,6 +204,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       mock(classOf[GlobalSequenceCoordinator]),
+      mock(classOf[kafka.server.GlobalSequenceIndexerManager]),
       mock(classOf[SharePartitionManager]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
@@ -258,6 +259,8 @@ class BrokerMetadataPublisherTest {
     val logManager = mock(classOf[LogManager])
     val replicaManager = mock(classOf[ReplicaManager])
     val globalCoordinator = mock(classOf[GlobalSequenceCoordinator])
+    val indexers = mock(classOf[kafka.server.GlobalSequenceIndexerManager])
+    val dynamicConfigs = mock(classOf[DynamicConfigPublisher])
     val faultHandler = mock(classOf[FaultHandler])
 
     val metadataPublisher = new BrokerMetadataPublisher(
@@ -269,8 +272,9 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       globalCoordinator,
+      indexers,
       mock(classOf[SharePartitionManager]),
-      mock(classOf[DynamicConfigPublisher]),
+      dynamicConfigs,
       mock(classOf[DynamicClientQuotaPublisher]),
       mock(classOf[DynamicTopicClusterQuotaPublisher]),
       mock(classOf[ScramPublisher]),
@@ -310,6 +314,10 @@ class BrokerMetadataPublisherTest {
     verify(globalCoordinator).onNewMetadataImage(image, delta)
     verify(globalCoordinator).onElection(0, 7)
     verify(globalCoordinator).onElection(1, 7)
+    val order = org.mockito.Mockito.inOrder(replicaManager, dynamicConfigs, indexers)
+    order.verify(replicaManager).applyDelta(delta.topicsDelta(), image)
+    order.verify(dynamicConfigs).onMetadataUpdate(delta, image)
+    order.verify(indexers).onMetadataUpdate(image)
 
     delta = new MetadataDelta(image)
     delta.replay(new RemoveTopicRecord()
@@ -347,6 +355,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       mock(classOf[GlobalSequenceCoordinator]),
+      mock(classOf[kafka.server.GlobalSequenceIndexerManager]),
       mock(classOf[SharePartitionManager]),
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
@@ -389,6 +398,7 @@ class BrokerMetadataPublisherTest {
       mock(classOf[TransactionCoordinator]),
       mock(classOf[ShareCoordinator]),
       mock(classOf[GlobalSequenceCoordinator]),
+      mock(classOf[kafka.server.GlobalSequenceIndexerManager]),
       sharePartitionManager,
       mock(classOf[DynamicConfigPublisher]),
       mock(classOf[DynamicClientQuotaPublisher]),
