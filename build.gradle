@@ -1001,6 +1001,11 @@ project(':core') {
     api project(':clients')
     api libs.scalaLibrary
 
+    implementation('moniq:moniq:1.0-SNAPSHOT') {
+      // Keep Kafka's centrally managed Jackson version on the core classpath.
+      exclude group: 'com.fasterxml.jackson.core', module: 'jackson-databind'
+    }
+
     compileOnly log4j2Libs
 
     implementation project(':server-common')
