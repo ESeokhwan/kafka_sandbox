@@ -1040,13 +1040,14 @@ append·HW 갱신·응답 전달 지점을 제어한다. 최종 장애 테스트
 저장 형식과 공통 runtime, coordinator 상태와 내부 RPC, 순차 Reader/Indexer까지 구현했다.
 복구의 progress 재확인과 source leader 변경, 모든 source replica의 보존 경계를 연결했다.
 Produce 대기와 global 인덱스 조회·두 격리 수준의 데이터 Fetch까지 연결했다.
-후속 구현 순서는 처리량 제어와 종합 검증이다. 현재 shard 및 Runtime 연동 테스트는
+자원 제한과 관측을 연결했고, 종합 장애 검증 및 운영 가이드를 추가했다. Shard 및 Runtime 연동 테스트는
 할당의 원자성, 파티션 간 순서, committed/pending 분리, timeout 뒤 재시도,
-append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동은 통합 테스트로 검증하며, 종합 장애 시나리오는 후속 단계다.
+append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과 인덱스 리더 이동, 실제 HW 지연과 Produce 재시도, 원본 삭제와 토픽 UUID 격리는 통합 테스트로 검증한다.
 
-후속 global 읽기 프로토콜의 API 번호·wire 필드, checkpoint 형식,
-배치 묶기 크기와 지표 이름은 해당 구현 커밋에서 확정한다. 이 선택들이 위의 순서,
-커밋, fencing, timeout, 복구 계약을 약화해서는 안 된다.
+현재 global 읽기의 API 번호·wire 필드와 자원 지표는 위 계약 및 §14를 따른다.
+Global Consumer Group, checkpoint/GC·direct seek, 기존 토픽 전환, compaction,
+원격 계층만으로 수행하는 복구와 mixed-version rolling upgrade는 후속 범위다.
+후속 최적화도 순서·커밋·fencing·timeout·복구 계약을 유지해야 한다.
 
 
 ## 14. 17번 구현: 자원 제한과 관측
@@ -1189,3 +1190,31 @@ HEAD의 RequestChannel/SocketServer와 SocketServerTest로 네트워크 동작�
 - `closingChannelWithBufferedReceivesFailedSend`
 - `remoteCloseWithBufferedReceives`
 - `closingChannelWithCompleteAndIncompleteBufferedReceives`
+
+
+## 15. 18번 구현: 종합 장애 검증과 운영
+
+실제 index replica fetcher를 제어하여 HW 지연 중 Produce timeout과 미커밋 범위 비공개를
+검사하고, 복제 재개 또는 index leader 종료·재시작 후 동일 producer sequence가 단일 물리 배치와
+인덱스 매핑을 유지하는지 확인한다. Source A→B→A 이후 옛 Append의 fencing, 다른 파티션의
+긴 tail 아래 조용한 파티션 복구, 원본 DeleteRecords와 topic UUID 재생성도 다룬다.
+
+Fault 테스트의 oracle은 source의 실제 보존 배치와 별도 Consumer로 읽은 committed index 로그를
+비교한다. 매핑 완전성·단일성·파티션 순서·global 비중첩·원자적 할당 쌍을 확인하고, 각 broker를
+통한 global 페이지와 원본 값을 대조한다. 트랜잭션 통합 테스트도 commit/abort 및 source/index
+leader 변경 후 broker를 재시작하여 두 격리 수준의 결과를 다시 확인한다.
+
+[S01~S20 추적 표와 재현 명령](global-sequence-validation.md)은 단위/Runtime의 정밀 fault injection과
+실제 broker 테스트의 보장 범위를 구분한다. Broker shutdown/startup은 OS kill·전원 손실 테스트가
+아니며, 응답 유실 재시도는 성공 결과를 사용하지 않고 같은 producer sequence를 재전송하여 모델링한다.
+
+[사용·운영 가이드](global-sequence-operations.md)에 생성 설정, acks, UUID/cursor 사용법,
+오류·backpressure와 복구 절차, 지원 버전 및 한계를 정리했다.
+[Java 조회 예제](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java)는
+같은 브랜치 clients의 실제 버전 협상과 public lookup/fetch를 사용하며 통합 테스트에서 실행한다.
+원본 배치의 selected 범위만 출력하고, pending·abort·오류에서도 NextGlobalOffset을 기준으로 재개한다.
+
+18번 최종 검증: Java 17·Gradle 8.14.1에서 선별 회귀 825개가 실패/skip 없이 통과했다.
+Core 581, global-sequence-coordinator 79, Runtime 102, storage 15, clients 48이며
+관련 Checkstyle·SpotBugs도 통과했다. §14.4의 17번 검증 기록과 구분하며,
+전체 Kafka 스위트·장시간 부하 검증 완료를 의미하지 않는다.

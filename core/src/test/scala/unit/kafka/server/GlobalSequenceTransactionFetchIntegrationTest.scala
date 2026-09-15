@@ -16,6 +16,7 @@
  */
 package kafka.server
 
+import kafka.examples.globalsequence.GlobalSequenceReadDemo
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.admin.{Admin, NewPartitionReassignment, NewTopic}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
@@ -34,7 +35,9 @@ import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 
+import java.io.{ByteArrayOutputStream, PrintStream}
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets.UTF_8
 import java.util
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters._
@@ -97,6 +100,14 @@ class GlobalSequenceTransactionFetchIntegrationTest {
         def awaitLso(offset: Long): Unit = TestUtils.waitUntilTrue(() => brokers.exists { broker =>
           broker.replicaManager.localLog(new TopicPartition(topic, 0)).exists(_.lastStableOffset() >= offset)
         }, s"Source LSO did not advance to $offset", 30000)
+        def readExample(committed: Boolean): Vector[String] = {
+          val bytes = new ByteArrayOutputStream
+          val output = new PrintStream(bytes, true, UTF_8)
+          try GlobalSequenceReadDemo.read(cluster.clientProperties(), topicId, 0, 100,
+            if (committed) "read_committed" else "read_uncommitted", output)
+          finally output.close()
+          bytes.toString(UTF_8).linesIterator.toVector
+        }
         val transaction = producer(transactional = true)
         val regular = producer(transactional = false)
         try {
@@ -119,6 +130,10 @@ class GlobalSequenceTransactionFetchIntegrationTest {
             }
           }
           verifyPending()
+          val pendingExample = readExample(committed = true)
+          assertTrue(pendingExample.last.contains("pending=true"))
+          assertTrue(pendingExample.last.contains("next=0"))
+          assertFalse(pendingExample.exists(_.startsWith("record\t")))
           move(new TopicPartition(topic, 0), ids(1), topicId)
           verifyPending()
           if (commitFirst) transaction.commitTransaction() else transaction.abortTransaction()
@@ -148,6 +163,12 @@ class GlobalSequenceTransactionFetchIntegrationTest {
           val indexPartition = brokers.head.globalSequenceCoordinator.partitionFor(topicId)
           val target = ids.find(_.intValue() != indexImage.partitions().get(indexPartition).leader).get
           move(new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, indexPartition), target, indexImage.id())
+          // Reload durable index and transaction state before checking both isolation levels again.
+          val restarted = brokers.find(_.config.brokerId == target.intValue()).get
+          restarted.shutdown()
+          restarted.startup()
+          cluster.waitForReadyBrokers()
+          awaitLso(4)
           brokers.foreach { broker =>
             TestUtils.retry(30000) {
               val page = fetch(broker)
@@ -172,6 +193,13 @@ class GlobalSequenceTransactionFetchIntegrationTest {
               val laterProducer = ru.batches().get(2).records().asInstanceOf[MemoryRecords].batches().iterator().next().producerId()
               assertEquals(firstProducer, laterProducer)
             }
+          }
+          for (committed <- Seq(false, true)) {
+            val lines = readExample(committed)
+            val offsets = lines.filter(_.startsWith("record\t")).map(_.split("\t")(1).toLong)
+            assertEquals(if (committed && !commitFirst) Vector(1L, 2L, 3L) else Vector(0L, 1L, 2L, 3L), offsets)
+            assertTrue(lines.last.contains("next=4"))
+            assertTrue(lines.last.contains("pending=false"))
           }
         } finally {
           transaction.close()

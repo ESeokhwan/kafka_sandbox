@@ -17,12 +17,12 @@
 
 # Global sequence topic 구현 계획
 
-작성 기준: 2026-09-15, `proj/globally_ordered_topic/develop_v4`, 17번 구현 커밋 기준.
+작성 기준: 2026-09-15, `proj/globally_ordered_topic/develop_v4`, 18번 구현 커밋 기준.
 출발점은 Kafka 4.1.1의 vanilla 코드인 `be816b82d2`다.
 
 기존 1~18번 구현 순서를 유지하여 완료한 작업과 남은 작업을 커밋 단위로 정리한다.
-**1~17번은 구현 완료, 18번은 미구현이다.** 완료한 단계의 설명은 현재까지의
-후속 보완을 포함한 구현 상태를 기준으로 한다. 남은 단계의 커밋 제목과 새 API 이름은 계획안이다.
+**1~18번의 1차 구현 범위는 모두 완료했다.** 완료한 단계의 설명은 현재까지의
+후속 보완을 포함한 구현 상태를 기준으로 한다.
 이 문서의 단계 번호는 [상세 설계 문서](global-sequence.md)의 장 번호와 별개다.
 
 ## 목표와 공통 계약
@@ -64,15 +64,15 @@ Global Consumer Group, 데이터 compaction, 기존 토픽 이력 전환, 인덱
 | 14 | Global offset 범위의 인덱스 조회 API | 완료 | `d9d6f7179b` |
 | 15 | Global offset 기반 데이터 Fetch API | 완료 | `0e85c08e77` |
 | 16 | Global Fetch의 트랜잭션 격리 | 완료 | `e47dadedc3` |
-| 17 | 작업량·메모리 제한, backpressure, 상세 지표 | 완료 | 본 커밋 |
-| 18 | 종합 장애 테스트와 사용·운영 문서 | 미구현 | 예정 |
+| 17 | 작업량·메모리 제한, backpressure, 상세 지표 | 완료 | `cc96934af7` |
+| 18 | 종합 장애 테스트와 사용·운영 문서 | 완료 | 본 커밋 |
 
 | 마일스톤 | 단계 | 완료 조건 | 현재 상태 |
 |---|---|---|---|
 | A. 인덱싱 기반 | 1~9 | 저장 형식, coordinator, RPC, 라우팅, 원본 Reader 연결 | 완료 |
 | B. 쓰기와 복구 | 10~13 | 자동 인덱싱·복구·원본 보존·Produce 대기 연결 | 완료 |
 | C. Global 읽기 | 14~16 | 범위 조회, 데이터 Fetch, 두 격리 수준 제공 | 완료 |
-| D. 자원 제한과 종합 검증 | 17~18 | 과부하 제어, 관측 지표, 장애 검증과 사용 문서 | 17 완료, 18 남음 |
+| D. 자원 제한과 종합 검증 | 17~18 | 과부하 제어, 관측 지표, 장애 검증과 사용 문서 | 완료 |
 
 ## 완료한 단계
 
@@ -349,7 +349,7 @@ source/index 리더 변경 후 두 격리 수준의 global 읽기를 확인했�
 
 ### 17. 작업량·메모리 제한, backpressure, 상세 지표
 
-상태: 완료 · 커밋: 본 커밋 · 의존: 10~16
+상태: 완료 · 커밋: `cc96934af7` · 의존: 10~16
 
 - Broker 공통 admission/metrics를 추가하고 Produce waiter, route, RPC, reader,
   coordinator read/write, 네트워크 응답에 개수·키별·바이트 상한을 연결했다.
@@ -371,39 +371,40 @@ Batch 묶기와 checkpoint/GC 형식은 변경하지 않았다.
 실패한 9개는 네트워크 변경을 제거한 HEAD 코드에서도 동일하게 재현했다.
 상세 목록은 [설계 문서 검증 기록](global-sequence.md#144-검증-기록)을 따른다.
 
-## 남은 단계
-
-18번은 아래 종합 장애 검증과 사용·운영 문서다.
-
 ### 18. 종합 장애 테스트와 사용·운영 문서
 
-상태: 미구현 · 의존: 1~17
+상태: 완료 · 커밋: 본 커밋 · 의존: 1~17
 
-예정 커밋: `test: verify global sequence fault recovery end to end`
+커밋 제목: `test: verify global sequence fault recovery end to end`
 
-**목표:** Produce부터 복구와 global 읽기까지 연결한 전체 계약을 재현 가능한 장애 테스트로 검증한다.
+- 실제 3브로커에서 index follower 복제를 멈춰 HW 지연과 Produce timeout을 제어했다.
+  복제 재개 및 index leader 종료·재시작 후 동일 idempotent Produce의 단일 매핑을 확인한다.
+- 데이터만 커밋된 상태에서 source A→B→A, 다른 파티션의 긴 tail, index leader 교체·재시작,
+  첫 A의 지연 Append를 조합하여 누락 복구와 fencing을 확인한다.
+- 인덱싱된 원본 DeleteRecords 후 앞 prefix와 오류 cursor 보존,
+  토픽 삭제·동일 이름 재생성의 UUID 격리와 새 global 0번 시작을 확인한다.
+- 실제 source segment와 별도 Consumer의 committed index 로그를 대조하는 oracle로
+  physical batch당 단일 매핑, 파티션별 순서, global 범위·할당 쌍·복구 완전성을 검증한다.
+- 트랜잭션 통합 테스트에 broker 재시작을 추가하여 commit/abort·후속 transaction의
+  READ_UNCOMMITTED/READ_COMMITTED 결과와 global cursor를 다시 확인한다.
+- 실행 가능한 `GlobalSequenceReadDemo`를 추가하고 다중 페이지, 배치 중간 범위,
+  transaction pending/abort 및 오류 prefix의 출력·cursor를 실제 클러스터에서 검사한다.
+- S01~S20의 단위·Runtime·통합 보장 범위를 추적 표로 정리했다.
+  토픽 생성, acks, 읽기 예제, retry/오류, 지표·자원 제한, 복구·retention, 지원 버전을 문서화했다.
 
-- 기존 S01~S20 단위·통합 테스트의 보장 범위를 확인하고 전체 경로에서 부족한 조합을 보완한다.
-- 데이터 커밋 후 인덱싱 전 종료, 인덱스 append 후 HW 지연, 커밋 응답 유실과 재시도를 제어한다.
-- Source leader A→B→A, index leader 교체, 브로커 재시작과 오래된 callback 도착을 조합한다.
-- Retention/DeleteRecords와 follower 승격, 토픽 삭제·동일 이름 재생성을 검증한다.
-- Global fetch의 역순 응답, 앞 구간 오류, 페이지 경계와 트랜잭션 commit/abort를 검증한다.
-- 최종 데이터·인덱스를 독립적으로 읽어 physical batch별 단일 매핑,
-  파티션별 순서, global 범위 비중첩과 누락 없는 복구를 확인한다.
-- Fault injection, latch, 제어 가능한 Future·HW를 사용하여 임의 sleep에 의존하는 테스트를 줄인다.
-- 토픽 생성 설정, acks별 응답 의미, 조회/fetch 예제, 재시도·오류 처리,
-  주요 지표와 복구 절차를 문서화한다.
-- 지원 범위와 제한, 실행 가능한 검증 명령, 프로토콜 버전 및 모든 브로커의 기능 지원 조건을 기록한다.
+산출물: [장애 검증과 실행 명령](global-sequence-validation.md),
+[사용·운영 가이드](global-sequence-operations.md),
+[조회 예제](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java).
+Broker lifecycle·복제 제어와 Runtime fault injection의 범위를 구분한다.
+OS 강제 종료·전원 손실·디스크 손상 검증 및 장시간 성능 시험으로 확대 해석하지 않는다.
 
-주요 변경 위치: 실제 브로커 통합·장애 테스트, 관련 테스트 helper, 상세 설계 및 사용·운영 문서.
+검증: Java 17·Gradle 8.14.1에서 최종 선별 회귀 **825개 통과, 실패/skip 0개**.
+Core 581, global-sequence-coordinator 79, coordinator-common 102, storage 15, clients 48이며
+관련 Checkstyle·SpotBugs도 통과했다. 실행 명령과 테스트별 범위는 장애 검증 문서를 따른다.
 
-완료 기준: 데이터와 인덱스가 정상 복제 복구 가능한 장애 조건에서 쓰기·읽기 계약을 유지하고,
-재시작 후에도 global 읽기의 결과와 cursor가 일관된다. 미지원·복구 불가능 조건은 명시적인 오류로 드러난다.
-이 단계까지 통과하면 요청한 1차 구현 범위가 완료된다.
+## 남은 작업
 
-## 이후 작업을 진행하는 방법
-
-- 다음 구현 대상은 **17번 처리량 제어·지표**다. 18번은 종합 검증·운영 문서다.
-- 단계마다 코드·필요한 테스트·설계 갱신을 함께 검증한 뒤 하나의 구현 커밋으로 저장한다.
-- 완료 후 이 문서의 상태와 실제 커밋 해시를 갱신한다. 예정 커밋 제목은 최종 구현 범위에 맞게 조정한다.
-- 상세 의미나 오류·offset 경계를 변경할 때는 [상세 설계 문서](global-sequence.md)와 함께 수정한다.
+요청한 1~18번의 1차 구현 계획에 남은 단계는 없다.
+Global Consumer Group, 기존 토픽 전환, compaction, checkpoint/GC·direct seek,
+원격 계층만으로 수행하는 복구, mixed-version rolling upgrade는 별도 후속 범위다.
+상세 계약 변경은 [설계](global-sequence.md)와 사용·운영 가이드에 함께 반영한다.

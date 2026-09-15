@@ -1032,6 +1032,7 @@ project(':core') {
     implementation libs.slf4jApi
     implementation libs.re2j
 
+    testImplementation project(':examples')
     testImplementation project(':clients').sourceSets.test.output
     testImplementation project(':group-coordinator').sourceSets.test.output
     testImplementation project(':share-coordinator').sourceSets.test.output

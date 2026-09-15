@@ -37,6 +37,10 @@
   <allow pkg="org.apache.kafka.common" />
   <allow pkg="org.apache.kafka.common.errors" />
   <allow pkg="org.apache.kafka.common.serialization" />
+  <!-- Raw global sequence APIs do not yet have a public consumer facade. -->
+  <subpackage name="globalsequence">
+    <allow pkg="org.apache.kafka.clients" />
+  </subpackage>
   
 
 </import-control>
