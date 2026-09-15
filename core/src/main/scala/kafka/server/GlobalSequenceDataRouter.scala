@@ -17,6 +17,9 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.{Event, Scope}
+
 import org.apache.kafka.common.{IsolationLevel, Node}
 import org.apache.kafka.common.IsolationLevel.READ_UNCOMMITTED
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
@@ -41,7 +44,8 @@ private[server] object GlobalSequenceDataRouter {
 /** Borrows the index router's inter-broker transport; owns only physical reads and their deadlines. */
 class GlobalSequenceDataRouter private[server](brokerId: Int, listener: ListenerName, metadata: () => MetadataImage,
                                                reader: GlobalSequenceDataReader, transport: GlobalSequenceTransport,
-                                               scheduler: Scheduler, time: Time) extends AutoCloseable {
+                                               scheduler: Scheduler, time: Time, resources: GlobalSequenceResources = null,
+                                               ownsTransport: Boolean = false) extends AutoCloseable {
   import GlobalSequenceDataRouter._
   import GlobalSequenceFetch.Data
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Data]]()
@@ -67,6 +71,10 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
   }
 
   def read(batch: PhysicalBatch, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] = {
+    GlobalSequenceAdmission.run(resources, Scope.DATA_ROUTE, batch.partition()) { readAdmitted(batch, deadlineNs, isolation) }
+  }
+
+  private def readAdmitted(batch: PhysicalBatch, deadlineNs: Long, isolation: IsolationLevel): CompletableFuture[Data] = {
     val result = new CompletableFuture[Data]()
     @volatile var timer: ScheduledFuture[_] = null
     @volatile var retryTimer: ScheduledFuture[_] = null
@@ -85,6 +93,7 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
       val code = Errors.forException(cause)
       if (IndexRoutingManager.isRetryable(cause) || cause.isInstanceOf[FencedLeaderEpochException] ||
         code == Errors.UNKNOWN_LEADER_EPOCH || code == Errors.OFFSET_NOT_AVAILABLE) {
+        Option(resources).foreach(_.event(Event.RPC_RETRY, 0))
         if (remainingMs == 0) timeout()
         else {
           retryTimer = scheduler.scheduleOnce("global-sequence-data-retry", () => send(attempt + 1),
@@ -138,5 +147,6 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
     closed = true
     pending.asScala.foreach(_.completeExceptionally(new CoordinatorNotAvailableException("Global data router is closed")))
     reader.close()
+    if (ownsTransport) transport.close()
   }
 }

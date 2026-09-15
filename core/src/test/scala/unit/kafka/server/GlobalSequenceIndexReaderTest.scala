@@ -52,7 +52,7 @@ class GlobalSequenceIndexReaderTest {
     MemoryRecords.withRecords(offset, Compression.NONE,
       entries.map(record => new SimpleRecord(serde.serializeKey(record), serde.serializeValue(record))): _*)
 
-  private class Context(initial: Records = records(history), snapshotHw: Long = 6, globalEnd: Long = 5) extends AutoCloseable {
+  private class Context(initial: Records = records(history), snapshotHw: Long = 6, globalEnd: Long = 5, scanBytes: Int = Int.MaxValue) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val workers = new GlobalSequenceTestExecutor
     val replicas: ReplicaManager = mock(classOf[ReplicaManager])
@@ -81,14 +81,41 @@ class GlobalSequenceIndexReaderTest {
       }
       new LogReadInfo(new FetchDataInfo(new LogOffsetMetadata(request.fetchOffset), data), Optional.empty(), hw, start, 8L, 0L)
     }
-    val reader = new GlobalSequenceIndexReader(replicas, time.scheduler, time, workers)
+    val limits = new GlobalSequenceTestResources(time, Map(
+      org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig.LOOKUP_SCAN_MAX_BYTES_CONFIG -> Int.box(scanBytes)))
+    val reader = new GlobalSequenceIndexReader(replicas, time.scheduler, time, workers, if (scanBytes == Int.MaxValue) null else limits.resources)
     val snapshot = new Snapshot(index, 1, 10, snapshotHw, globalEnd)
     def read(startOffset: Long = 0, endOffset: Long = 100, maxBatches: Int = 100): CompletableFuture[Result] = {
       val request = new Request(topic, startOffset, endOffset, maxBatches, 100)
       reader.read(request, snapshot, time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(100))
     }
     def finish(future: CompletableFuture[Result]): Result = { workers.runAll(); future.join() }
-    override def close(): Unit = { reader.close(); time.scheduler.clear() }
+    override def close(): Unit = { reader.close(); limits.close(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testScanLimitAndCancellationKeepQueuedAndRunningWorkBounded(): Unit = {
+    import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.INDEX_READ
+    val c = new Context(scanBytes = 1)
+    try {
+      val first = c.read()
+      assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], c.read())
+      first.cancel(false)
+      assertEquals(0L, c.limits.resources.used(INDEX_READ))
+      val running = c.read()
+      c.onRead = () => {
+        running.cancel(false)
+        assertEquals(1L, c.limits.resources.used(INDEX_READ), "Canceled active I/O must hold admission until its worker returns")
+        assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], c.read())
+      }
+      c.workers.runAll()
+      assertEquals(0L, c.limits.resources.used(INDEX_READ))
+      c.onRead = () => ()
+      val overBudget = c.read()
+      c.workers.runAll()
+      assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], overBudget)
+      assertEquals(0L, c.limits.resources.used(INDEX_READ))
+    } finally c.close()
   }
 
   @Test

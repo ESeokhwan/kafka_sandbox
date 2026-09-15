@@ -87,6 +87,42 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int APPEND_LINGER_MS_DEFAULT = 5;
     public static final String APPEND_LINGER_MS_DOC = "Time in milliseconds to accumulate coordinator writes before appending.";
 
+    public static final String MAX_PENDING_OPERATIONS_CONFIG = "global.sequence.max.pending.operations";
+    public static final int MAX_PENDING_OPERATIONS_DEFAULT = 1024;
+    public static final String MAX_PENDING_OPERATIONS_DOC = "Maximum pending operations in each independent route, reader, RPC and coordinator read/write budget.";
+
+    public static final String MAX_PENDING_PER_PARTITION_CONFIG = "global.sequence.max.pending.per.partition";
+    public static final int MAX_PENDING_PER_PARTITION_DEFAULT = 64;
+    public static final String MAX_PENDING_PER_PARTITION_DOC = "Maximum pending operations for one admission key within each budget. RPC keys are destination brokers.";
+
+    public static final String MAX_PRODUCE_WAITERS_CONFIG = "global.sequence.produce.max.waiters";
+    public static final int MAX_PRODUCE_WAITERS_DEFAULT = 10000;
+    public static final String MAX_PRODUCE_WAITERS_DOC = "Maximum broker-wide Produce index waiters; per-partition admission also applies.";
+
+    public static final String FETCH_BUFFER_BYTES_CONFIG = "global.sequence.fetch.buffer.bytes";
+    public static final int FETCH_BUFFER_BYTES_DEFAULT = 268435456;
+    public static final String FETCH_BUFFER_BYTES_DOC = "Reserved bytes for global fetch assembly and responses awaiting network completion.";
+
+    public static final String DATA_RPC_BUFFER_BYTES_CONFIG = "global.sequence.data.rpc.buffer.bytes";
+    public static final int DATA_RPC_BUFFER_BYTES_DEFAULT = 134217728;
+    public static final String DATA_RPC_BUFFER_BYTES_DOC = "Reserved bytes for outstanding data RPC responses, including canceled requests still on the wire.";
+
+    public static final String READ_RESPONSE_BUFFER_BYTES_CONFIG = "global.sequence.read.response.buffer.bytes";
+    public static final int READ_RESPONSE_BUFFER_BYTES_DEFAULT = 134217728;
+    public static final String READ_RESPONSE_BUFFER_BYTES_DOC = "Reserved bytes for internal data responses awaiting network completion.";
+
+    public static final String WORKER_QUEUE_SIZE_CONFIG = "global.sequence.worker.queue.size";
+    public static final int WORKER_QUEUE_SIZE_DEFAULT = 128;
+    public static final String WORKER_QUEUE_SIZE_DOC = "Maximum queued jobs per global sequence worker pool.";
+
+    public static final String READER_NUM_THREADS_CONFIG = "global.sequence.reader.num.threads";
+    public static final int READER_NUM_THREADS_DEFAULT = 2;
+    public static final String READER_NUM_THREADS_DOC = "Threads in each independent index and data reader pool.";
+
+    public static final String LOOKUP_SCAN_MAX_BYTES_CONFIG = "global.sequence.lookup.scan.max.bytes";
+    public static final int LOOKUP_SCAN_MAX_BYTES_DEFAULT = 268435456;
+    public static final String LOOKUP_SCAN_MAX_BYTES_DOC = "Maximum index bytes scanned per lookup. Exceeding the limit returns THROTTLING_QUOTA_EXCEEDED without advancing the cursor.";
+
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
         .define(INDEX_TOPIC_NUM_PARTITIONS_CONFIG, INT, INDEX_TOPIC_NUM_PARTITIONS_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_NUM_PARTITIONS_DOC)
         .define(INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, SHORT, INDEX_TOPIC_REPLICATION_FACTOR_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_REPLICATION_FACTOR_DOC)
@@ -98,12 +134,24 @@ public class GlobalSequenceCoordinatorConfig {
         .define(RETENTION_REFRESH_INTERVAL_MS_CONFIG, INT, RETENTION_REFRESH_INTERVAL_MS_DEFAULT, atLeast(1), MEDIUM, RETENTION_REFRESH_INTERVAL_MS_DOC)
         .define(LOAD_BUFFER_SIZE_CONFIG, INT, LOAD_BUFFER_SIZE_DEFAULT, atLeast(1), MEDIUM, LOAD_BUFFER_SIZE_DOC)
         .define(WRITE_TIMEOUT_MS_CONFIG, INT, WRITE_TIMEOUT_MS_DEFAULT, atLeast(1), MEDIUM, WRITE_TIMEOUT_MS_DOC)
-        .define(APPEND_LINGER_MS_CONFIG, INT, APPEND_LINGER_MS_DEFAULT, atLeast(0), MEDIUM, APPEND_LINGER_MS_DOC);
+        .define(APPEND_LINGER_MS_CONFIG, INT, APPEND_LINGER_MS_DEFAULT, atLeast(0), MEDIUM, APPEND_LINGER_MS_DOC)
+        .define(MAX_PENDING_OPERATIONS_CONFIG, INT, MAX_PENDING_OPERATIONS_DEFAULT, atLeast(1), MEDIUM, MAX_PENDING_OPERATIONS_DOC)
+        .define(MAX_PENDING_PER_PARTITION_CONFIG, INT, MAX_PENDING_PER_PARTITION_DEFAULT, atLeast(1), MEDIUM, MAX_PENDING_PER_PARTITION_DOC)
+        .define(MAX_PRODUCE_WAITERS_CONFIG, INT, MAX_PRODUCE_WAITERS_DEFAULT, atLeast(1), MEDIUM, MAX_PRODUCE_WAITERS_DOC)
+        .define(FETCH_BUFFER_BYTES_CONFIG, INT, FETCH_BUFFER_BYTES_DEFAULT, atLeast(50331648), MEDIUM, FETCH_BUFFER_BYTES_DOC)
+        .define(DATA_RPC_BUFFER_BYTES_CONFIG, INT, DATA_RPC_BUFFER_BYTES_DEFAULT, atLeast(8388608), MEDIUM, DATA_RPC_BUFFER_BYTES_DOC)
+        .define(READ_RESPONSE_BUFFER_BYTES_CONFIG, INT, READ_RESPONSE_BUFFER_BYTES_DEFAULT, atLeast(8388608), MEDIUM, READ_RESPONSE_BUFFER_BYTES_DOC)
+        .define(WORKER_QUEUE_SIZE_CONFIG, INT, WORKER_QUEUE_SIZE_DEFAULT, atLeast(1), MEDIUM, WORKER_QUEUE_SIZE_DOC)
+        .define(READER_NUM_THREADS_CONFIG, INT, READER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, READER_NUM_THREADS_DOC)
+        .define(LOOKUP_SCAN_MAX_BYTES_CONFIG, INT, LOOKUP_SCAN_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, LOOKUP_SCAN_MAX_BYTES_DOC);
 
     private final AbstractConfig config;
 
     public GlobalSequenceCoordinatorConfig(AbstractConfig config) {
         this.config = Objects.requireNonNull(config);
+        if (maxPendingPerPartition() > maxPendingOperations() || maxPendingPerPartition() > maxProduceWaiters()) {
+            throw new ConfigException(MAX_PENDING_PER_PARTITION_CONFIG, maxPendingPerPartition(), "Must not exceed either global count limit");
+        }
         if (indexTopicMinIsr() > indexTopicReplicationFactor()) {
             throw new ConfigException(INDEX_TOPIC_MIN_ISR_CONFIG, indexTopicMinIsr(),
                 "Must not exceed " + INDEX_TOPIC_REPLICATION_FACTOR_CONFIG);
@@ -152,6 +200,42 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int appendLingerMs() {
         return config.getInt(APPEND_LINGER_MS_CONFIG);
+    }
+
+    public int maxPendingOperations() {
+        return config.getInt(MAX_PENDING_OPERATIONS_CONFIG);
+    }
+
+    public int maxPendingPerPartition() {
+        return config.getInt(MAX_PENDING_PER_PARTITION_CONFIG);
+    }
+
+    public int maxProduceWaiters() {
+        return config.getInt(MAX_PRODUCE_WAITERS_CONFIG);
+    }
+
+    public int fetchBufferBytes() {
+        return config.getInt(FETCH_BUFFER_BYTES_CONFIG);
+    }
+
+    public int dataRpcBufferBytes() {
+        return config.getInt(DATA_RPC_BUFFER_BYTES_CONFIG);
+    }
+
+    public int readResponseBufferBytes() {
+        return config.getInt(READ_RESPONSE_BUFFER_BYTES_CONFIG);
+    }
+
+    public int workerQueueSize() {
+        return config.getInt(WORKER_QUEUE_SIZE_CONFIG);
+    }
+
+    public int readerNumThreads() {
+        return config.getInt(READER_NUM_THREADS_CONFIG);
+    }
+
+    public int lookupScanMaxBytes() {
+        return config.getInt(LOOKUP_SCAN_MAX_BYTES_CONFIG);
     }
 
     /**

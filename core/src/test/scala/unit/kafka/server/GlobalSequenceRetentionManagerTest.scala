@@ -88,6 +88,27 @@ class GlobalSequenceRetentionManagerTest {
   }
 
   @Test
+  def testQueueAndRpcOverloadRetryWithoutRemovingTheDeletionPin(): Unit = {
+    val c = new Context
+    try {
+      c.workers.reject = true
+      c.retention.onMetadataUpdate(image())
+      assertTrue(c.calls.isEmpty)
+      c.workers.reject = false
+      c.refresh()
+      assertEquals(1, c.calls.size)
+      c.workers.reject = true
+      c.calls.head.completeExceptionally(new org.apache.kafka.common.errors.ThrottlingQuotaExceededException(100, "full"))
+      c.workers.reject = false
+      c.refresh()
+      c.refresh()
+      assertEquals(2, c.calls.size)
+      c.complete()
+      verify(c.log).updateGlobalSequenceIndexedOffset(id, 5L)
+    } finally c.close()
+  }
+
+  @Test
   def testFollowersAndFutureLogsUseOnlyCommittedProgressWithoutRegisteringOwnership(): Unit = {
     val c = new Context
     try {

@@ -43,6 +43,20 @@ public class TransactionIndexTest {
     }
 
     @Test
+    void testPointLookupStopsAtStableBoundaryAndChecksDeadline() throws IOException {
+        index.append(new AbortedTxn(1L, 0, 10, 11));
+        index.append(new AbortedTxn(1L, 20, 30, 31));
+        assertEquals(java.util.Optional.of(true), index.isAborted(1, 2, 4, () -> { }));
+        assertEquals(java.util.Optional.of(false), index.isAborted(1, 12, 14, () -> { }));
+        assertEquals(java.util.Optional.of(true), index.isAborted(1, 22, 24, () -> { }));
+        assertEquals(java.util.Optional.empty(), index.isAborted(1, 32, 34, () -> { }));
+        assertThrows(org.apache.kafka.common.errors.TimeoutException.class, () ->
+            index.isAborted(1, 32, 34, () -> {
+                throw new org.apache.kafka.common.errors.TimeoutException();
+            }));
+    }
+
+    @Test
     public void testPositionSetCorrectlyWhenOpened() throws IOException {
         List<AbortedTxn> abortedTxns = new ArrayList<>(List.of(
                 new AbortedTxn(0L, 0, 10, 11),

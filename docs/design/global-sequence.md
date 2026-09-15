@@ -1047,3 +1047,145 @@ append 실패·rollback과 로그 replay를 검증한다. 브로커 재시작과
 후속 global 읽기 프로토콜의 API 번호·wire 필드, checkpoint 형식,
 배치 묶기 크기와 지표 이름은 해당 구현 커밋에서 확정한다. 이 선택들이 위의 순서,
 커밋, fencing, timeout, 복구 계약을 약화해서는 안 된다.
+
+
+## 14. 17번 구현: 자원 제한과 관측
+
+### 14.1 예산과 설정
+
+브로커 하나가 `GlobalSequenceResources`를 공유한다. 인덱싱·복구용 index transport와
+데이터 Fetch transport는 별도 KafkaClient·send thread를 사용한다. 요청 단위의 admission을
+획득한 다음 작업을 큐에 넣으며, scope별 예산은 독립적이다. 큰 데이터 읽기가 index write의
+큐·연결·허용량을 점유하지 않는다. 이 설정들은 정적 broker 설정이다.
+
+| 설정 (`global.sequence.` 접두사) | 기본값 | 적용 범위 |
+|---|---:|---|
+| `max.pending.operations` | 1024 | 각 route, RPC, reader, 응답, coordinator read/write scope의 최대 작업 수 |
+| `max.pending.per.partition` | 64 | scope 내 같은 admission key의 최대 작업 수 |
+| `produce.max.waiters` | 10000 | 브로커 전체 Produce index waiter 수 |
+| `fetch.buffer.bytes` | 268435456 (256 MiB) | Fetch 조립과 전송을 기다리는 응답의 예약 바이트 |
+| `data.rpc.buffer.bytes` | 134217728 (128 MiB) | 전송 큐와 실제 in-flight data RPC의 응답 예약 바이트 |
+| `read.response.buffer.bytes` | 134217728 (128 MiB) | internal data 응답과 lookup 응답의 각각 독립적인 예약 바이트 |
+| `worker.queue.size` | 128 | Indexer/retention 공유 pool, index reader pool, data reader pool 각각의 대기 큐 |
+| `reader.num.threads` | 2 | index reader와 data reader 각각의 worker 수 |
+| `lookup.scan.max.bytes` | 268435456 (256 MiB) | lookup 한 번에 디스크에서 읽는 누적 index 바이트 |
+
+모든 신규 설정은 양수다. `max.pending.per.partition`은 두 전역 개수 설정을 넘을 수 없다.
+Fetch 버퍼는 최소 48 MiB, data RPC·read response 버퍼는 최소 8 MiB여야 한다.
+키는 Produce/index route/data route/data response에서는 source `PartitionKey`,
+coordinator에서는 index `TopicPartition`, lookup/fetch/index response에서는 topic UUID,
+RPC에서는 목적지 broker ID다. RPC 설정의 per-partition 이름도 이 목적지 키에 적용된다.
+유한한 바이트 예산에서는 같은 크기의 요청에 대해 키 하나의 허용 개수를
+`max(1, floor(전체 바이트 / 작업 예약 바이트 / 2))`로 추가 제한한다.
+작업 하나만 들어갈 수 있는 작은 예산을 제외하면 다른 키의 진입 여지를 남긴다.
+
+Fetch는 전체 응답 상한 16 MiB와 네 개의 선행 읽기 × 8 MiB를 합쳐 요청당 48 MiB를 예약한다.
+작은 응답도 이 예약을 유지하는 보수적인 정책이다. Data RPC와 internal data 응답은
+각각 최대 batch payload 8 MiB, lookup 응답은 최대 1000개 mapping에 대해 128 KiB를 예약한다.
+이 값은 payload/조립 용량의 예산이며 JVM 전체 heap 상한을 뜻하지 않는다.
+전송 직렬화의 고정 header, 객체, 압축 codec, KafkaClient 수신 버퍼 및 일반 Kafka 요청의
+메모리는 별도다. 각 개수·worker 상한도 함께 적용된다.
+
+Reader는 각각 최대 `reader.num.threads`개의 read chunk를 실행한다. Index read chunk는
+1 MiB soft / 8 MiB hard 제한, data read는 8 MiB hard 제한이다. Source indexer의
+복사 상한은 `max(indexer.read.max.bytes, 8 MiB)`이며 worker 개수는 기존
+`indexer.num.threads`를 따른다. 이를 초과한 source batch는 `RECORD_TOO_LARGE`로
+해당 indexing lifetime을 중단하고 retention pin을 보존한다. 이미 큰 배치를 저장했다면
+읽기 설정을 충분히 올려 재시작해야 하며, global data Fetch의 8 MiB batch 상한은 별도다.
+
+Historical mapping cache는 만들지 않는다. Lookup은 committed snapshot에 대해 처음부터
+scan하며, 누적 scan byte 또는 요청 deadline에 도달하면 오류를 반환하고 cursor를 앞당기지 않는다.
+이력이 scan 상한보다 크면 같은 요청의 단순 재시도로 해결되지 않는다. 운영자가 상한을
+늘려야 하며, sparse seek/checkpoint/인덱스 GC는 여전히 후속 설계 영역이다.
+RC의 abort 판별은 transaction index를 일정 크기의 버퍼로 순회하고 entry/segment마다
+기존 deadline을 확인한다. Abort 이력 전체를 리스트로 보관하지 않는다.
+Source batch 검증도 record 사이에 `coordinator.write.timeout.ms` 기반 read deadline을
+확인한다. 초과하면 동일 cursor에서 재시도한다. 시스템 호출 자체를 강제로 중단하지는 않는다.
+
+### 14.2 과부하·timeout·종료 계약
+
+- 신규 작업의 개수/바이트 한도가 차면 `THROTTLING_QUOTA_EXCEEDED`로 빠르게 거절한다.
+  Global 읽기는 이미 완성한 연속 prefix만 반환하거나 원래 cursor에서 오류를 반환한다.
+- 이미 append된 원본은 waiter 거절·timeout으로 삭제하거나 인덱싱을 취소하지 않는다.
+  Produce 오류 뒤에도 background indexer는 같은 source 순서로 진행한다.
+- Indexer/retention은 overload를 재시도한다. Indexer는 기존 batch·predecessor·identity를
+  그대로 보존하며, 공통 worker 큐 거절에도 coalesced event를 보관하고 다시 제출한다.
+  한 partition은 한 turn에 event 하나와 source read 최대 한 번만 실행한다.
+  큐 밖의 보류 알림/타이머 수는 호스팅 중인 partition lifetime 수에 비례한다.
+- Coordinator의 read/write admission은 분리된다. Write 예산은 큐 대기부터 실제 commit,
+  append 실패 또는 unload까지 유지한다. 응답 timeout/cancel로 반환하지 않는다.
+  HW 정체 중 재시도가 pending timeline/deferred event를 무한히 늘릴 수 없다.
+  이미 수락한 record와 빈 record barrier의 순서·commit 조건은 바꾸지 않는다.
+  HW 갱신·load/unload 등 내부 제어 event는 이 client admission을 거치지 않는다.
+- RPC가 아직 자체 전송 큐에 있으면 취소 시 제거한다. 이미 send thread가 가져갔다면
+  caller future가 취소되어도 실제 network completion 또는 transport close까지 예약을 유지한다.
+- Reader의 queued 작업 취소는 예약을 즉시 해제한다. 실행 중 작업은 caller timeout 이후에도
+  worker가 반환할 때까지 예약을 유지한다. Deadline은 각 scan/record 경계에서 검사한다.
+- Fetch/lookup/internal data 응답은 API future 완료 후에도 예약을 유지한다.
+  RequestChannel/SocketServer는 실제 전송 완료, 연결 종료, 전송 오류, channel 부재,
+  processor 제거·shutdown으로 응답을 버릴 때 `ResourceResponse.release`를 한 번 호출한다.
+  `onComplete`의 성공 전송 callback 의미는 그대로 유지한다.
+- 종료 시 Indexer/retention을 먼저 닫고, fetch/data transport, index transport,
+  scheduler, coordinator runtime 순으로 닫은 뒤 자원 지표를 제거한다.
+  SocketServer는 자체 종료 시 대기/전송 중 응답의 예약도 해제한다.
+
+### 14.3 지표
+
+JMX/metrics group은 `global-sequence-resources`이고 tag는 고정된 `scope` 하나다.
+Topic 이름, UUID, partition 번호, 목적지 주소를 metric tag에 넣지 않는다.
+키별 admission map은 현재 수락된 작업만 보유하고 마지막 lease 반환 때 제거한다.
+기존 `global-sequence-coordinator-metrics`의 Runtime 지표도 유지한다.
+
+| 지표 | 단위/의미 |
+|---|---|
+| `pending` | scope별 아직 자원을 보유한 작업 수. 실제 commit/송신을 기다리는 항목 포함 |
+| `reserved-bytes` | scope별 payload/조립 예약 bytes. 현재 payload 크기의 측정값은 아님 |
+| `rejected-total` | admission 한도 초과 수 |
+| `completed-total`, `duration-ms-avg`, `duration-ms-max` | scope별 자원 획득부터 반환까지의 완료 수·시간 |
+| `errors-total` | 오류/취소로 끝난 waiter, 논리 route, reader, 응답 작업 수 |
+| `total` (scope=`rpc_retry`) | 라우팅 및 Indexer/retention의 metadata/transport/overload 재시도 수 |
+| `total` (scope=`worker_retry`) | Indexer/retention worker 큐 거절 후 재제출 수 |
+| `total` (scope=`fenced`, `gap`) | ownership fencing / 복구 확인 후 source gap으로 중단한 lifetime 수 |
+| `total`, `duration-ms-avg/max` (scope=`recovery`) | 초기·leader 변경·gap 복구의 등록 barrier와 committed progress 확인 완료 수·시간 |
+| `physical-offsets` (scope=`indexing_lag`) | local source leader별 `max(0, data HW - committed resumeOffset)` 합 |
+| `physical-offsets` (scope=`retention_held`) | refresh 시 확인한 hosted current/future log별 `max(0, data HW - deletionLimit)` 합 |
+
+두 offset gauge의 단위는 **physical offset 차이**이며 control offset도 포함한다.
+Global offset이나 index-log offset과 합산하지 않는다. Retention 값은 주기적으로 갱신되므로
+현재값보다 늦을 수 있다. Progress gauge는 lifetime 제거 시 그 기여분을 차감한다.
+Coordinator admission의 완료 시간은 caller 응답 시간보다 길 수 있고, Fetch/lookup의 응답
+예약 시간에는 느린 client 송신 시간이 포함된다. `rpc_retry` 등 시간 의미가 없는 event의
+`duration-ms-*`는 0이며, 복구 event에서만 해당 시간 통계를 해석한다.
+
+
+### 14.4 검증 기록
+
+2026-09-15, Java 17, Gradle 8.14.1 환경의 최종 선별 회귀 **821개 통과, 실패/skip 0개**:
+
+- core 577개: `GlobalSequence*Test`, `IndexRoutingManagerTest`, `KafkaApisTest`, `RequestChannelTest`,
+  `SocketServerTest`의 response resource release, client disconnection metrics,
+  new response/completed send/disconnection 예외 처리 테스트.
+- global-sequence-coordinator 79개: 설정·admission·지표 cardinality와 기존 할당/복구 계약.
+- coordinator-common 102개: `CoordinatorRuntime*Test`. Timeout/cancel 이후 commit 및
+  shutdown까지 admission을 유지하는 새 테스트 포함.
+- storage 15개: `TransactionIndexTest`의 기존 조회와 일정 메모리 point lookup·deadline 검사.
+- clients 48개: `ApiKeysTest`, `RequestResponseTest` 프로토콜 회귀.
+
+해당 작업의 Checkstyle·SpotBugs 검사도 통과했다. 기존 실제 브로커 통합 테스트에서
+Produce·자동 인덱싱·복구·global 읽기·source/index leader 변경·commit/abort를 다시 검증했다.
+
+별도로 전체 `SocketServerTest`를 포함한 확장 실행에서는 아래 9개가 실패했다.
+HEAD의 RequestChannel/SocketServer와 SocketServerTest로 네트워크 동작을 되돌려 동일한
+9개를 재실행해 모두 같은 실패를 확인했다. 신규 global API 클래스의 컴파일을 위한
+`ResourceResponse` 타입 선언만 유지했고, 자원 반환 동작은 제거한 비교다.
+연결 종료 후 buffered receive/failed send 관련 기존 실패이며 이 커밋에서 원인을 수정하지 않았다.
+
+- `testClientDisconnectionWithOutstandingReceivesProcessedUntilFailedSend`
+- `testConnectionIdReuse`
+- `remoteCloseWithBufferedReceivesFailedSend`
+- `remoteCloseSendFailure`
+- `remoteCloseWithCompleteAndIncompleteBufferedReceives`
+- `closingChannelSendFailure`
+- `closingChannelWithBufferedReceivesFailedSend`
+- `remoteCloseWithBufferedReceives`
+- `closingChannelWithCompleteAndIncompleteBufferedReceives`

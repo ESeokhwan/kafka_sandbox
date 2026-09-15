@@ -563,6 +563,21 @@ public class LocalLog {
         }
     }
 
+    /** Point lookup without materializing the aborted-transaction history of a segment. */
+    public boolean isAborted(long producerId, long baseOffset, long lastOffset, Runnable checkDeadline) {
+        Optional<LogSegment> first = segments.floorSegment(baseOffset);
+        if (first.isEmpty()) return false;
+        Optional<LogSegment> current = first;
+        Iterator<LogSegment> following = segments.higherSegments(first.get().baseOffset()).iterator();
+        while (current.isPresent()) {
+            checkDeadline.run();
+            Optional<Boolean> result = current.get().txnIndex().isAborted(producerId, baseOffset, lastOffset, checkDeadline);
+            if (result.isPresent()) return result.get();
+            current = nextItem(following);
+        }
+        return false;
+    }
+
     public List<AbortedTxn> collectAbortedTransactions(long logStartOffset, long baseOffset, long upperBoundOffset) {
         Optional<LogSegment> segmentEntry = segments.floorSegment(baseOffset);
         List<AbortedTxn> allAbortedTxns = new ArrayList<>();

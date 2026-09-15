@@ -17,6 +17,10 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.apache.kafka.common.{IsolationLevel, TopicIdPartition, TopicPartition}
 import org.apache.kafka.common.IsolationLevel.{READ_COMMITTED, READ_UNCOMMITTED}
 import org.apache.kafka.common.errors.{CorruptRecordException, CoordinatorNotAvailableException, FencedLeaderEpochException, InvalidRequestException, KafkaStorageException, NotLeaderOrFollowerException, OffsetNotAvailableException, OffsetOutOfRangeException, RecordTooLargeException, ThrottlingQuotaExceededException, TimeoutException, UnknownTopicIdException}
@@ -36,14 +40,15 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 private[server] object GlobalSequenceDataReader {
-  def workers(): ExecutorService = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
-    new ArrayBlockingQueue[Runnable](128), runnable => KafkaThread.daemon("global-sequence-data-read", runnable),
+  def workers(threads: Int = 2, queueSize: Int = 128): ExecutorService = new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS,
+    new ArrayBlockingQueue[Runnable](queueSize), runnable => KafkaThread.daemon("global-sequence-data-read", runnable),
     new ThreadPoolExecutor.AbortPolicy)
 }
 
 /** Copies one complete mapped batch below raw data HW, fenced by topic UUID and leader epoch. */
 class GlobalSequenceDataReader private[server](replicas: ReplicaManager, scheduler: Scheduler, time: Time,
-                                               workers: ExecutorService = GlobalSequenceDataReader.workers()) extends AutoCloseable {
+                                               workers: ExecutorService = GlobalSequenceDataReader.workers(),
+                                                resources: GlobalSequenceResources = null) extends AutoCloseable {
   import GlobalSequenceFetch._
 
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Data]]()
@@ -51,19 +56,31 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
 
   def read(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] = {
     val result = new CompletableFuture[Data]()
+    val lease = try Option(resources).map(_.acquire(Scope.DATA_READ, batch.partition(), GlobalSequenceResources.BATCH_BYTES))
+    catch { case NonFatal(error) => return CompletableFuture.failedFuture(error) }
+    @volatile var completionError: Throwable = null
+    val state = new AtomicInteger(0) // queued, running, released
+    def releaseQueued(): Unit = if (state.compareAndSet(0, 2)) lease.foreach(_.finish(completionError))
     @volatile var timer: ScheduledFuture[_] = null
     val work: Runnable = () => {
-      if (!result.isDone) try result.complete(readBatch(batch, epoch, isolation, () => {
-        if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
-          throw new TimeoutException("Global data fetch was cancelled or expired")
-      })) catch {
-        case error @ (_: NotLeaderOrFollowerException | _: FencedLeaderEpochException) =>
-          result.completeExceptionally(new NotLeaderOrFollowerException("Data leader changed during fetch", error))
-        case NonFatal(error) => result.completeExceptionally(error)
+      if (state.compareAndSet(0, 1)) try {
+        if (!result.isDone) try result.complete(readBatch(batch, epoch, isolation, () => {
+          if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
+            throw new TimeoutException("Global data fetch was cancelled or expired")
+        })) catch {
+          case error @ (_: NotLeaderOrFollowerException | _: FencedLeaderEpochException) =>
+            result.completeExceptionally(new NotLeaderOrFollowerException("Data leader changed during fetch", error))
+          case NonFatal(error) => result.completeExceptionally(error)
+        }
+      } finally {
+        state.set(2)
+        lease.foreach(_.finish(completionError))
       }
     }
     pending.add(result)
-    result.whenComplete { (_, _) =>
+    result.whenComplete { (_, error) =>
+      completionError = error
+      releaseQueued()
       pending.remove(result)
       if (timer != null) timer.cancel(false)
       workers match {
@@ -161,10 +178,7 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
       // Use full transaction ranges: matching only producer ID/first offset can confuse a previous
       // aborted transaction with a later committed one from the same producer, especially across pages.
       val aborted = isolation == READ_COMMITTED && batch.isTransactional &&
-        log.collectAbortedTransactions(expected.baseOffset(), expected.lastOffset() + 1).asScala.exists { txn =>
-          deadline()
-          txn.producerId() == batch.producerId() && txn.firstOffset() <= expected.baseOffset() && txn.lastOffset() >= expected.lastOffset()
-        }
+        log.isAborted(batch.producerId(), expected.baseOffset(), expected.lastOffset(), () => deadline())
       revalidate()
       Data(if (aborted) MemoryRecords.EMPTY else original, leaderEpoch, snapshot.highWatermark,
         stableOffset, if (aborted) Aborted else Visible)

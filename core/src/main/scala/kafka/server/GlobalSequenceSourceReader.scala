@@ -65,10 +65,13 @@ object GlobalSequenceSourceReader {
  * from a HW/leadership callback or while holding a partition lock. No payload or log handle escapes a read.
  * The caller owns its cursor and must recheck its indexer generation before applying asynchronous results.
  */
-class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Time.SYSTEM) {
+class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Time.SYSTEM, readTimeoutMs: Int = 30000) {
   import GlobalSequenceSourceReader._
 
   def read(partition: PartitionKey, sourceLeaderEpoch: Int, physicalOffset: Long, maxBytes: Int): ReadResult = {
+    val deadlineNs = time.nanoseconds() + readTimeoutMs.toLong * 1000000L
+    def checkDeadline(): Unit = if (time.nanoseconds() >= deadlineNs)
+      throw new org.apache.kafka.common.errors.TimeoutException("Global sequence source read deadline expired")
     require(partition != null, "partition must be supplied")
     require(sourceLeaderEpoch >= 0, "sourceLeaderEpoch must be non-negative")
     require(physicalOffset >= 0, "physicalOffset must be non-negative")
@@ -142,8 +145,11 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
           throw new CorruptRecordException("Source read did not return a complete first batch despite minOneMessage")
         if (info.fetchedData.records.sizeInBytes() == 0)
           gap(physicalOffset, snapshot, "No local batch exists below the captured source high watermark")
+        // Bound the oversized-first-batch exception as well as ordinary read chunks.
+        if (info.fetchedData.records.sizeInBytes() > math.max(maxBytes, GlobalSequenceFetch.MaxBatchBytes))
+          throw new org.apache.kafka.common.errors.RecordTooLargeException("Global sequence source batch exceeds the configured read budget")
         val records = copyRecords(info.fetchedData.records)
-        scan(records, partition, sourceLeaderEpoch, physicalOffset, highWatermark,
+        scan(records, partition, sourceLeaderEpoch, physicalOffset, highWatermark, () => checkDeadline(),
           offset => gap(offset, snapshot, "The next physical batch starts after the required resume position"))
       }
       revalidate()
@@ -186,6 +192,7 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
     epoch: Int,
     start: Long,
     highWatermark: Long,
+    checkDeadline: () => Unit,
     gap: Long => Nothing
   ): ReadResult = {
     var cursor = start
@@ -194,6 +201,7 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
     try {
       if (!batches.hasNext) throw new CorruptRecordException("Incomplete first batch in the source log")
       while (cursor < highWatermark && batches.hasNext) {
+        checkDeadline()
         val batch = batches.next()
         if (batch.magic() != RecordBatch.MAGIC_VALUE_V2)
           throw new UnsupportedForMessageFormatException("Global sequence source batches must use record format v2")
@@ -207,7 +215,7 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
           throw new CorruptRecordException("Source batch bounds and record count are inconsistent")
         if (batch.lastOffset() >= highWatermark)
           return ReadResult(partition, epoch, highWatermark, cursor, None, AWAIT_HIGH_WATERMARK)
-        validateRecords(batch, buffers)
+        validateRecords(batch, buffers, checkDeadline)
         cursor = batch.lastOffset() + 1
         if (!batch.isControlBatch) {
           val physicalBatch = new PhysicalBatch(partition, batch.baseOffset(), batch.lastOffset(), count)
@@ -221,11 +229,12 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
     } finally buffers.close()
   }
 
-  private def validateRecords(batch: MutableRecordBatch, buffers: BufferSupplier): Unit = {
+  private def validateRecords(batch: MutableRecordBatch, buffers: BufferSupplier, checkDeadline: () => Unit): Unit = {
     val iterator = batch.skipKeyValueIterator(buffers)
     var expectedOffset = batch.baseOffset()
     try {
       while (iterator.hasNext) {
+        checkDeadline()
         val record = iterator.next()
         if (record.offset() != expectedOffset || expectedOffset > batch.lastOffset())
           throw new CorruptRecordException("Source batch contains missing or out-of-order physical records")

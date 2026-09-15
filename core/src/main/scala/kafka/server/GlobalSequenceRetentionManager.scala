@@ -17,6 +17,9 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.{Event, Progress}
+
 import kafka.cluster.Partition
 import kafka.utils.Logging
 import org.apache.kafka.common.TopicPartition
@@ -45,7 +48,8 @@ class GlobalSequenceRetentionManager private[server](
   executor: Executor,
   scheduler: Scheduler,
   requestTimeoutMs: Int,
-  refreshIntervalMs: Int
+  refreshIntervalMs: Int,
+  resources: GlobalSequenceResources = null
 ) extends AutoCloseable with Logging {
   import IndexRoutingManager.RoutedResult
 
@@ -53,10 +57,13 @@ class GlobalSequenceRetentionManager private[server](
   private var closed = false
 
   private class ReplicaState(val key: PartitionKey, val tp: TopicPartition, val source: Partition) {
+    var held = 0L
     var stopped = false
     var pending: CompletableFuture[RoutedResult[PartitionDescription]] = _
     var timer: ScheduledFuture[_] = _
     def close(): Unit = {
+      Option(resources).foreach(_.progress(Progress.RETENTION_HELD, -held))
+      held = 0L
       stopped = true
       if (pending != null) pending.cancel(false)
       if (timer != null) timer.cancel(false)
@@ -81,7 +88,7 @@ class GlobalSequenceRetentionManager private[server](
                   previous.foreach(_.close())
                   val state = new ReplicaState(key, tp, source)
                   states.put(key, state)
-                  execute { refresh(state) }
+                  execute(state) { refresh(state) }
               }
             }
           }
@@ -91,9 +98,13 @@ class GlobalSequenceRetentionManager private[server](
     states.keysIterator.filterNot(desired.contains).toList.foreach(key => states.remove(key).foreach(_.close()))
   }
 
-  private def execute(work: => Unit): Unit = {
+  private def execute(state: ReplicaState)(work: => Unit): Unit = synchronized {
+    if (!active(state)) return
     try executor.execute(() => work)
-    catch { case _: RejectedExecutionException => () } // Broker shutdown leaves the last safe pin installed.
+    catch { case _: RejectedExecutionException =>
+      Option(resources).foreach(_.event(Event.WORKER_RETRY, 0))
+      state.timer = scheduler.scheduleOnce("global-sequence-retention-worker-retry", () => execute(state)(work), refreshIntervalMs)
+    }
   }
 
   private def active(state: ReplicaState): Boolean =
@@ -102,13 +113,16 @@ class GlobalSequenceRetentionManager private[server](
 
   private def schedule(state: ReplicaState): Unit = {
     if (active(state)) state.timer = scheduler.scheduleOnce("global-sequence-retention-refresh",
-      () => execute { refresh(state) }, refreshIntervalMs)
+      () => execute(state) { refresh(state) }, refreshIntervalMs)
     else state.close()
   }
 
   private def onError(state: ReplicaState, error: Throwable): Unit = {
     val cause = Errors.maybeUnwrapException(error)
-    if (IndexRoutingManager.isRetryable(cause)) schedule(state)
+    if (IndexRoutingManager.isRetryable(cause) || Errors.forException(cause) == Errors.THROTTLING_QUOTA_EXCEEDED) {
+      Option(resources).foreach(_.event(Event.RPC_RETRY, 0))
+      schedule(state)
+    }
     else {
       warn(s"Stopped global sequence retention refresh for ${state.key}; keeping the last confirmed deletion pin", cause)
       state.close()
@@ -121,9 +135,12 @@ class GlobalSequenceRetentionManager private[server](
     if (!active(state)) { state.close(); return }
     // Capture exact log objects. A reply must never update a replacement log with the same name.
     val capturedLogs = logs(state.source)
+    val held = capturedLogs.map(log => math.max(0L, log.highWatermark() - log.globalSequenceDeletionLimit())).sum
+    Option(resources).foreach(_.progress(Progress.RETENTION_HELD, held - state.held))
+    state.held = held
     try {
       state.pending = router.describePartition(state.key, requestTimeoutMs)
-      state.pending.whenComplete { (result, exception) => execute {
+      state.pending.whenComplete { (result, exception) => execute(state) {
         synchronized {
           state.pending = null
           if (active(state)) {

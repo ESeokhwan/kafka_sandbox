@@ -80,6 +80,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         private Time time = Time.SYSTEM;
         private Timer timer;
         private Metrics metrics;
+        private GlobalSequenceResources resources;
         private Runnable createIndexTopic;
         private GlobalSequenceLookup.Reader indexReader = (request, snapshot, deadline) ->
             CompletableFuture.failedFuture(new UnsupportedOperationException("Index reader is not configured"));
@@ -106,6 +107,11 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
 
         public Builder withTimer(Timer timer) {
             this.timer = timer;
+            return this;
+        }
+
+        public Builder withResources(GlobalSequenceResources resources) {
+            this.resources = resources;
             return this;
         }
 
@@ -145,6 +151,9 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                         .withTime(time)
                         .withTimer(timer)
                         .withEventProcessor(processor)
+                        .withOperationAdmission((tp, write) -> resources == null ? () -> { } : resources.acquire(
+                            write ? GlobalSequenceResources.Scope.COORDINATOR_WRITE : GlobalSequenceResources.Scope.COORDINATOR_READ,
+                            tp, 0)::close)
                         .withPartitionWriter(writer)
                         .withLoader(loader)
                         .withCoordinatorShardBuilderSupplier(GlobalSequenceCoordinatorShardBuilder::new)

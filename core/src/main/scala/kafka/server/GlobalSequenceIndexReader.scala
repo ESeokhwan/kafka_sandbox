@@ -17,6 +17,10 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.apache.kafka.common.{TopicIdPartition, TopicPartition}
 import org.apache.kafka.common.errors.{CorruptRecordException, CoordinatorNotAvailableException, FencedLeaderEpochException, KafkaStorageException, NotCoordinatorException, NotLeaderOrFollowerException, RecordTooLargeException, ThrottlingQuotaExceededException, TimeoutException}
 import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
@@ -41,14 +45,15 @@ import scala.util.control.NonFatal
 private[server] object GlobalSequenceIndexReader {
   val ReadBytes = 1024 * 1024
   val MaxBatchBytes = 8 * ReadBytes
-  def workers(): ExecutorService = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
-    new ArrayBlockingQueue[Runnable](128), runnable => KafkaThread.daemon("global-sequence-lookup", runnable),
+  def workers(threads: Int = 2, queueSize: Int = 128): ExecutorService = new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS,
+    new ArrayBlockingQueue[Runnable](queueSize), runnable => KafkaThread.daemon("global-sequence-lookup", runnable),
     new ThreadPoolExecutor.AbortPolicy)
 }
 
 /** Cold historical lookup. No unbounded mapping cache and no disk I/O on coordinator event threads. */
 class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, scheduler: Scheduler, time: Time,
-                                                workers: ExecutorService = GlobalSequenceIndexReader.workers())
+                                                workers: ExecutorService = GlobalSequenceIndexReader.workers(),
+                                                resources: GlobalSequenceResources = null)
   extends GlobalSequenceLookup.Reader {
   import GlobalSequenceIndexReader._
 
@@ -57,19 +62,31 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
 
   override def read(request: Request, snapshot: Snapshot, deadlineNs: Long): CompletableFuture[Result] = {
     val result = new CompletableFuture[Result]()
+    val lease = try Option(resources).map(_.acquire(Scope.INDEX_READ, request.topicId(), GlobalSequenceResources.BATCH_BYTES))
+    catch { case NonFatal(error) => return CompletableFuture.failedFuture(error) }
+    @volatile var completionError: Throwable = null
+    val state = new AtomicInteger(0) // queued, running, released
+    def releaseQueued(): Unit = if (state.compareAndSet(0, 2)) lease.foreach(_.finish(completionError))
     @volatile var timer: ScheduledFuture[_] = null
     val work: Runnable = () => {
-      if (!result.isDone) try result.complete(scan(request, snapshot, () => {
-        if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
-          throw new TimeoutException("Global index lookup was cancelled or expired")
-      })) catch {
-        case error @ (_: NotLeaderOrFollowerException | _: FencedLeaderEpochException) =>
-          result.completeExceptionally(new NotCoordinatorException("Index leader changed during lookup", error))
-        case NonFatal(error) => result.completeExceptionally(error)
+      if (state.compareAndSet(0, 1)) try {
+        if (!result.isDone) try result.complete(scan(request, snapshot, () => {
+          if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
+            throw new TimeoutException("Global index lookup was cancelled or expired")
+        })) catch {
+          case error @ (_: NotLeaderOrFollowerException | _: FencedLeaderEpochException) =>
+            result.completeExceptionally(new NotCoordinatorException("Index leader changed during lookup", error))
+          case NonFatal(error) => result.completeExceptionally(error)
+        }
+      } finally {
+        state.set(2)
+        lease.foreach(_.finish(completionError))
       }
     }
     pending.add(result)
-    result.whenComplete { (_, _) =>
+    result.whenComplete { (_, error) =>
+      completionError = error
+      releaseQueued()
       pending.remove(result)
       if (timer != null) timer.cancel(false)
       workers match {
@@ -124,6 +141,8 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
       val end = math.min(request.endOffset(), snapshot.committedGlobalEnd())
       val selected = mutable.ArrayBuffer.empty[Mapping]
       val serde = new GlobalSequenceCoordinatorRecordSerde
+      var scannedBytes = 0L
+      val scanLimit = Option(resources).map(_.config().lookupScanMaxBytes().toLong).getOrElse(Long.MaxValue)
       var cursor = 0L
       var globalCursor = 0L
       var staged: Option[Mapping] = None
@@ -135,6 +154,9 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
           validate()
           val info = fetch(cursor, ReadBytes)
           if (info.divergingEpoch.isPresent) throw new NotCoordinatorException("Index log diverged during lookup")
+          scannedBytes += info.fetchedData.records.sizeInBytes()
+          if (scannedBytes > scanLimit)
+            throw new ThrottlingQuotaExceededException(100, "Global lookup scan byte budget exhausted")
           val records = copyRecords(info.fetchedData.records)
           val batches = records.batches().iterator()
           val before = cursor

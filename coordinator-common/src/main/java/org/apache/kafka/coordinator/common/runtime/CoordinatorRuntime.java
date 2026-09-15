@@ -122,6 +122,14 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         private int appendLingerMs;
         private ExecutorService executorService;
 
+        private java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission = (tp, write) -> () -> { };
+
+        /** Admission for read/write events only. Release follows actual execution/commit, not caller cancellation or timeout. */
+        public Builder<S, U> withOperationAdmission(java.util.function.BiFunction<TopicPartition, Boolean, Runnable> admission) {
+            this.operationAdmission = java.util.Objects.requireNonNull(admission);
+            return this;
+        }
+
         public Builder<S, U> withLogPrefix(String logPrefix) {
             this.logPrefix = logPrefix;
             return this;
@@ -242,7 +250,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 serializer,
                 compression,
                 appendLingerMs,
-                executorService
+                executorService,
+                operationAdmission
             );
         }
     }
@@ -1182,7 +1191,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         public void run() {
             String name = event.toString();
             scheduleInternalOperation("OperationTimeout(name=" + name + ", tp=" + tp + ")", tp,
-                () -> event.complete(new TimeoutException(name + " timed out after " + delayMs + "ms")));
+                () -> event.onTimeout(new TimeoutException(name + " timed out after " + delayMs + "ms")));
         }
     }
 
@@ -1341,6 +1350,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          * The operation timeout.
          */
         private OperationTimeout operationTimeout = null;
+        private final Runnable releaseOperation;
+        private boolean operationReleased;
 
         /**
          * The result of the write operation. It could be null
@@ -1426,6 +1437,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             this.createdTimeMs = time.milliseconds();
             this.writeTimeout = writeTimeout;
             this.deferredEventQueuedTimestamp = NOT_QUEUED;
+            this.releaseOperation = operationAdmission.apply(tp, true);
         }
 
         /**
@@ -1484,6 +1496,15 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          */
         @Override
         public void complete(Throwable exception) {
+            if (!operationReleased) {
+                operationReleased = true;
+                releaseOperation.run();
+            }
+            onTimeout(exception);
+        }
+
+        @Override
+        public void onTimeout(Throwable exception) {
             if (future.isDone()) {
                 return;
             }
@@ -1578,6 +1599,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          * if an exception is thrown before it is assigned.
          */
         T response;
+        private final Runnable releaseOperation;
+        private boolean operationReleased;
 
         /**
          * The time this event was created.
@@ -1601,6 +1624,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             this.op = op;
             this.future = new CompletableFuture<>();
             this.createdTimeMs = time.milliseconds();
+            this.releaseOperation = operationAdmission.apply(tp, false);
         }
 
         /**
@@ -1642,6 +1666,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          */
         @Override
         public void complete(Throwable exception) {
+            if (!operationReleased) {
+                operationReleased = true;
+                releaseOperation.run();
+            }
             if (exception == null) {
                 future.complete(response);
             } else {
@@ -2082,6 +2110,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
      */
     private volatile MetadataImage metadataImage = MetadataImage.EMPTY;
 
+    private final java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission;
+
     /**
      * Constructor.
      *
@@ -2100,6 +2130,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
      * @param compression                       The compression codec.
      * @param appendLingerMs                    The append linger time in ms.
      * @param executorService                   The executor service.
+     * @param operationAdmission                Admission and completion hook for client read/write events.
      */
     @SuppressWarnings("checkstyle:ParameterNumber")
     private CoordinatorRuntime(
@@ -2117,8 +2148,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         Serializer<U> serializer,
         Compression compression,
         int appendLingerMs,
-        ExecutorService executorService
+        ExecutorService executorService,
+        java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission
     ) {
+        this.operationAdmission = operationAdmission;
         this.logPrefix = logPrefix;
         this.logContext = logContext;
         this.log = logContext.logger(CoordinatorRuntime.class);
@@ -2158,6 +2191,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         try {
             processor.enqueueLast(event);
         } catch (RejectedExecutionException ex) {
+            event.complete(ex);
             throw new NotCoordinatorException("Can't accept an event because the processor is closed", ex);
         }
     }
@@ -2172,6 +2206,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         try {
             processor.enqueueFirst(event);
         } catch (RejectedExecutionException ex) {
+            event.complete(ex);
             throw new NotCoordinatorException("Can't accept an event because the processor is closed", ex);
         }
     }

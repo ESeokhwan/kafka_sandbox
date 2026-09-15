@@ -17,6 +17,9 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.{Event, Progress}
+
 import kafka.cluster.{Partition, PartitionListener}
 import kafka.utils.Logging
 import org.apache.kafka.common.{TopicPartition, Uuid}
@@ -47,7 +50,8 @@ private[server] class GlobalSequencePartitionIndexer(
   scheduler: Scheduler,
   requestTimeoutMs: Int,
   readMaxBytes: Int,
-  time: Time = Time.SYSTEM
+  time: Time = Time.SYSTEM,
+  resources: GlobalSequenceResources = null
 ) extends AutoCloseable with Logging {
   import GlobalSequenceSourceReader._
   import IndexRoutingManager._
@@ -59,17 +63,27 @@ private[server] class GlobalSequencePartitionIndexer(
   private val observedHighWatermark = new AtomicLong(-1)
   private val events = new ConcurrentLinkedQueue[() => Unit]()
   @volatile private var operation: CompletableFuture[_] = _
+  @volatile private var workerRetry: ScheduledFuture[_] = _
+  private var lag = 0L
+  private var recoveryStarted = time.nanoseconds()
   @volatile private var retryTask: ScheduledFuture[_] = _
   @volatile private[server] var failure: Option[Throwable] = None
 
   private val produceWaiters = new GlobalSequenceIndexWaiters(scheduler, time,
     () => !isStopped && source.isLeader && source.getLeaderEpoch == sourceLeaderEpoch && source.topicId.contains(partition.topicId()),
-    () => source.log.map(_.highWatermark).getOrElse(0L))
+    () => source.log.map(_.highWatermark).getOrElse(0L), resources, partition)
 
   def awaitIndexed(lastOffset: Long, deadlineNs: Long): CompletableFuture[Void] =
     produceWaiters.await(lastOffset + 1, deadlineNs)
 
-  private def publishProgress(): Unit = produceWaiters.advance(progress.map(_.resumeOffset()).getOrElse(0L))
+  private def publishProgress(): Unit = {
+    produceWaiters.advance(progress.map(_.resumeOffset()).getOrElse(0L))
+    synchronized {
+      val next = if (isStopped) 0L else math.max(0L, math.max(observedHighWatermark.get(), source.log.map(_.highWatermark).getOrElse(0L)) - progress.map(_.resumeOffset()).getOrElse(0L))
+      Option(resources).foreach(_.progress(Progress.INDEXING_LAG, next - lag))
+      lag = next
+    }
+  }
 
   // Accessed only by the serial worker, never by partition listeners or future completion threads.
   private var busy = true
@@ -126,12 +140,27 @@ private[server] class GlobalSequencePartitionIndexer(
           // One event (at most one source read) per turn lets other partitions use the pool.
           if (!events.isEmpty) scheduleNext()
         }
-      }) catch { case _: RejectedExecutionException => close() }
+      }) catch { case _: RejectedExecutionException =>
+        // Keep the coalesced notification / identical pending append; never discard it on overload.
+        Option(resources).foreach(_.event(Event.WORKER_RETRY, 0))
+        try {
+          workerRetry = scheduler.scheduleOnce("global-sequence-worker-retry", () => {
+            scheduled.set(false)
+            if (!isStopped) scheduleNext()
+          }, 100)
+          if (isStopped) workerRetry.cancel(false)
+        } catch { case NonFatal(_) => close() }
+      }
     }
   }
 
   private def fail(cause: Throwable): Unit = {
     failure = Some(cause)
+    cause match {
+      case _: FencedLeaderEpochException => Option(resources).foreach(_.event(Event.FENCED, 0))
+      case _: SourceLogGapException => Option(resources).foreach(_.event(Event.GAP, 0))
+      case _ =>
+    }
     cause match {
       case _: FencedLeaderEpochException => info("Stopped after losing source/indexer ownership", cause)
       case _ => error("Indexing stopped; the source cursor has not been skipped", cause)
@@ -144,7 +173,8 @@ private[server] class GlobalSequencePartitionIndexer(
     busy = true
     def retryOrFail(error: Throwable): Unit = {
       val cause = Errors.maybeUnwrapException(error)
-      if (IndexRoutingManager.isRetryable(cause)) {
+      if (IndexRoutingManager.isRetryable(cause) || Errors.forException(cause) == Errors.THROTTLING_QUOTA_EXCEEDED) {
+        Option(resources).foreach(_.event(Event.RPC_RETRY, 0))
         retryTask = scheduler.scheduleOnce("global-sequence-indexer-retry", () => enqueue { call(request)(accept) }, 100)
         if (isStopped) retryTask.cancel(false)
       } else fail(cause)
@@ -170,13 +200,16 @@ private[server] class GlobalSequencePartitionIndexer(
     }
   }
 
-  private def register(): Unit = call(router.registerIndexer(registration, requestTimeoutMs)) { result =>
-    if (!result.value.registered() || !result.value.indexer().toScala.contains(owner))
-      fail(new FencedLeaderEpochException("Global sequence registration was rejected"))
-    else if (!router.isCurrent(partition, result.coordinator)) register()
-    else {
-      barrierRoute = result.coordinator
-      loadProgress()
+  private def register(): Unit = {
+    if (recoveryStarted < 0) recoveryStarted = time.nanoseconds()
+    call(router.registerIndexer(registration, requestTimeoutMs)) { result =>
+      if (!result.value.registered() || !result.value.indexer().toScala.contains(owner))
+        fail(new FencedLeaderEpochException("Global sequence registration was rejected"))
+      else if (!router.isCurrent(partition, result.coordinator)) register()
+      else {
+        barrierRoute = result.coordinator
+        loadProgress()
+      }
     }
   }
 
@@ -188,6 +221,10 @@ private[server] class GlobalSequencePartitionIndexer(
       val committed = result.value.committedProgress().toScala
       if (committed.map(_.lastOffset()).getOrElse(-1L) < progress.map(_.lastOffset()).getOrElse(-1L))
         throw new InvalidRequestException("Committed global sequence progress regressed after a registration barrier")
+      if (recoveryStarted >= 0) {
+        Option(resources).foreach(_.event(Event.RECOVERY, (time.nanoseconds() - recoveryStarted) / 1000000.0))
+        recoveryStarted = -1L
+      }
       progress = committed
       publishProgress()
       // Preserve already validated control-only progress within this source lifetime.
@@ -206,6 +243,7 @@ private[server] class GlobalSequencePartitionIndexer(
   private def recover(cause: Throwable): Unit = {
     if (recoveryCheckedAt.exists(router.isCurrent(partition, _))) fail(cause)
     else {
+      recoveryStarted = time.nanoseconds()
       recoveryError = Some(cause)
       recoveryCheckedAt = None
       register()
@@ -219,6 +257,10 @@ private[server] class GlobalSequencePartitionIndexer(
       case None =>
         val read = try reader.read(partition, sourceLeaderEpoch, cursor, readMaxBytes)
         catch {
+          case _: org.apache.kafka.common.errors.TimeoutException =>
+            retryTask = scheduler.scheduleOnce("global-sequence-source-read-retry", () => enqueue { pump() }, 100)
+            if (isStopped) retryTask.cancel(false)
+            return
           case gap: SourceLogGapException =>
             if (!isStopped) recover(gap)
             return
@@ -274,6 +316,11 @@ private[server] class GlobalSequencePartitionIndexer(
       val outstanding = operation
       if (outstanding != null) outstanding.cancel(false)
       if (retryTask != null) retryTask.cancel(false)
+      if (workerRetry != null) workerRetry.cancel(false)
+      synchronized {
+        Option(resources).foreach(_.progress(Progress.INDEXING_LAG, -lag))
+        lag = 0L
+      }
       events.clear()
     }
   }

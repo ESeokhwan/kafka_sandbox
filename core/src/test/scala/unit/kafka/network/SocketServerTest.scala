@@ -253,6 +253,24 @@ class SocketServerTest {
   }
 
   @Test
+  def testResponseResourceReleaseOnSendAndAfterProcessorShutdown(): Unit = {
+    val conn = connect()
+    sendRequest(conn, producerRequestBytes())
+    val channel = server.dataPlaneRequestChannel
+    val request = receiveRequest(channel)
+    val releases = new AtomicInteger()
+    def response = new RequestChannel.SendResponse(request,
+      new NetworkSend(request.context.connectionId, ByteBufferSend.sizePrefixed(ByteBuffer.allocate(1))),
+      None, None, Some(() => { releases.incrementAndGet(); () }))
+    channel.sendResponse(response)
+    receiveResponse(conn)
+    TestUtils.waitUntilTrue(() => releases.get() == 1, "Completed send did not release buffers")
+    server.shutdown()
+    channel.sendResponse(response)
+    assertEquals(2, releases.get(), "A response delivered after processor removal must release buffers")
+  }
+
+  @Test
   def simpleRequest(): Unit = {
     val plainSocket = connect()
     val serializedBytes = producerRequestBytes()
@@ -1103,11 +1121,16 @@ class SocketServerTest {
       val send = new NetworkSend(request.context.connectionId, ByteBufferSend.sizePrefixed(ByteBuffer.allocate(responseBufferSize)))
       val headerLog = new ObjectNode(JsonNodeFactory.instance)
       headerLog.set("response", new TextNode("someResponse"))
-      channel.sendResponse(new RequestChannel.SendResponse(request, send, Some(headerLog), None))
+      val releases = new AtomicInteger()
+      val response = new RequestChannel.SendResponse(request, send, Some(headerLog), None, Some(() => { releases.incrementAndGet(); () }))
+      channel.sendResponse(response)
 
       TestUtils.waitUntilTrue(() => totalTimeHistCount() == expectedTotalTimeCount,
         s"request metrics not updated, expected: $expectedTotalTimeCount, actual: ${totalTimeHistCount()}")
 
+      TestUtils.waitUntilTrue(() => releases.get() == 1, "Disconnected response did not release its buffers")
+      response.release()
+      assertEquals(1, releases.get())
     } finally {
       shutdownServerAndMetrics(overrideServer)
     }

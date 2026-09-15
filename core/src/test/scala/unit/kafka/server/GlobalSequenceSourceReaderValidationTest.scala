@@ -81,8 +81,21 @@ class GlobalSequenceSourceReaderValidationTest {
       }
       new LogReadInfo(new FetchDataInfo(new LogOffsetMetadata(request.fetchOffset), data), Optional.empty(), hw, start, end, 0L)
     }
-    val reader = new GlobalSequenceSourceReader(replicaManager, new MockTime())
+    val time = new MockTime()
+    val reader = new GlobalSequenceSourceReader(replicaManager, time, 10)
     def read(): GlobalSequenceSourceReader.ReadResult = reader.read(key, 3, 0, 1024)
+  }
+
+  @Test
+  def testReadDeadlineAndOversizedFirstBatchLeaveCursorUnchanged(): Unit = {
+    val c = new Context
+    c.onRead = () => c.time.sleep(10)
+    assertThrows(classOf[org.apache.kafka.common.errors.TimeoutException], () => c.read())
+    c.onRead = () => ()
+    assertEquals(0L, c.read().batch.get.baseOffset())
+    val large = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(new Array[Byte](GlobalSequenceFetch.MaxBatchBytes)))
+    val oversized = new Context(large)
+    assertThrows(classOf[org.apache.kafka.common.errors.RecordTooLargeException], () => oversized.read())
   }
 
   @Test

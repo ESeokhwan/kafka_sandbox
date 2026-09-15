@@ -28,4 +28,9 @@ public interface DeferredEvent {
      *                          error otherwise.
      */
     void complete(Throwable exception);
+
+    /** Expiring a caller need not release resources retained by accepted work. */
+    default void onTimeout(Throwable exception) {
+        complete(exception);
+    }
 }

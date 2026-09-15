@@ -38,7 +38,11 @@ import scala.jdk.OptionConverters._
 private[server] class GlobalSequenceTestExecutor extends AbstractExecutorService {
   val tasks: mutable.Queue[Runnable] = mutable.Queue.empty
   private var closed = false
-  override def execute(command: Runnable): Unit = tasks.enqueue(command)
+  var reject = false
+  override def execute(command: Runnable): Unit = {
+    if (reject || closed) throw new java.util.concurrent.RejectedExecutionException()
+    tasks.enqueue(command)
+  }
   def runAll(): Unit = {
     var count = 0
     while (tasks.nonEmpty) {
@@ -143,6 +147,48 @@ class GlobalSequencePartitionIndexerTest {
       executor.runAll()
     }
     override def close(): Unit = { indexer.close(); executor.shutdown(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testSourceReadDeadlineRetriesTheSameCursor(): Unit = {
+    val c = new Context
+    try {
+      c.read = _ => throw new TimeoutException("slow source read")
+      c.start()
+      assertFalse(c.indexer.isStopped)
+      c.read = _ => c.batch(a)
+      c.time.sleep(100)
+      c.executor.runAll()
+      assertEquals(Seq(0L, 0L), c.reads.toSeq)
+      assertEquals(a, c.appends.head._1.batch())
+    } finally c.close()
+  }
+
+  @Test
+  def testWorkerAndRpcOverloadRetainTheIdenticalAppendAndResume(): Unit = {
+    val c = new Context
+    try {
+      c.read = offset => if (offset == 0) c.batch(a) else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+      c.start()
+      val original = c.appends.head._1
+      c.executor.reject = true
+      c.appends.head._2.completeExceptionally(new org.apache.kafka.common.errors.ThrottlingQuotaExceededException(100, "full"))
+      for (_ <- 0 until 1000) c.listener.onHighWatermarkUpdated(tp, 20)
+      assertFalse(c.indexer.isStopped)
+      assertEquals(0, c.executor.tasks.size)
+      c.time.sleep(100)
+      assertFalse(c.indexer.isStopped)
+      c.executor.reject = false
+      c.time.sleep(100)
+      c.executor.runAll()
+      c.time.sleep(100)
+      c.executor.runAll()
+      assertEquals(2, c.appends.size)
+      assertSame(original, c.appends.last._1)
+      c.completeAppend()
+      assertEquals(Seq(0L, 3L), c.reads.toSeq)
+      assertTrue(c.indexer.awaitIndexed(2, TimeUnit.SECONDS.toNanos(1)).isDone)
+    } finally c.close()
   }
 
   @Test

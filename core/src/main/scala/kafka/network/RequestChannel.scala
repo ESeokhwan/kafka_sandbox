@@ -298,6 +298,11 @@ object RequestChannel extends Logging {
 
   }
 
+  /** Payload reservations survive API completion and are released after sending or discarding the response. */
+  trait ResourceResponse {
+    def release(): Unit
+  }
+
   sealed abstract class Response(val request: Request) {
 
     def processor: Int = request.processor
@@ -305,13 +310,19 @@ object RequestChannel extends Logging {
     def responseLog: Option[JsonNode] = None
 
     def onComplete: Option[Send => Unit] = None
+
+    def release(): Unit = ()
   }
 
   /** responseLogValue should only be defined if request logging is enabled */
   class SendResponse(request: Request,
                      val responseSend: Send,
                      val responseLogValue: Option[JsonNode],
-                     val onCompleteCallback: Option[Send => Unit]) extends Response(request) {
+                     val onCompleteCallback: Option[Send => Unit],
+                     val onReleaseCallback: Option[() => Unit] = None) extends Response(request) {
+    private val released = new java.util.concurrent.atomic.AtomicBoolean(false)
+    override def release(): Unit = if (released.compareAndSet(false, true)) onReleaseCallback.foreach(_())
+
     override def responseLog: Option[JsonNode] = responseLogValue
 
     override def onComplete: Option[Send => Unit] = onCompleteCallback
@@ -393,13 +404,24 @@ class RequestChannel(val queueSize: Int,
     response: AbstractResponse,
     onComplete: Option[Send => Unit]
   ): Unit = {
-    updateErrorMetrics(request.header.apiKey, response.errorCounts.asScala)
-    sendResponse(new RequestChannel.SendResponse(
-      request,
-      request.buildResponseSend(response),
-      request.responseNode(response),
-      onComplete
-    ))
+    val release = response match {
+      case resource: RequestChannel.ResourceResponse => Some(() => resource.release())
+      case _ => None
+    }
+    try {
+      updateErrorMetrics(request.header.apiKey, response.errorCounts.asScala)
+      sendResponse(new RequestChannel.SendResponse(
+        request,
+        request.buildResponseSend(response),
+        request.responseNode(response),
+        onComplete,
+        release
+      ))
+    } catch {
+      case error: Throwable =>
+        release.foreach(_())
+        throw error
+    }
   }
 
   def sendNoOpResponse(request: RequestChannel.Request): Unit = {
@@ -453,7 +475,7 @@ class RequestChannel(val queueSize: Int,
     // are closed, so the response is dropped.
     if (processor != null) {
       processor.enqueueResponse(response)
-    }
+    } else response.release()
   }
 
   /** Get the next request or block until specified time has elapsed

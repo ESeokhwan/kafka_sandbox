@@ -39,6 +39,29 @@ class GlobalSequenceNetworkClientTest {
     new DescribeGlobalSequencePartitionResponse(new DescribeGlobalSequencePartitionResponseData().setTopicId(topicId).setPartition(0))
 
   @Test
+  def testCancelledWireRequestRetainsBudgetUntilActualCompletion(): Unit = {
+    val time = new MockTime()
+    val limits = new GlobalSequenceTestResources(time)
+    val client = new MockClient(time)
+    val transport = new GlobalSequenceNetworkClient(client, 1000, time, limits.resources, data = true)
+    import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.DATA_RPC
+    try {
+      transport.startup()
+      val first = transport.send(node, request)
+      org.apache.kafka.test.TestUtils.waitForCondition(() => client.requests().size() == 1, "RPC was not dispatched")
+      first.cancel(false)
+      assertEquals(1L, limits.resources.used(DATA_RPC))
+      assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], transport.send(node, request))
+      client.respond(response)
+      org.apache.kafka.test.TestUtils.waitForCondition(() => limits.resources.used(DATA_RPC) == 0, "RPC reservation was not released")
+      val next = transport.send(node, request)
+      transport.close()
+      assertFutureThrows(classOf[CoordinatorNotAvailableException], next)
+      assertEquals(0L, limits.resources.bytes(DATA_RPC))
+    } finally { transport.close(); limits.close() }
+  }
+
+  @Test
   def testNetworkCompletionAndDisconnect(): Unit = {
     for (disconnected <- Seq(false, true)) {
       val time = new MockTime()

@@ -17,6 +17,9 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
+
 import kafka.cluster.Partition
 import org.apache.kafka.common.{TopicIdPartition, Uuid}
 import org.apache.kafka.common.errors.{FencedLeaderEpochException, NotLeaderOrFollowerException}
@@ -35,7 +38,8 @@ private[server] case class GlobalSequenceAppendReceipt(source: Partition, topicI
 
 /** Progress checks and subscription share a lock, so completion before/during registration is not lost. */
 private[server] class GlobalSequenceIndexWaiters(scheduler: Scheduler, time: Time,
-                                                sourceIsCurrent: () => Boolean, highWatermark: () => Long) {
+                                                sourceIsCurrent: () => Boolean, highWatermark: () => Long,
+                                                resources: GlobalSequenceResources = null, key: AnyRef = new Object) {
   private class Waiter(val endOffset: Long, val deadlineNs: Long) {
     val future = new CompletableFuture[Void]()
     @volatile var timer: ScheduledFuture[_] = _
@@ -61,7 +65,13 @@ private[server] class GlobalSequenceIndexWaiters(scheduler: Scheduler, time: Tim
         case Some(cause) => Some(cause)
         case None => result(waiter) match {
           case Some(error) => Some(error.exception())
-          case None => pending.add(waiter); None
+          case None =>
+            try {
+              val lease = Option(resources).map(_.acquire(Scope.PRODUCE, key, 0))
+              waiter.future.whenComplete((_, error) => lease.foreach(_.finish(error)))
+              pending.add(waiter)
+              None
+            } catch { case NonFatal(error) => Some(error) }
         }
       }
     }

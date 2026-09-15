@@ -1628,6 +1628,11 @@ public class UnifiedLog implements AutoCloseable {
         }
     }
 
+    /** Deadline-aware constant-memory transaction lookup for a complete physical batch. */
+    public boolean isAborted(long producerId, long baseOffset, long lastOffset, Runnable checkDeadline) {
+        return localLog.isAborted(producerId, baseOffset, lastOffset, checkDeadline);
+    }
+
     /**
      * Read messages from the log.
      *

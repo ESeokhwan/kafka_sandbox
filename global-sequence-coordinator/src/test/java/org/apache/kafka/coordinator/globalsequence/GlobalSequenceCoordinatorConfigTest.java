@@ -49,6 +49,15 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(5 * 1024 * 1024, config.loadBufferSize());
         assertEquals(5000, config.writeTimeoutMs());
         assertEquals(5, config.appendLingerMs());
+        assertEquals(1024, config.maxPendingOperations());
+        assertEquals(64, config.maxPendingPerPartition());
+        assertEquals(10000, config.maxProduceWaiters());
+        assertEquals(256 * 1024 * 1024, config.fetchBufferBytes());
+        assertEquals(128 * 1024 * 1024, config.dataRpcBufferBytes());
+        assertEquals(128 * 1024 * 1024, config.readResponseBufferBytes());
+        assertEquals(128, config.workerQueueSize());
+        assertEquals(2, config.readerNumThreads());
+        assertEquals(256 * 1024 * 1024, config.lookupScanMaxBytes());
 
         Properties props = config.indexTopicConfigs();
         assertEquals("delete", props.getProperty(TopicConfig.CLEANUP_POLICY_CONFIG));
@@ -94,6 +103,9 @@ class GlobalSequenceCoordinatorConfigTest {
                 assertThrows(ConfigException.class, () -> config(Map.of(name, 0)), name);
             }
         }
+        assertThrows(ConfigException.class, () -> config(Map.of(GlobalSequenceCoordinatorConfig.MAX_PENDING_OPERATIONS_CONFIG, 63)));
+        assertThrows(ConfigException.class, () -> config(Map.of(GlobalSequenceCoordinatorConfig.MAX_PRODUCE_WAITERS_CONFIG, 63)));
+        assertThrows(ConfigException.class, () -> config(Map.of(GlobalSequenceCoordinatorConfig.FETCH_BUFFER_BYTES_CONFIG, 48 * 1024 * 1024 - 1)));
         assertThrows(ConfigException.class, () -> config(Map.of(
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, 4)));
         assertThrows(ConfigException.class, () -> config(Map.of(

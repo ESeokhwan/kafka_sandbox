@@ -844,6 +844,8 @@ private[kafka] class Processor(
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
+  private val responseLifecycleLock = new Object
+  private var responsesClosed = false
 
   private[kafka] val metricTags = mutable.LinkedHashMap(
     ListenerMetricTag -> listenerName.value,
@@ -982,6 +984,7 @@ private[kafka] class Processor(
         }
       } catch {
         case e: Throwable =>
+          currentResponse.release()
           processChannelException(channelId, s"Exception while processing response for $channelId", e)
       }
     }
@@ -1002,7 +1005,7 @@ private[kafka] class Processor(
     if (openOrClosingChannel(connectionId).isDefined) {
       selector.send(new NetworkSend(connectionId, responseSend))
       inflightResponses += (connectionId -> response)
-    }
+    } else response.release()
   }
 
   private def poll(): Unit = {
@@ -1079,8 +1082,11 @@ private[kafka] class Processor(
 
         // Invoke send completion callback, and then update request metrics since there might be some
         // request metrics got updated during callback
-        response.onComplete.foreach(onComplete => onComplete(send))
-        updateRequestMetrics(response)
+        try response.onComplete.foreach(onComplete => onComplete(send))
+        finally {
+          response.release()
+          updateRequestMetrics(response)
+        }
 
         // Try unmuting the channel. If there was no quota violation and the channel has not been throttled,
         // it will be unmuted immediately. If the channel has been throttled, it will unmuted only if the throttling
@@ -1096,6 +1102,7 @@ private[kafka] class Processor(
   }
 
   private def updateRequestMetrics(response: RequestChannel.Response): Unit = {
+    response.release()
     val request = response.request
     val networkThreadTimeNanos = openOrClosingChannel(request.context.connectionId).fold(0L)(_.getAndResetNetworkThreadTimeNanos())
     request.updateRequestMetrics(networkThreadTimeNanos, response)
@@ -1203,6 +1210,16 @@ private[kafka] class Processor(
     selector.channels.forEach { channel =>
       close(channel.id)
     }
+    responseLifecycleLock.synchronized {
+      responsesClosed = true
+      var response = responseQueue.poll()
+      while (response != null) {
+        response.release()
+        response = responseQueue.poll()
+      }
+    }
+    inflightResponses.values.foreach(_.release())
+    inflightResponses.clear()
     selector.close()
     metricsGroup.removeMetric(IdlePercentMetricName, Map(NetworkProcessorMetricTag -> id.toString).asJava)
   }
@@ -1215,7 +1232,10 @@ private[kafka] class Processor(
   }
 
   private[network] def enqueueResponse(response: RequestChannel.Response): Unit = {
-    responseQueue.put(response)
+    responseLifecycleLock.synchronized {
+      if (responsesClosed) response.release()
+      else responseQueue.add(response)
+    }
     wakeup()
   }
 

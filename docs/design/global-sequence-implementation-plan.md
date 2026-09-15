@@ -17,11 +17,11 @@
 
 # Global sequence topic 구현 계획
 
-작성 기준: 2026-09-15, `proj/globally_ordered_topic/develop_v4`, 16번 구현 커밋 기준.
+작성 기준: 2026-09-15, `proj/globally_ordered_topic/develop_v4`, 17번 구현 커밋 기준.
 출발점은 Kafka 4.1.1의 vanilla 코드인 `be816b82d2`다.
 
 기존 1~18번 구현 순서를 유지하여 완료한 작업과 남은 작업을 커밋 단위로 정리한다.
-**1~16번은 구현 완료, 17~18번은 미구현이다.** 완료한 단계의 설명은 현재까지의
+**1~17번은 구현 완료, 18번은 미구현이다.** 완료한 단계의 설명은 현재까지의
 후속 보완을 포함한 구현 상태를 기준으로 한다. 남은 단계의 커밋 제목과 새 API 이름은 계획안이다.
 이 문서의 단계 번호는 [상세 설계 문서](global-sequence.md)의 장 번호와 별개다.
 
@@ -63,8 +63,8 @@ Global Consumer Group, 데이터 compaction, 기존 토픽 이력 전환, 인덱
 | 13 | Produce 응답의 인덱스 커밋 대기 | 완료 | `1fe98f1b68` |
 | 14 | Global offset 범위의 인덱스 조회 API | 완료 | `d9d6f7179b` |
 | 15 | Global offset 기반 데이터 Fetch API | 완료 | `0e85c08e77` |
-| 16 | Global Fetch의 트랜잭션 격리 | 완료 | 본 커밋 |
-| 17 | 작업량·메모리 제한, backpressure, 상세 지표 | 미구현 | 예정 |
+| 16 | Global Fetch의 트랜잭션 격리 | 완료 | `e47dadedc3` |
+| 17 | 작업량·메모리 제한, backpressure, 상세 지표 | 완료 | 본 커밋 |
 | 18 | 종합 장애 테스트와 사용·운영 문서 | 미구현 | 예정 |
 
 | 마일스톤 | 단계 | 완료 조건 | 현재 상태 |
@@ -72,7 +72,7 @@ Global Consumer Group, 데이터 compaction, 기존 토픽 이력 전환, 인덱
 | A. 인덱싱 기반 | 1~9 | 저장 형식, coordinator, RPC, 라우팅, 원본 Reader 연결 | 완료 |
 | B. 쓰기와 복구 | 10~13 | 자동 인덱싱·복구·원본 보존·Produce 대기 연결 | 완료 |
 | C. Global 읽기 | 14~16 | 범위 조회, 데이터 Fetch, 두 격리 수준 제공 | 완료 |
-| D. 자원 제한과 종합 검증 | 17~18 | 과부하 제어, 관측 지표, 장애 검증과 사용 문서 | 미구현 |
+| D. 자원 제한과 종합 검증 | 17~18 | 과부하 제어, 관측 지표, 장애 검증과 사용 문서 | 17 완료, 18 남음 |
 
 ## 완료한 단계
 
@@ -347,35 +347,33 @@ LSO·HW 경합과 marker 복제 경계, 같은 producer의 abort 후 commit, seg
 실제 3브로커에서 열린 트랜잭션의 source 리더 이동, commit/abort, 후속 transaction과
 source/index 리더 변경 후 두 격리 수준의 global 읽기를 확인했다.
 
-## 남은 단계
-
-17번부터 순서대로 구현하고, 각 단계의 테스트와 설계 문서를 함께 별도 커밋한다.
-추가 설정·지표 이름과 필요한 신규 클래스 이름은 해당 단계에서 확정한다.
-
 ### 17. 작업량·메모리 제한, backpressure, 상세 지표
 
-상태: 미구현 · 의존: 10~16
+상태: 완료 · 커밋: 본 커밋 · 의존: 10~16
 
-예정 커밋: `feat: bound global sequence work and expose progress metrics`
+- Broker 공통 admission/metrics를 추가하고 Produce waiter, route, RPC, reader,
+  coordinator read/write, 네트워크 응답에 개수·키별·바이트 상한을 연결했다.
+- Data transport를 index transport에서 분리했다. Indexer 공유 작업 큐를 제한하고,
+  큐 거절과 RPC overload 이후 동일 배치·소유권으로 재시도한다. Retention refresh도 재시도한다.
+- Write timeout/cancel 이후에도 actual commit/failure까지 Runtime permit을 유지한다.
+  큐에 있거나 실제 전송 중인 RPC, 실행 중 reader, 전송 대기 중 응답의 수명을 구분해 해제한다.
+- Lookup 누적 scan, source 복사/검증, fetch 조립을 제한하고 RC abort 판별을 일정 메모리 순회로 바꿨다.
+- 작업 대기 수·지연·오류/거절, RPC/worker 재시도, fencing/gap, recovery 시간,
+  physical indexing lag 및 retention 보류 지표를 고정 cardinality로 추가했다.
+- 설정 검증, 느린 client/HW, 취소된 실제 I/O, 과부하 후 재개, 소켓 완료·연결 종료·shutdown을 검증했다.
 
-**목표:** 쓰기·복구·global 읽기가 느리거나 요청이 몰릴 때도 자원 사용량과 진행 상태를 통제한다.
-공유 worker, Reader byte 제한과 Runtime 기본 지표는 이미 있으며 이 단계에서 제한·관측 범위를 확장한다.
+기본값, scope별 키, 바이트 예산의 범위와 cold lookup 한계는
+[상세 설계 §14](global-sequence.md#14-17번-구현-자원-제한과-관측)에 정리했다.
+Batch 묶기와 checkpoint/GC 형식은 변경하지 않았다.
 
-- Produce waiter, 조회·fetch 작업, RPC 및 큐에 필요한 개수·바이트·시간 상한을 정한다.
-- Global lookup의 cache/scan과 fetch 조립 버퍼를 제한하고 취소·timeout·종료 시 자원을 해제한다.
-- 과부하 시 신규 작업의 수락·재시도 정책과 오류를 명시한다.
-- 이미 append된 원본이나 수락된 인덱스 write를 유실시키는 방식으로 backlog를 줄이지 않는다.
-- 파티션 간 공정성을 확인하여 느린 한 파티션이 다른 파티션의 진행을 막지 않도록 한다.
-- 인덱싱 지연, Produce 대기 수·시간, RPC 재시도, fencing/gap, 복구 시간,
-  retention 보류와 global 읽기 지연·오류 지표를 추가한다.
-- 지표마다 physical/global/index offset의 단위를 구분하고 metric cardinality를 제한한다.
-- 설정 기본값·유효성·종료 순서와 장애 중 자원 정리를 테스트한다.
+검증: 최종 회귀 821개(core 577, coordinator 79, Runtime 102, storage 15, clients 48)가
+실패·skip 없이 통과했고 관련 Checkstyle·SpotBugs도 통과했다. 별도 확장한 SocketServer 검사에서
+실패한 9개는 네트워크 변경을 제거한 HEAD 코드에서도 동일하게 재현했다.
+상세 목록은 [설계 문서 검증 기록](global-sequence.md#144-검증-기록)을 따른다.
 
-주요 변경 위치: coordinator 설정·metrics, Indexer/라우터/waiter, global 조회·fetch 컴포넌트.
+## 남은 단계
 
-완료 기준: 느린 index HW·원격 fetch 및 대량 요청 상황에서 큐·메모리가 설정한 경계 안에 머문다.
-과부하 해소 후 같은 committed progress에서 진행하며 중복 할당·누락이 없다.
-Batch 묶기나 checkpoint 형식 변경은 자동으로 포함하지 않으며, 필요하면 별도 설계·검증 후 결정한다.
+18번은 아래 종합 장애 검증과 사용·운영 문서다.
 
 ### 18. 종합 장애 테스트와 사용·운영 문서
 

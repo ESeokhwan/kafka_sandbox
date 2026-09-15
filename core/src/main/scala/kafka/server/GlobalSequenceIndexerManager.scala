@@ -17,6 +17,8 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.internals.Topic
@@ -27,20 +29,22 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShar
 import org.apache.kafka.image.MetadataImage
 import org.apache.kafka.server.util.Scheduler
 
-import java.util.concurrent.{CompletableFuture, ExecutorService, Executors, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ArrayBlockingQueue, ExecutorService, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
 object GlobalSequenceIndexerManager {
   def apply(brokerId: Int, config: GlobalSequenceCoordinatorConfig, replicaManager: ReplicaManager,
-            router: IndexRoutingManager, scheduler: Scheduler, time: Time = Time.SYSTEM): GlobalSequenceIndexerManager = {
+            router: IndexRoutingManager, scheduler: Scheduler, time: Time = Time.SYSTEM,
+            resources: GlobalSequenceResources = null): GlobalSequenceIndexerManager = {
     val threadId = new AtomicInteger()
-    val workers = Executors.newFixedThreadPool(config.indexerNumThreads(), runnable =>
+    val workers = new ThreadPoolExecutor(config.indexerNumThreads(), config.indexerNumThreads(), 0L, TimeUnit.MILLISECONDS,
+      new ArrayBlockingQueue[Runnable](config.workerQueueSize()), runnable =>
       KafkaThread.daemon(s"global-sequence-indexer-$brokerId-${threadId.getAndIncrement()}", runnable))
-    new GlobalSequenceIndexerManager(brokerId, replicaManager, new GlobalSequenceSourceReader(replicaManager, time),
+    new GlobalSequenceIndexerManager(brokerId, replicaManager, new GlobalSequenceSourceReader(replicaManager, time, config.writeTimeoutMs()),
       router, workers, scheduler, config.writeTimeoutMs(), config.indexerReadMaxBytes(),
-      new GlobalSequenceRetentionManager(replicaManager, router, workers, scheduler, config.writeTimeoutMs(), config.retentionRefreshIntervalMs()), time)
+      new GlobalSequenceRetentionManager(replicaManager, router, workers, scheduler, config.writeTimeoutMs(), config.retentionRefreshIntervalMs(), resources), time, resources)
   }
 }
 
@@ -55,7 +59,8 @@ class GlobalSequenceIndexerManager private[server](
   requestTimeoutMs: Int,
   readMaxBytes: Int,
   retention: GlobalSequenceRetentionManager,
-  time: Time = Time.SYSTEM
+  time: Time = Time.SYSTEM,
+  resources: GlobalSequenceResources = null
 ) extends AutoCloseable {
   private val indexers = mutable.Map.empty[PartitionKey, GlobalSequencePartitionIndexer]
   private var closed = false
@@ -81,7 +86,7 @@ class GlobalSequenceIndexerManager private[server](
                   case previous =>
                     previous.foreach(_.close())
                     val indexer = new GlobalSequencePartitionIndexer(key, source, brokerId, registration.leaderEpoch,
-                      reader, router, workers, scheduler, requestTimeoutMs, readMaxBytes, time)
+                      reader, router, workers, scheduler, requestTimeoutMs, readMaxBytes, time, resources)
                     indexers.put(key, indexer)
                     indexer.start()
                 }

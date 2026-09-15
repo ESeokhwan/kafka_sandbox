@@ -17,6 +17,9 @@
 
 package kafka.server
 
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.{Event, Scope}
+
 import org.apache.kafka.common.{Node, Uuid}
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, DisconnectException, FencedLeaderEpochException, InvalidRequestException, NotCoordinatorException, TimeoutException, UnknownTopicOrPartitionException}
@@ -62,7 +65,8 @@ class IndexRoutingManager private[server](
   coordinator: GlobalSequenceCoordinator,
   transport: GlobalSequenceTransport,
   scheduler: Scheduler,
-  time: Time
+  time: Time,
+  resources: GlobalSequenceResources = null
 ) extends AutoCloseable {
   import IndexRoutingManager._
 
@@ -81,12 +85,15 @@ class IndexRoutingManager private[server](
     }
   }
 
+  private[server] def reserveLookupResponse(topicId: Uuid): Option[GlobalSequenceResources#Lease] =
+    Option(resources).map(_.acquire(Scope.INDEX_RESPONSE, topicId, 128L * 1024))
+
   def lookupIndex(request: GlobalSequenceLookup.Request): CompletableFuture[RoutedResult[GlobalSequenceLookup.Result]] = {
     val key = new PartitionKey(request.topicId(), 0)
     val deadline = time.hiResClockMs() + request.timeoutMs()
     def remainingRequest = new GlobalSequenceLookup.Request(request.topicId(), request.startOffset(), request.endOffset(),
       request.maxBatches(), math.max(1L, deadline - time.hiResClockMs()).toInt)
-    submit(key, None, request.timeoutMs())(
+    submit(key, None, request.timeoutMs(), Scope.LOOKUP_ROUTE)(
       route => coordinator.lookupIndex(remainingRequest, route.leaderEpoch),
       route => GlobalSequenceProtocol.lookupRequest(remainingRequest, route.leaderEpoch),
       response => GlobalSequenceProtocol.lookupResponse(request, response),
@@ -170,7 +177,17 @@ class IndexRoutingManager private[server](
     throw indexFailure.get()
   }
 
-  private def submit[T](partition: PartitionKey, source: Option[(Int, Int)], timeoutMs: Long)(
+  private def submit[T](partition: PartitionKey, source: Option[(Int, Int)], timeoutMs: Long, scope: Scope = Scope.INDEX_ROUTE)(
+    local: CoordinatorLocation => CompletableFuture[T],
+    request: CoordinatorLocation => AbstractRequest.Builder[_ <: AbstractRequest],
+    decode: AbstractResponse => T,
+    validate: (T, CoordinatorLocation) => Unit,
+    terminal: T => Boolean
+  ): CompletableFuture[RoutedResult[T]] = GlobalSequenceAdmission.run(resources, scope, partition) {
+    submitAdmitted(partition, source, timeoutMs)(local, request, decode, validate, terminal)
+  }
+
+  private def submitAdmitted[T](partition: PartitionKey, source: Option[(Int, Int)], timeoutMs: Long)(
     local: CoordinatorLocation => CompletableFuture[T],
     request: CoordinatorLocation => AbstractRequest.Builder[_ <: AbstractRequest],
     decode: AbstractResponse => T,
@@ -200,6 +217,7 @@ class IndexRoutingManager private[server](
     def retry(error: Throwable, attempt: Int): Unit = {
       val cause = Errors.maybeUnwrapException(error)
       if (isRetryable(cause)) {
+        Option(resources).foreach(_.event(Event.RPC_RETRY, 0))
         val remaining = deadlineMs - time.hiResClockMs()
         if (remaining <= 0) timeout()
         else {

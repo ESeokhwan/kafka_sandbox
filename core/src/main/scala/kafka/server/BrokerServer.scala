@@ -130,6 +130,7 @@ class BrokerServer(
   var transactionCoordinator: TransactionCoordinator = _
 
   var shareCoordinator: ShareCoordinator = _
+  private var globalSequenceResources: org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources = _
   var globalSequenceCoordinator: GlobalSequenceCoordinator = _
   var indexRoutingManager: IndexRoutingManager = _
   var globalSequenceFetchManager: GlobalSequenceFetchManager = _
@@ -403,19 +404,25 @@ class BrokerServer(
         config, clientToControllerChannelManager, groupCoordinator,
         transactionCoordinator, shareCoordinator)
 
+      val globalConfig = config.globalSequenceCoordinatorConfig
+      globalSequenceResources = new org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources(globalConfig, metrics, time)
       globalSequenceCoordinator = createGlobalSequenceCoordinator()
       val globalSequenceTransport = new GlobalSequenceNetworkClient(NetworkUtils.buildNetworkClient("GlobalSequence", config, metrics, time,
-        new LogContext(s"[GlobalSequence broker=${config.brokerId}]")), config.requestTimeoutMs, time)
+        new LogContext(s"[GlobalSequence broker=${config.brokerId}]")), config.requestTimeoutMs, time, globalSequenceResources)
       indexRoutingManager = new IndexRoutingManager(config.brokerId, config.globalSequenceCoordinatorConfig.indexTopicNumPartitions(),
         config.interBrokerListenerName, () => metadataCache.getImage(), globalSequenceCoordinator,
-        globalSequenceTransport, kafkaScheduler, time)
+        globalSequenceTransport, kafkaScheduler, time, globalSequenceResources)
       indexRoutingManager.startup()
+      val globalSequenceDataTransport = new GlobalSequenceNetworkClient(NetworkUtils.buildNetworkClient("GlobalSequenceData", config, metrics, time,
+        new LogContext(s"[GlobalSequenceData broker=${config.brokerId}]")), config.requestTimeoutMs, time, globalSequenceResources, data = true)
+      globalSequenceDataTransport.startup()
       val globalSequenceDataRouter = new GlobalSequenceDataRouter(config.brokerId, config.interBrokerListenerName,
-        () => metadataCache.getImage(), new GlobalSequenceDataReader(replicaManager, kafkaScheduler, time),
-        globalSequenceTransport, kafkaScheduler, time)
-      globalSequenceFetchManager = new GlobalSequenceFetchManager(indexRoutingManager, globalSequenceDataRouter, kafkaScheduler, time)
+        () => metadataCache.getImage(), new GlobalSequenceDataReader(replicaManager, kafkaScheduler, time,
+          GlobalSequenceDataReader.workers(globalConfig.readerNumThreads(), globalConfig.workerQueueSize()), globalSequenceResources),
+        globalSequenceDataTransport, kafkaScheduler, time, globalSequenceResources, ownsTransport = true)
+      globalSequenceFetchManager = new GlobalSequenceFetchManager(indexRoutingManager, globalSequenceDataRouter, kafkaScheduler, time, globalSequenceResources)
       globalSequenceIndexerManager = GlobalSequenceIndexerManager(config.brokerId, config.globalSequenceCoordinatorConfig,
-        replicaManager, indexRoutingManager, kafkaScheduler, time)
+        replicaManager, indexRoutingManager, kafkaScheduler, time, globalSequenceResources)
       replicaManager.setGlobalSequenceIndexerManager(globalSequenceIndexerManager)
 
       dynamicConfigHandlers = Map[ConfigType, ConfigHandler](
@@ -684,7 +691,10 @@ class BrokerServer(
       .withTimer(timer)
       .withLoader(loader)
       .withWriter(new CoordinatorPartitionWriter(replicaManager))
-      .withIndexReader(new GlobalSequenceIndexReader(replicaManager, kafkaScheduler, coordinatorTime))
+      .withIndexReader(new GlobalSequenceIndexReader(replicaManager, kafkaScheduler, coordinatorTime,
+        GlobalSequenceIndexReader.workers(config.globalSequenceCoordinatorConfig.readerNumThreads(), config.globalSequenceCoordinatorConfig.workerQueueSize()),
+        globalSequenceResources))
+      .withResources(globalSequenceResources)
       .withMetrics(metrics)
       .withTopicCreation(() => {
         autoTopicCreationManager.createTopics(Set(Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME),
@@ -850,6 +860,8 @@ class BrokerServer(
         CoreUtils.swallow(shareCoordinator.shutdown(), this)
       if (globalSequenceCoordinator != null)
         CoreUtils.swallow(globalSequenceCoordinator.shutdown(), this)
+      if (globalSequenceResources != null)
+        CoreUtils.swallow(globalSequenceResources.close(), this)
 
       if (assignmentsManager != null)
         CoreUtils.swallow(assignmentsManager.close(), this)

@@ -157,6 +157,19 @@ public class TransactionIndex implements Closeable {
         return result;
     }
 
+    /** Constant-memory point lookup. Empty means the caller must continue into later segments. */
+    public Optional<Boolean> isAborted(long producerId, long baseOffset, long lastOffset, Runnable checkDeadline) {
+        ByteBuffer buffer = ByteBuffer.allocate(AbortedTxn.TOTAL_SIZE);
+        for (AbortedTxnWithPosition entry : iterable(() -> buffer)) {
+            checkDeadline.run();
+            AbortedTxn txn = entry.txn;
+            if (txn.producerId() == producerId && txn.firstOffset() <= baseOffset && txn.lastOffset() >= lastOffset)
+                return Optional.of(true);
+            if (txn.lastStableOffset() > lastOffset) return Optional.of(false);
+        }
+        return Optional.empty();
+    }
+
     /**
      * Collect all aborted transactions which overlap with a given fetch range.
      *

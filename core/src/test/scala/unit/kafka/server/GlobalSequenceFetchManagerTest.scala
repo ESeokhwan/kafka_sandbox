@@ -48,7 +48,7 @@ class GlobalSequenceFetchManagerTest {
   private case class Work(batch: PhysicalBatch, deadline: Long, future: CompletableFuture[Data])
   private class Context(entries: Seq[GlobalSequenceLookup.Mapping] = (0L until 6L).map(mapping(_)),
                         maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue,
-                        isolation: IsolationLevel = READ_UNCOMMITTED) extends AutoCloseable {
+                        isolation: IsolationLevel = READ_UNCOMMITTED, bounded: Boolean = false) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val index: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val source: GlobalSequenceDataRouter = mock(classOf[GlobalSequenceDataRouter])
@@ -63,7 +63,8 @@ class GlobalSequenceFetchManagerTest {
       work += item
       item.future
     }
-    val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time)
+    val limits = new GlobalSequenceTestResources(time)
+    val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time, if (bounded) limits.resources else null)
     val future = manager.fetch(request)
     def loaded(): Unit = {
       val end = entries.lastOption.map(_.globalEndOffset()).getOrElse(startOffset)
@@ -73,7 +74,42 @@ class GlobalSequenceFetchManagerTest {
     }
     def complete(position: Int, size: Int = 1): Unit = work(position).future.complete(data(work(position).batch, size).copy(lastStableOffset = work(position).batch.lastOffset() + 1))
     def response: FetchGlobalSequenceResponse = future.join()
-    override def close(): Unit = { manager.close(); time.scheduler.clear() }
+    override def close(): Unit = {
+      manager.close()
+      if (future.isDone && !future.isCompletedExceptionally) future.join().asInstanceOf[kafka.network.RequestChannel.ResourceResponse].release()
+      limits.close()
+      time.scheduler.clear()
+    }
+  }
+
+  @Test
+  def testResponseReservationSurvivesCompletionAndBoundsSlowClients(): Unit = {
+    val c = new Context(entries = Seq.empty, bounded = true)
+    try {
+      import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.FETCH
+      org.apache.kafka.test.TestUtils.assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], c.manager.fetch(c.request))
+      c.loaded()
+      assertTrue(c.future.isDone)
+      assertEquals(1L, c.limits.resources.used(FETCH), "Network handoff must retain the response reservation")
+      org.apache.kafka.test.TestUtils.assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], c.manager.fetch(c.request))
+      c.response.asInstanceOf[kafka.network.RequestChannel.ResourceResponse].release()
+      c.response.asInstanceOf[kafka.network.RequestChannel.ResourceResponse].release()
+      assertEquals(0L, c.limits.resources.bytes(FETCH))
+      val next = c.manager.fetch(c.request).join()
+      next.asInstanceOf[kafka.network.RequestChannel.ResourceResponse].release()
+      assertEquals(0L, c.limits.resources.used(FETCH))
+    } finally c.close()
+  }
+
+  @Test
+  def testCancellationReleasesFetchAdmissionAndCancelsChildren(): Unit = {
+    val c = new Context(bounded = true)
+    try {
+      c.loaded()
+      c.future.cancel(false)
+      assertEquals(0L, c.limits.resources.used(org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.FETCH))
+      assertTrue(c.work.forall(_.future.isCancelled))
+    } finally c.close()
   }
 
   @Test

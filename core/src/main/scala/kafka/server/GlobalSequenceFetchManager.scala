@@ -17,6 +17,10 @@
 
 package kafka.server
 
+import kafka.network.RequestChannel.ResourceResponse
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
+
 import org.apache.kafka.common.IsolationLevel
 import org.apache.kafka.common.IsolationLevel.READ_UNCOMMITTED
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, NotCoordinatorException, TimeoutException}
@@ -33,7 +37,7 @@ import scala.util.control.NonFatal
 
 /** A sliding window bounds reads and completed out-of-order payloads; only the contiguous prefix can advance. */
 class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSequenceDataRouter,
-                                 scheduler: Scheduler, time: Time) extends AutoCloseable {
+                                 scheduler: Scheduler, time: Time, resources: GlobalSequenceResources = null) extends AutoCloseable {
   import GlobalSequenceFetch._
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[FetchGlobalSequenceResponse]]()
   @volatile private var closed = false
@@ -41,9 +45,13 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
   def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
     source.readLocal(batch, epoch, deadlineNs, isolation)
 
+  private[server] def reserveDataResponse(key: PartitionKey): Option[GlobalSequenceResources#Lease] =
+    Option(resources).map(_.acquire(Scope.DATA_RESPONSE, key, GlobalSequenceResources.BATCH_BYTES))
+
   def fetch(request: Request): CompletableFuture[FetchGlobalSequenceResponse] = new Session(request).start()
 
   private class Session(request: Request) {
+    private var lease: Option[GlobalSequenceResources#Lease] = None
     private val result = new CompletableFuture[FetchGlobalSequenceResponse]()
     private val deadlineNs = time.nanoseconds() + request.lookup.timeoutMs().toLong * 1000000L
     private var timer: ScheduledFuture[_] = _
@@ -60,8 +68,11 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
     private var draining = false
 
     def start(): CompletableFuture[FetchGlobalSequenceResponse] = synchronized {
+      try lease = Option(resources).map(_.acquire(Scope.FETCH, request.lookup.topicId(), GlobalSequenceResources.FETCH_BYTES))
+      catch { case NonFatal(error) => return CompletableFuture.failedFuture(error) }
       pending.add(result)
-      result.whenComplete { (_, _) => synchronized {
+      result.whenComplete { (_, error) => synchronized {
+        if (error != null) lease.foreach(_.finish(error))
         pending.remove(result)
         if (timer != null) timer.cancel(false)
         if (lookup != null) lookup.cancel(false)
@@ -103,8 +114,16 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
         response.batches().clear()
         response.setTransactionPending(false)
         response.setNextGlobalOffset(request.lookup.startOffset())
-        result.complete(GlobalSequenceFetch.fail(response, new NotCoordinatorException("Index route changed during global fetch")))
-      } else result.complete(error.fold(new FetchGlobalSequenceResponse(response))(GlobalSequenceFetch.fail(response, _)))
+        complete(GlobalSequenceFetch.fail(response, new NotCoordinatorException("Index route changed during global fetch")))
+      } else complete(error.fold(new FetchGlobalSequenceResponse(response))(GlobalSequenceFetch.fail(response, _)))
+    }
+
+    private def complete(page: FetchGlobalSequenceResponse): Unit = {
+      val owned = new FetchGlobalSequenceResponse(page.data()) with ResourceResponse {
+        override def release(): Unit = lease.foreach(_.finish(
+          org.apache.kafka.common.protocol.Errors.forCode(page.data().errorCode()).exception()))
+      }
+      if (!result.complete(owned)) owned.release()
     }
 
     // All calls hold the session monitor. Immediate future completion re-enters without recursive draining.

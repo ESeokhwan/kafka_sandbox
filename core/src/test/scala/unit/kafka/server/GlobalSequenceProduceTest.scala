@@ -42,6 +42,28 @@ class GlobalSequenceProduceTest {
   }
 
   @Test
+  def testWaiterAdmissionFairnessAndTimeoutDoNotLoseCommittedProgress(): Unit = {
+    val time = new MockTime(0, 0)
+    val limits = new GlobalSequenceTestResources(time)
+    val a = new GlobalSequenceIndexWaiters(time.scheduler, time, () => true, () => 100L, limits.resources, "a")
+    val b = new GlobalSequenceIndexWaiters(time.scheduler, time, () => true, () => 100L, limits.resources, "b")
+    try {
+      val expired = a.await(10, TimeUnit.MILLISECONDS.toNanos(10))
+      assertFutureThrows(classOf[org.apache.kafka.common.errors.ThrottlingQuotaExceededException], a.await(10, TimeUnit.SECONDS.toNanos(1)))
+      val other = b.await(20, TimeUnit.SECONDS.toNanos(1))
+      time.sleep(10)
+      assertFutureThrows(classOf[TimeoutException], expired)
+      val retried = a.await(10, TimeUnit.SECONDS.toNanos(1))
+      a.advance(10)
+      b.advance(20)
+      assertTrue(retried.isDone)
+      assertTrue(other.isDone)
+      assertTrue(a.await(10, TimeUnit.SECONDS.toNanos(1)).isDone)
+      assertEquals(0L, limits.resources.used(org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.PRODUCE))
+    } finally { limits.close(); time.scheduler.clear() }
+  }
+
+  @Test
   def testCompletedBeforeAndDuringRegistrationAndIndependentRanges(): Unit = {
     val c = new Context
     c.waiters.advance(10)

@@ -22,7 +22,7 @@ import kafka.server.QuotaFactory.QuotaManagers
 import org.apache.kafka.common.acl.AclOperation.{CLUSTER_ACTION, READ}
 import org.apache.kafka.common.errors.{RecordTooLargeException, TopicAuthorizationException, UnknownTopicIdException}
 import org.apache.kafka.common.protocol.{Errors, ObjectSerializationCache}
-import org.apache.kafka.common.requests.{AbstractResponse, FetchGlobalSequenceRequest, FetchGlobalSequenceResponse, ReadGlobalSequenceDataRequest}
+import org.apache.kafka.common.requests.{AbstractResponse, FetchGlobalSequenceRequest, FetchGlobalSequenceResponse, ReadGlobalSequenceDataRequest, ReadGlobalSequenceDataResponse}
 import org.apache.kafka.common.resource.ResourceType.TOPIC
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.metadata.MetadataCache
@@ -34,9 +34,10 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
                               quotas: QuotaManagers, time: Time) {
   def fetch(request: RequestChannel.Request): CompletableFuture[Unit] = {
     val body = request.body[FetchGlobalSequenceRequest]
-    def send(response: FetchGlobalSequenceResponse): Unit = {
+    def send(response: FetchGlobalSequenceResponse): Unit = try {
       val size = response.data().size(new ObjectSerializationCache(), request.header.apiVersion())
       if (size > GlobalSequenceFetch.MaxResponseBytes) {
+        release(response)
         helper.sendMaybeThrottle(request, body.getErrorResponse(new RecordTooLargeException("Global fetch response exceeds 16 MiB")))
         return
       }
@@ -49,6 +50,10 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
       // Send this bounded page and charge its bytes even when muting the channel. Its cursor remains usable.
       response.maybeSetThrottleTimeMs(throttle)
       channel.sendResponse(request, response, None)
+    } catch {
+      case error: Exception =>
+        release(response)
+        throw error
     }
     try {
       val name = metadata.getTopicName(body.data().topicId())
@@ -65,16 +70,28 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
     }
   }
 
+  private def release(response: AbstractResponse): Unit = response match {
+    case resource: RequestChannel.ResourceResponse => resource.release()
+    case _ =>
+  }
+
   def readData(request: RequestChannel.Request): CompletableFuture[Unit] = {
     val body = request.body[ReadGlobalSequenceDataRequest]
-    def send(response: AbstractResponse): Unit = {
-      if (response.errorCounts().containsKey(Errors.CLUSTER_AUTHORIZATION_FAILED)) helper.sendMaybeThrottle(request, response)
-      else helper.sendResponseExemptThrottle(request, response, None)
+    var lease: Option[org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources#Lease] = None
+    def send(original: ReadGlobalSequenceDataResponse): Unit = {
+      val response = new ReadGlobalSequenceDataResponse(original.data()) with RequestChannel.ResourceResponse {
+        override def release(): Unit = lease.foreach(_.finish(Errors.forCode(original.data().errorCode()).exception()))
+      }
+      try {
+        if (response.errorCounts().containsKey(Errors.CLUSTER_AUTHORIZATION_FAILED)) helper.sendMaybeThrottle(request, response)
+        else helper.sendResponseExemptThrottle(request, response, None)
+      } catch { case error: Exception => release(response); throw error }
     }
     try {
       auth.authorizeClusterOperation(request, CLUSTER_ACTION)
       val isolation = GlobalSequenceFetch.isolation(body.data().isolationLevel(), body.version())
       val batch = GlobalSequenceFetch.physical(body.data())
+      lease = Option(manager.reserveDataResponse(batch.partition())).flatten
       val deadline = time.nanoseconds() + body.data().timeoutMs().toLong * 1000000L
       manager.readLocal(batch, body.data().sourceLeaderEpoch(), deadline, isolation).handle[Unit] { (data, error) =>
         send(if (error == null) GlobalSequenceFetch.dataResponse(batch, data) else body.getErrorResponse(0, error))
