@@ -17,11 +17,11 @@
 
 # Global sequence consumer 구현 계획
 
-작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C03 구현 작업 기준.
+작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C04 구현 작업 기준.
 출발 API 커밋은 `672277695e`다.
 요구사항은 [examples/README.md](../../examples/README.md)의 `Global sequence consumer` 절이다.
 기존 broker 구현 1~18번 이후의 **별도 client 계획 C01~C07**이다.
-**C01~C03은 완료했고 C04~C07은 미구현이다.**
+**C01~C04는 완료했고 C05~C07은 미구현이다.**
 
 ## 1. 현재 구현과 목표
 
@@ -34,8 +34,9 @@
 - [GlobalSequenceConsumerRecords](../../clients/src/main/java/org/apache/kafka/clients/consumer/GlobalSequenceConsumerRecords.java):
   immutable record 목록과 `nextGlobalOffset`을 담는 page. C01에서 topic UUID, committed end, pending과 부분 오류를 보강했다.
 
-C01의 공개 계약 테스트와 `GlobalSequenceTopicIdMismatchException`을 추가했다.
-실제 구현 클래스, 전용 설정과 README에 기재된 `kafka.examples.GlobalSequenceConsumerExample`은 아직 없다. 기존 [GlobalSequenceReadDemo](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java)는
+C01의 공개 계약 테스트와 `GlobalSequenceTopicIdMismatchException`을 추가했고, C02~C04에서 전용 설정,
+transport, decoder와 `KafkaGlobalSequenceConsumer`의 기본 fetch 경로를 구현했다.
+README에 기재된 `kafka.examples.GlobalSequenceConsumerExample`은 아직 없다. 기존 [GlobalSequenceReadDemo](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java)는
 UUID를 직접 입력하는 raw protocol 예제다. Metadata 조회·일관된 호출 deadline·일반적인 retry/wakeup을
 갖춘 공개 consumer 구현으로 그대로 사용할 수는 없다.
 
@@ -52,8 +53,8 @@ try (GlobalSequenceConsumer<byte[], byte[]> consumer =
 }
 ```
 
-구현 클래스와 신규 설정 이름은 C02 이후 계획의 제안이다. C01의 page 접근자와 expected UUID
-overload는 아래 계약으로 구현했다. 기존 fetch signature와 record/page 생성자는 유지한다.
+구현 클래스와 신규 설정은 C02~C04에서 아래 계약으로 구현했다. C01의 page 접근자와 expected UUID
+overload도 구현했으며 기존 fetch signature와 record/page 생성자는 유지한다.
 새 broker API나 global consumer group 프로토콜은 만들지 않는다.
 
 ## 2. 먼저 확정할 client 계약
@@ -150,7 +151,7 @@ Deadline과 wakeup은 network poll뿐 아니라 batch/record decode 경계에서
 | C01 | 결과·identity·오류 계약 보강 | 기존 API | 공개 계약 확정 | 완료 |
 | C02 | 전용 설정과 metadata/network 기반 | C01 | 실제 broker 연결·UUID 조회 | 완료 |
 | C03 | wire page 검증과 record 역직렬화 | C01 | 순서·selected range·cursor 보존 | 완료 |
-| C04 | 공개 consumer의 한 페이지 fetch와 retry | C02, C03 | 기본 사용 가능 | 미구현 |
+| C04 | 공개 consumer의 한 페이지 fetch와 retry | C02, C03 | 기본 사용 가능 | 완료 |
 | C05 | wakeup·close·deadline·잔여 요청 수명 완성 | C04 | 인터페이스의 lifecycle 계약 완료 | 미구현 |
 | C06 | README의 consumer example와 사용 문서 | C05 | 명령으로 실행 가능 | 미구현 |
 | C07 | 실제 장애·transaction·보안 통합 검증 | C06 | consumer 1차 구현 완료 | 미구현 |
@@ -311,7 +312,9 @@ Gradle 8.14.1로 빌드했으며 신규 decoder가 Java 11 class version 55임�
 
 ### C04. 한 페이지 fetch와 bounded retry
 
-예정 커밋: `feat: implement stateless global sequence consumer fetch`
+상태: 완료 · 커밋: 본 커밋
+
+커밋 제목: `feat: implement stateless global sequence consumer fetch`
 
 - 공개 `KafkaGlobalSequenceConsumer<K,V>`를 구성하고 C02 transport와 C03 decoder를 연결한다.
   Properties/Map과 명시적 deserializer constructor를 제공한다.
@@ -329,6 +332,38 @@ Gradle 8.14.1로 빌드했으며 신규 decoder가 Java 11 class version 55임�
 
 검증: MockTime의 단일 deadline, 동일 UUID/범위 유지, broker 교체, 버전 불일치,
 성공 한 페이지만 반환, 빈 tip/pending/abort, partial error와 진전 없는 오류의 차이.
+
+구현 내용:
+
+- 공개 `KafkaGlobalSequenceConsumer`가 Properties/Map 설정과 설정 기반 또는 명시적으로 주입한
+  deserializer를 받아 C02 transport와 C03 decoder를 연결한다. 생성 중 실패한 자원과 정상 종료 시
+  transport, decoder buffer, deserializer의 소유권을 정리한다.
+- `GlobalSequenceFetcher`는 최초 metadata에서 UUID를 확정하고 재시도마다 같은 UUID를 기대값으로
+  다시 확인한다. 요청한 global 범위와 page 상한은 재시도 중 바꾸지 않는다.
+- Metadata, broker 선택, network poll, retry/backoff와 decode 경계가 호출자가 만든 하나의 Timer를
+  공유한다. Wire timeout은 남은 deadline과 30초 중 작은 값이며 재시도 때 감소한다.
+- Disconnect와 진전 없는 retriable broker 오류는 broker throttle과 설정 backoff 중 큰 값을 적용해
+  재시도한다. 정상/빈/pending page와 cursor가 전진한 partial error는 한 page로 즉시 반환하고,
+  진전 없는 영구 오류와 손상된 응답은 예외로 끝낸다.
+- READ_COMMITTED 요청 builder가 최소 v1을 요구하므로 v0 broker에서 격리 수준을 낮추지 않고
+  `UnsupportedVersionException`으로 종료한다. READ_UNCOMMITTED는 지원 wire 버전을 협상한다.
+- Public 입력은 I/O 전에 검증하며 zero timeout은 metadata 요청을 시작하지 않는다. 단일 스레드 guard,
+  wakeup/close 경합과 종료한 요청 정리는 C05에서 완성한다.
+
+완료 기준: Group/position 상태 없이 이름 또는 expected UUID와 명시 범위를 받아 실제 global fetch의
+한 wire page를 원래 deadline 안에서 반환할 수 있다.
+
+검증 결과: C04 fetcher 5개와 공개 consumer 4개, C01~C03/ConsumerRecords 회귀를 합친
+**총 65개가 통과했고 실패/skip은 0개**다. Checkstyle main/test, SpotBugs main과 Javadoc도 통과했다.
+Java 17에서 Gradle 8.14.1로 빌드했으며 두 신규 main class가 Java 11 class version 55임을 확인했다.
+
+```sh
+./gradlew :clients:test --tests 'org.apache.kafka.clients.consumer.*GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.internals.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.ConsumerRecordsTest' \
+  :clients:checkstyleMain :clients:checkstyleTest :clients:spotbugsMain :clients:javadoc \
+  -PmaxParallelForks=2 --max-workers=4 --continue --console=plain
+```
 
 ### C05. Wakeup·close와 호출 종료 정리
 
