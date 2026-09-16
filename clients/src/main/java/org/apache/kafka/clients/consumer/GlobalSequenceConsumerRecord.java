@@ -25,6 +25,13 @@ import java.util.Optional;
 /**
  * A deserialized record together with its logical global offset and original
  * physical location.
+ *
+ * <p>The global offset belongs to the data topic UUID of the enclosing
+ * {@link GlobalSequenceConsumerRecords} page. It is not a partition offset.
+ * Filtering aborted transactions can leave gaps in global offsets. The original
+ * physical location, timestamp and source leader epoch are preserved.</p>
+ *
+ * <p>Keys, values and headers are held by reference, as in {@link ConsumerRecord}.</p>
  */
 public final class GlobalSequenceConsumerRecord<K, V> {
     private final String topic;
@@ -76,10 +83,12 @@ public final class GlobalSequenceConsumerRecord<K, V> {
         return globalOffset;
     }
 
+    /** The original data partition, not the index partition. */
     public int physicalPartition() {
         return physicalPartition;
     }
 
+    /** The original offset within the physical data partition. */
     public long physicalOffset() {
         return physicalOffset;
     }
@@ -112,6 +121,7 @@ public final class GlobalSequenceConsumerRecord<K, V> {
         return headers;
     }
 
+    /** The original data batch's partition leader epoch, not the coordinator leader epoch. */
     public Optional<Integer> leaderEpoch() {
         return leaderEpoch;
     }
