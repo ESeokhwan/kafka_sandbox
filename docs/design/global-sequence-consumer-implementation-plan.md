@@ -17,11 +17,11 @@
 
 # Global sequence consumer 구현 계획
 
-작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C02 구현 작업 기준.
+작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C03 구현 작업 기준.
 출발 API 커밋은 `672277695e`다.
 요구사항은 [examples/README.md](../../examples/README.md)의 `Global sequence consumer` 절이다.
 기존 broker 구현 1~18번 이후의 **별도 client 계획 C01~C07**이다.
-**C01~C02는 완료했고 C03~C07은 미구현이다.**
+**C01~C03은 완료했고 C04~C07은 미구현이다.**
 
 ## 1. 현재 구현과 목표
 
@@ -149,7 +149,7 @@ Deadline과 wakeup은 network poll뿐 아니라 batch/record decode 경계에서
 |---|---|---|---|---|
 | C01 | 결과·identity·오류 계약 보강 | 기존 API | 공개 계약 확정 | 완료 |
 | C02 | 전용 설정과 metadata/network 기반 | C01 | 실제 broker 연결·UUID 조회 | 완료 |
-| C03 | wire page 검증과 record 역직렬화 | C01 | 순서·selected range·cursor 보존 | 미구현 |
+| C03 | wire page 검증과 record 역직렬화 | C01 | 순서·selected range·cursor 보존 | 완료 |
 | C04 | 공개 consumer의 한 페이지 fetch와 retry | C02, C03 | 기본 사용 가능 | 미구현 |
 | C05 | wakeup·close·deadline·잔여 요청 수명 완성 | C04 | 인터페이스의 lifecycle 계약 완료 | 미구현 |
 | C06 | README의 consumer example와 사용 문서 | C05 | 명령으로 실행 가능 | 미구현 |
@@ -256,7 +256,9 @@ Java 17에서 Gradle 8.14.1로 빌드했으며 세 신규 main class가 Java 11 
 
 ### C03. Page decoder와 deserializer
 
-예정 커밋: `feat: decode global sequence pages into consumer records`
+상태: 완료 · 커밋: 본 커밋
+
+커밋 제목: `feat: decode global sequence pages into consumer records`
 
 - 응답 UUID, 범위, cursor, batch 수·크기, physical base/last/count와 global mapping의 산술 overflow를 검사한다.
 - 응답 하나당 각 entry가 기대한 완전 배치인지, CRC·offset·count가 일치하는지 확인한다.
@@ -271,6 +273,41 @@ Java 17에서 Gradle 8.14.1로 빌드했으며 세 신규 main class가 Java 11 
 
 검증: 여러 파티션, 다중 record·압축 배치, 배치 중간 시작/종료, null/header/timestamp,
 잘못된 CRC·truncated batch·잘못된 mapping/cursor, deser 실패, pending/abort의 빈 페이지.
+
+구현 내용:
+
+- `GlobalSequencePageDecoder`가 요청 topic/UUID/range와 응답 snapshot, cursor, partial error를 먼저
+  대조한다. Snapshot 전 오류는 즉시 해당 broker 예외로 내고, 유효 prefix가 있는 오류는 page의
+  `error()`로 보존한다.
+- 각 mapping의 physical/global 산술 overflow, recordCount, selected intersection, committed end,
+  batch 순서와 응답 batch/byte 상한을 검사한다. `maxBytes`보다 큰 첫 완전 배치는 허용하지만
+  여러 batch가 soft limit를 넘는 응답은 거절한다.
+- 각 entry는 magic v2의 비-control `MemoryRecords` 한 batch여야 한다. Encoded size, CRC 설정,
+  physical base/last/count와 실제 record offset/count가 모두 일치해야 하며 truncated·다중 batch
+  payload는 손상된 응답으로 처리한다.
+- READ_UNCOMMITTED는 selected range와 cursor가 끊기지 않아야 한다. READ_COMMITTED는 aborted
+  transaction으로 생긴 gap과 record 없는 cursor 전진을 허용하며 pending 상태를 별도로 보존한다.
+- 선택 범위의 record만 headers-aware key/value deserializer에 전달한다. Null, timestamp/type,
+  serialized size, headers, physical 위치와 source leader epoch를 `GlobalSequenceConsumerRecord`에
+  보존한다. Deserialization 예외 메시지에는 topic UUID와 global/physical 위치를 함께 기록한다.
+- 압축 iterator는 try-with-resources로 닫고 재사용 decompression buffer supplier도 decoder close에서
+  해제한다. 주입된 boundary callback을 response, batch, record와 deserializer 사이에서 호출하여
+  C05의 deadline/wakeup 검사에 연결할 수 있게 했다.
+
+완료 기준: 한 wire response를 내부 position 변경 없이 완전히 검증하고, 성공한 경우에만 immutable
+global-order page로 반환할 수 있다.
+
+검증 결과: C03 decoder 9개와 C01~C02/ConsumerRecords 회귀를 합친 **총 56개가 통과했고
+실패/skip은 0개**다. Checkstyle main/test, SpotBugs main과 Javadoc도 통과했다. Java 17에서
+Gradle 8.14.1로 빌드했으며 신규 decoder가 Java 11 class version 55임을 확인했다.
+
+```sh
+./gradlew :clients:test --tests 'org.apache.kafka.clients.consumer.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.internals.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.ConsumerRecordsTest' \
+  :clients:checkstyleMain :clients:checkstyleTest :clients:spotbugsMain :clients:javadoc \
+  -PmaxParallelForks=2 --max-workers=4 --continue --console=plain
+```
 
 ### C04. 한 페이지 fetch와 bounded retry
 
