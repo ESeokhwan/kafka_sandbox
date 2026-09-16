@@ -24,7 +24,10 @@ import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.OffsetOutOfRangeException;
+import org.apache.kafka.common.errors.InterruptException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.message.FetchGlobalSequenceRequestData;
 import org.apache.kafka.common.message.FetchGlobalSequenceResponseData;
@@ -36,6 +39,7 @@ import org.apache.kafka.common.requests.FetchGlobalSequenceRequest;
 import org.apache.kafka.common.requests.FetchGlobalSequenceResponse;
 import org.apache.kafka.common.requests.RequestTestUtils;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
 
@@ -48,6 +52,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -66,6 +71,7 @@ class GlobalSequenceFetcherTest {
     private final ConsumerNetworkClient networkClient = new ConsumerNetworkClient(
         new LogContext(), mockClient, metadata, time, 10, 1000, Integer.MAX_VALUE);
     private final List<Optional<Uuid>> expectedIds = new ArrayList<>();
+    private final GlobalSequenceRequestScope requestScope = new GlobalSequenceRequestScope();
     private GlobalSequenceFetcher<byte[], byte[]> fetcher;
 
     @BeforeEach
@@ -173,13 +179,101 @@ class GlobalSequenceFetcherTest {
             () -> fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000)));
     }
 
+    @Test
+    void testTimeoutCancelsPendingRequestBeforeTheNextFetch() {
+        mockClient.advanceTimeDuringPoll(true);
+        try {
+            for (int attempt = 0; attempt < 3; attempt++) {
+                assertThrows(TimeoutException.class,
+                    () -> fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(50)));
+                assertEquals(0, networkClient.pendingRequestCount());
+                assertTrue(mockClient.requests().isEmpty());
+            }
+        } finally {
+            mockClient.advanceTimeDuringPoll(false);
+        }
+
+        mockClient.prepareResponse(response(1, 1, Errors.NONE, entry(0, 0, bytes("next"))));
+        GlobalSequenceConsumerRecords<byte[], byte[]> page =
+            fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000));
+        assertArrayEquals(bytes("next"), page.records().get(0).value());
+    }
+
+    @Test
+    void testWakeupDuringPollDrainsTheCompletedRequestAndDoesNotAffectNextFetch() {
+        mockClient.prepareResponse(request -> {
+            networkClient.wakeup();
+            return true;
+        }, response(1, 1, Errors.NONE, entry(0, 0, bytes("discarded"))));
+
+        assertThrows(WakeupException.class,
+            () -> fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000)));
+        assertEquals(0, networkClient.pendingRequestCount());
+
+        mockClient.prepareResponse(response(1, 1, Errors.NONE, entry(0, 0, bytes("next"))));
+        GlobalSequenceConsumerRecords<byte[], byte[]> page =
+            fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000));
+        assertArrayEquals(bytes("next"), page.records().get(0).value());
+    }
+
+    @Test
+    void testWakeupRaisedByDeserializerStopsDecodeAtTheNextBoundary() {
+        fetcher.close();
+        Deserializer<byte[]> wakingDeserializer = (topic, data) -> {
+            networkClient.wakeup();
+            return data;
+        };
+        fetcher = new GlobalSequenceFetcher<>(networkClient, (topic, expected, timer) -> TOPIC_ID,
+            new ByteArrayDeserializer(), wakingDeserializer, true, IsolationLevel.READ_UNCOMMITTED,
+            5, 4096, 10, time, requestScope);
+        mockClient.prepareResponse(response(1, 1, Errors.NONE, entry(0, 0, bytes("discarded"))));
+
+        assertThrows(WakeupException.class,
+            () -> fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000)));
+        assertEquals(0, networkClient.pendingRequestCount());
+    }
+
+    @Test
+    void testInterruptRaisedByDeserializerStopsDecodeAtTheNextBoundary() {
+        fetcher.close();
+        Deserializer<byte[]> interruptingDeserializer = (topic, data) -> {
+            Thread.currentThread().interrupt();
+            return data;
+        };
+        fetcher = new GlobalSequenceFetcher<>(networkClient, (topic, expected, timer) -> TOPIC_ID,
+            new ByteArrayDeserializer(), interruptingDeserializer, true, IsolationLevel.READ_UNCOMMITTED,
+            5, 4096, 10, time, requestScope);
+        mockClient.prepareResponse(response(1, 1, Errors.NONE, entry(0, 0, bytes("discarded"))));
+
+        assertThrows(InterruptException.class,
+            () -> fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000)));
+        assertTrue(Thread.currentThread().isInterrupted());
+        Thread.interrupted();
+        assertEquals(0, networkClient.pendingRequestCount());
+    }
+
+    @Test
+    void testWakeupInterruptsRetryBackoff() {
+        AtomicBoolean wakeupSent = new AtomicBoolean();
+        time.addListener(() -> {
+            if (wakeupSent.compareAndSet(false, true))
+                networkClient.wakeup();
+        });
+        mockClient.prepareResponse(response(1, 0, Errors.NOT_COORDINATOR));
+
+        assertThrows(WakeupException.class,
+            () -> fetcher.fetch(TOPIC, Optional.empty(), 0, 1, time.timer(1000)));
+        assertTrue(wakeupSent.get());
+        assertEquals(0, networkClient.pendingRequestCount());
+    }
+
     private GlobalSequenceFetcher<byte[], byte[]> fetcher(
         IsolationLevel isolationLevel,
         GlobalSequenceFetcher.TopicIdResolver resolver
     ) {
         return new GlobalSequenceFetcher<>(networkClient, resolver,
             new ByteArrayDeserializer(), new ByteArrayDeserializer(), true, isolationLevel,
-            5, 4096, 10);
+            5, 4096, 10, time, requestScope);
     }
 
     private static FetchGlobalSequenceResponse response(

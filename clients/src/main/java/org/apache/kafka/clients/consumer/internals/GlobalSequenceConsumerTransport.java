@@ -56,19 +56,22 @@ public final class GlobalSequenceConsumerTransport implements AutoCloseable {
     private final ApiVersions apiVersions;
     private final ConsumerNetworkClient client;
     private final GlobalSequenceConsumerMetadata topicMetadata;
+    private final GlobalSequenceRequestScope requestScope;
 
     private GlobalSequenceConsumerTransport(
         Metadata metadata,
         Metrics metrics,
         ApiVersions apiVersions,
         ConsumerNetworkClient client,
-        GlobalSequenceConsumerMetadata topicMetadata
+        GlobalSequenceConsumerMetadata topicMetadata,
+        GlobalSequenceRequestScope requestScope
     ) {
         this.metadata = metadata;
         this.metrics = metrics;
         this.apiVersions = apiVersions;
         this.client = client;
         this.topicMetadata = topicMetadata;
+        this.requestScope = requestScope;
     }
 
     public static GlobalSequenceConsumerTransport create(GlobalSequenceConsumerConfig config, Time time) {
@@ -114,11 +117,15 @@ public final class GlobalSequenceConsumerTransport implements AutoCloseable {
                 config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG),
                 config.getInt(CommonClientConfigs.REQUEST_TIMEOUT_MS_CONFIG),
                 Integer.MAX_VALUE);
+            GlobalSequenceRequestScope requestScope = new GlobalSequenceRequestScope();
             GlobalSequenceConsumerMetadata topicMetadata = new GlobalSequenceConsumerMetadata(
                 consumerClient,
                 updater::setNodes,
-                config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG));
-            return new GlobalSequenceConsumerTransport(metadata, metrics, apiVersions, consumerClient, topicMetadata);
+                config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG),
+                time,
+                requestScope);
+            return new GlobalSequenceConsumerTransport(metadata, metrics, apiVersions, consumerClient,
+                topicMetadata, requestScope);
         } catch (Throwable failure) {
             Utils.closeQuietly(consumerClient, "global sequence consumer network client");
             Utils.closeQuietly(metadata, "global sequence consumer metadata");
@@ -156,6 +163,10 @@ public final class GlobalSequenceConsumerTransport implements AutoCloseable {
 
     public Metrics metrics() {
         return metrics;
+    }
+
+    public GlobalSequenceRequestScope requestScope() {
+        return requestScope;
     }
 
     @Override

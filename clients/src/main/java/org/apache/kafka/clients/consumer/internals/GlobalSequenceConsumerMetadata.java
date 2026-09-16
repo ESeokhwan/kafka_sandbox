@@ -29,6 +29,7 @@ import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 
 import java.util.ArrayList;
@@ -44,17 +45,31 @@ public final class GlobalSequenceConsumerMetadata {
     private final ConsumerNetworkClient client;
     private final Consumer<List<Node>> nodeUpdater;
     private final long retryBackoffMs;
+    private final Time time;
+    private final GlobalSequenceRequestScope requestScope;
 
     public GlobalSequenceConsumerMetadata(
         ConsumerNetworkClient client,
         Consumer<List<Node>> nodeUpdater,
         long retryBackoffMs
     ) {
+        this(client, nodeUpdater, retryBackoffMs, Time.SYSTEM, new GlobalSequenceRequestScope());
+    }
+
+    GlobalSequenceConsumerMetadata(
+        ConsumerNetworkClient client,
+        Consumer<List<Node>> nodeUpdater,
+        long retryBackoffMs,
+        Time time,
+        GlobalSequenceRequestScope requestScope
+    ) {
         this.client = Objects.requireNonNull(client, "client");
         this.nodeUpdater = Objects.requireNonNull(nodeUpdater, "nodeUpdater");
         if (retryBackoffMs < 0)
             throw new IllegalArgumentException("retryBackoffMs must be nonnegative");
         this.retryBackoffMs = retryBackoffMs;
+        this.time = Objects.requireNonNull(time, "time");
+        this.requestScope = Objects.requireNonNull(requestScope, "requestScope");
     }
 
     /**
@@ -64,18 +79,27 @@ public final class GlobalSequenceConsumerMetadata {
      */
     public Uuid resolveTopicId(String topic, Optional<Uuid> expectedTopicId, Timer timer) {
         validateRequest(topic, expectedTopicId, timer);
-        while (timer.notExpired()) {
-            Optional<MetadataResponse> response = request(topic, timer);
-            if (response.isEmpty())
-                continue;
-            Uuid actual = topicId(topic, response.get(), timer);
-            if (actual == null)
-                continue;
-            if (expectedTopicId.isPresent() && !expectedTopicId.get().equals(actual))
-                throw new GlobalSequenceTopicIdMismatchException(topic, expectedTopicId.get(), actual);
-            return actual;
+        try {
+            while (timer.notExpired()) {
+                Optional<MetadataResponse> response = request(topic, timer);
+                if (response.isEmpty())
+                    continue;
+                Uuid actual = topicId(topic, response.get(), timer);
+                if (actual == null)
+                    continue;
+                if (expectedTopicId.isPresent() && !expectedTopicId.get().equals(actual))
+                    throw new GlobalSequenceTopicIdMismatchException(topic, expectedTopicId.get(), actual);
+                return actual;
+            }
+            throw new TimeoutException("Timeout expired while resolving global sequence topic " + topic);
+        } catch (Throwable failure) {
+            try {
+                requestScope.abort(client);
+            } catch (Throwable cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            throw failure;
         }
-        throw new TimeoutException("Timeout expired while resolving global sequence topic " + topic);
     }
 
     private static void validateRequest(String topic, Optional<Uuid> expectedTopicId, Timer timer) {
@@ -96,10 +120,16 @@ public final class GlobalSequenceConsumerMetadata {
             client.poll(timer);
             return Optional.empty();
         }
+        requestScope.requestStarted(node);
         RequestFuture<ClientResponse> future = client.send(node,
             new MetadataRequest.Builder(List.of(topic), false));
-        if (!client.poll(future, timer))
-            return Optional.empty();
+        try {
+            if (!client.poll(future, timer))
+                return Optional.empty();
+        } finally {
+            if (future.isDone())
+                requestScope.requestCompleted(node);
+        }
         if (future.failed()) {
             if (!future.isRetriable())
                 throw future.exception();
@@ -147,6 +177,18 @@ public final class GlobalSequenceConsumerMetadata {
     }
 
     private void backoff(Timer timer) {
-        timer.sleep(Math.min(retryBackoffMs, timer.remainingMs()));
+        long delayMs = Math.min(retryBackoffMs, timer.remainingMs());
+        Timer delayTimer = time.timer(delayMs);
+        while (delayTimer.notExpired() && timer.notExpired()) {
+            long beforePollMs = delayTimer.currentTimeMs();
+            client.poll(delayTimer, () -> true);
+            delayTimer.update();
+            timer.update();
+            if (delayTimer.currentTimeMs() == beforePollMs && delayTimer.notExpired()) {
+                time.sleep(Math.min(1, Math.min(delayTimer.remainingMs(), timer.remainingMs())));
+                delayTimer.update();
+                timer.update();
+            }
+        }
     }
 }

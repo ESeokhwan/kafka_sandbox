@@ -23,12 +23,14 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.CorruptRecordException;
+import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.message.FetchGlobalSequenceRequestData;
 import org.apache.kafka.common.requests.FetchGlobalSequenceRequest;
 import org.apache.kafka.common.requests.FetchGlobalSequenceResponse;
 import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 
 import java.util.Objects;
@@ -49,6 +51,8 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
     private final int maxBatches;
     private final int maxBytes;
     private final long retryBackoffMs;
+    private final Time time;
+    private final GlobalSequenceRequestScope requestScope;
     private final GlobalSequencePageDecoder<K, V> decoder;
     private Timer activeTimer;
 
@@ -63,6 +67,23 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
         int maxBytes,
         long retryBackoffMs
     ) {
+        this(client, topicIdResolver, keyDeserializer, valueDeserializer, checkCrcs, isolationLevel,
+            maxBatches, maxBytes, retryBackoffMs, Time.SYSTEM, new GlobalSequenceRequestScope());
+    }
+
+    public GlobalSequenceFetcher(
+        ConsumerNetworkClient client,
+        TopicIdResolver topicIdResolver,
+        Deserializer<K> keyDeserializer,
+        Deserializer<V> valueDeserializer,
+        boolean checkCrcs,
+        IsolationLevel isolationLevel,
+        int maxBatches,
+        int maxBytes,
+        long retryBackoffMs,
+        Time time,
+        GlobalSequenceRequestScope requestScope
+    ) {
         this.client = Objects.requireNonNull(client, "client");
         this.topicIdResolver = Objects.requireNonNull(topicIdResolver, "topicIdResolver");
         this.isolationLevel = Objects.requireNonNull(isolationLevel, "isolationLevel");
@@ -71,8 +92,10 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
         this.maxBatches = maxBatches;
         this.maxBytes = maxBytes;
         this.retryBackoffMs = retryBackoffMs;
+        this.time = Objects.requireNonNull(time, "time");
+        this.requestScope = Objects.requireNonNull(requestScope, "requestScope");
         this.decoder = new GlobalSequencePageDecoder<>(keyDeserializer, valueDeserializer, checkCrcs,
-            isolationLevel, maxBatches, maxBytes, this::checkDecodeDeadline);
+            isolationLevel, maxBatches, maxBytes, this::checkDecodeBoundary);
     }
 
     public GlobalSequenceConsumerRecords<K, V> fetch(
@@ -85,11 +108,14 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
         Objects.requireNonNull(timer, "timer");
         if (!timer.notExpired())
             throw timeout(topic);
+        requestScope.ensureIdle();
         activeTimer = timer;
         try {
+            checkOperationBoundary(topic, timer);
             Uuid topicId = topicIdResolver.resolve(topic, expectedTopicId, timer);
             boolean refreshIdentity = false;
             while (timer.notExpired()) {
+                checkOperationBoundary(topic, timer);
                 if (refreshIdentity)
                     topicIdResolver.resolve(topic, Optional.of(topicId), timer);
                 FetchAttempt<K, V> attempt = send(topic, topicId, globalStartOffset,
@@ -100,6 +126,9 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
                 backoff(timer, attempt.throttleTimeMs);
             }
             throw timeout(topic);
+        } catch (Throwable failure) {
+            abortActiveRequest(failure);
+            throw failure;
         } finally {
             activeTimer = null;
         }
@@ -125,9 +154,15 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
             .setMaxBytes(maxBytes)
             .setTimeoutMs(wireTimeoutMs(timer))
             .setIsolationLevel(isolationLevel.id());
+        requestScope.requestStarted(node);
         RequestFuture<ClientResponse> future = client.send(node, new FetchGlobalSequenceRequest.Builder(data));
-        if (!client.poll(future, timer))
-            throw timeout(topic);
+        try {
+            if (!client.poll(future, timer))
+                throw timeout(topic);
+        } finally {
+            if (future.isDone())
+                requestScope.requestCompleted(node);
+        }
         if (future.failed()) {
             RuntimeException failure = future.exception();
             if (retryable(failure))
@@ -173,16 +208,49 @@ public final class GlobalSequenceFetcher<K, V> implements AutoCloseable {
 
     private void backoff(Timer timer, int throttleTimeMs) {
         long delayMs = Math.max(retryBackoffMs, Math.max(0, throttleTimeMs));
-        timer.sleep(Math.min(delayMs, timer.remainingMs()));
+        Timer delayTimer = time.timer(Math.min(delayMs, timer.remainingMs()));
+        while (delayTimer.notExpired() && timer.notExpired()) {
+            long beforePollMs = delayTimer.currentTimeMs();
+            client.poll(delayTimer, () -> true);
+            delayTimer.update();
+            timer.update();
+            if (delayTimer.currentTimeMs() == beforePollMs && delayTimer.notExpired()) {
+                time.sleep(Math.min(1, Math.min(delayTimer.remainingMs(), timer.remainingMs())));
+                delayTimer.update();
+                timer.update();
+            }
+        }
     }
 
-    private void checkDecodeDeadline() {
+    private void checkDecodeBoundary() {
         Timer timer = activeTimer;
         if (timer == null)
             throw new IllegalStateException("No active global fetch timer");
+        checkSignals();
         timer.update();
         if (!timer.notExpired())
             throw new TimeoutException("Global sequence fetch deadline expired while decoding a page");
+    }
+
+    private void checkOperationBoundary(String topic, Timer timer) {
+        checkSignals();
+        timer.update();
+        if (!timer.notExpired())
+            throw timeout(topic);
+    }
+
+    private void checkSignals() {
+        client.maybeTriggerWakeup();
+        if (Thread.interrupted())
+            throw new InterruptException(new InterruptedException());
+    }
+
+    private void abortActiveRequest(Throwable failure) {
+        try {
+            requestScope.abort(client);
+        } catch (Throwable cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
     }
 
     private static TimeoutException timeout(String topic) {

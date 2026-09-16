@@ -27,12 +27,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ConcurrentModificationException;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class KafkaGlobalSequenceConsumerTest {
     @BeforeEach
@@ -63,9 +72,11 @@ class KafkaGlobalSequenceConsumerTest {
         KafkaGlobalSequenceConsumer<byte[], byte[]> consumer = new KafkaGlobalSequenceConsumer<>(
             Map.of(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092"), key, value);
         assertEquals(0, TrackingDeserializer.CONFIGURES.get());
-        consumer.close();
+        consumer.close(Duration.ZERO);
         consumer.close();
         assertEquals(2, TrackingDeserializer.CLOSES.get());
+        assertThrows(IllegalStateException.class,
+            () -> consumer.fetch("events", 0, 1, Duration.ofSeconds(1)));
     }
 
     @Test
@@ -95,6 +106,42 @@ class KafkaGlobalSequenceConsumerTest {
         }
     }
 
+    @Test
+    void testConcurrentFetchAndCloseAreRejectedWhileWakeupRemainsThreadSafe()
+        throws Exception {
+        BlockingDeserializer key = new BlockingDeserializer();
+        TrackingDeserializer value = new TrackingDeserializer();
+        KafkaGlobalSequenceConsumer<byte[], byte[]> consumer = new KafkaGlobalSequenceConsumer<>(
+            Map.of(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092"), key, value);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<?> closeFuture = executor.submit(() -> consumer.close(Duration.ZERO));
+        try {
+            assertTrue(key.closeEntered.await(10, TimeUnit.SECONDS));
+            assertThrows(ConcurrentModificationException.class,
+                () -> consumer.fetch("events", 0, 1, Duration.ZERO));
+            assertThrows(ConcurrentModificationException.class,
+                () -> consumer.close(Duration.ZERO));
+            assertDoesNotThrow(consumer::wakeup);
+        } finally {
+            key.allowClose.countDown();
+            await(closeFuture);
+            executor.shutdownNow();
+        }
+        consumer.close();
+        assertEquals(1, key.closes.get());
+        assertEquals(1, TrackingDeserializer.CLOSES.get());
+    }
+
+    private static void await(Future<?> future) throws Exception {
+        try {
+            future.get(10, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof Exception)
+                throw (Exception) e.getCause();
+            throw e;
+        }
+    }
+
     public static final class TrackingDeserializer implements Deserializer<byte[]> {
         static final AtomicInteger CONFIGURES = new AtomicInteger();
         static final AtomicInteger KEY_CONFIGURES = new AtomicInteger();
@@ -115,6 +162,29 @@ class KafkaGlobalSequenceConsumerTest {
         @Override
         public void close() {
             CLOSES.incrementAndGet();
+        }
+    }
+
+    private static final class BlockingDeserializer implements Deserializer<byte[]> {
+        private final CountDownLatch closeEntered = new CountDownLatch(1);
+        private final CountDownLatch allowClose = new CountDownLatch(1);
+        private final AtomicInteger closes = new AtomicInteger();
+
+        @Override
+        public byte[] deserialize(String topic, byte[] data) {
+            return data;
+        }
+
+        @Override
+        public void close() {
+            closes.incrementAndGet();
+            closeEntered.countDown();
+            try {
+                allowClose.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
         }
     }
 }

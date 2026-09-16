@@ -27,10 +27,13 @@ import org.apache.kafka.common.utils.Time;
 
 import java.time.Duration;
 import java.util.Collections;
+import java.util.ConcurrentModificationException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The standard stateless {@link GlobalSequenceConsumer} implementation.
@@ -41,12 +44,15 @@ import java.util.Properties;
  */
 public class KafkaGlobalSequenceConsumer<K, V> implements GlobalSequenceConsumer<K, V> {
     private static final Duration DEFAULT_CLOSE_TIMEOUT = Duration.ofSeconds(30);
+    private static final long NO_CURRENT_THREAD = -1L;
 
     private final Time time;
     private final GlobalSequenceConsumerTransport transport;
     private final GlobalSequenceFetcher<K, V> fetcher;
     private final Deserializer<K> keyDeserializer;
     private final Deserializer<V> valueDeserializer;
+    private final AtomicLong currentThread = new AtomicLong(NO_CURRENT_THREAD);
+    private final AtomicInteger refcount = new AtomicInteger(0);
     private volatile boolean closed;
 
     /** Create a consumer using deserializer classes from the supplied properties. */
@@ -98,7 +104,7 @@ public class KafkaGlobalSequenceConsumer<K, V> implements GlobalSequenceConsumer
                 key, value, config.getBoolean(GlobalSequenceConsumerConfig.CHECK_CRCS_CONFIG),
                 config.isolationLevel(), config.getInt(GlobalSequenceConsumerConfig.FETCH_MAX_BATCHES_CONFIG),
                 config.getInt(GlobalSequenceConsumerConfig.FETCH_MAX_BYTES_CONFIG),
-                config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG));
+                config.getLong(CommonClientConfigs.RETRY_BACKOFF_MS_CONFIG), time, createdTransport.requestScope());
         } catch (Throwable failure) {
             closeAfterConstructionFailure(createdFetcher, createdTransport, key, value, failure);
             throw failure;
@@ -186,11 +192,14 @@ public class KafkaGlobalSequenceConsumer<K, V> implements GlobalSequenceConsumer
         long globalEndOffsetExclusive,
         Duration timeout
     ) {
-        validateFetch(topic, globalStartOffset, globalEndOffsetExclusive, timeout);
-        if (closed)
-            throw new IllegalStateException("This global sequence consumer is closed");
-        return fetcher.fetch(topic, expectedTopicId, globalStartOffset, globalEndOffsetExclusive,
-            time.timer(timeout.toMillis()));
+        acquireAndEnsureOpen();
+        try {
+            validateFetch(topic, globalStartOffset, globalEndOffsetExclusive, timeout);
+            return fetcher.fetch(topic, expectedTopicId, globalStartOffset, globalEndOffsetExclusive,
+                time.timer(timeout.toMillis()));
+        } finally {
+            release();
+        }
     }
 
     private static void validateFetch(
@@ -224,16 +233,22 @@ public class KafkaGlobalSequenceConsumer<K, V> implements GlobalSequenceConsumer
         Objects.requireNonNull(timeout, "timeout");
         if (timeout.isNegative())
             throw new IllegalArgumentException("timeout must not be negative");
-        if (closed)
-            return;
-        closed = true;
-        Throwable failure = null;
-        failure = close(fetcher, failure);
-        failure = close(keyDeserializer, failure);
-        failure = close(valueDeserializer, failure);
-        failure = close(transport, failure);
-        if (failure != null)
-            throw new KafkaException("Failed to close global sequence consumer", failure);
+        acquire();
+        try {
+            if (closed)
+                return;
+            closed = true;
+            transport.client().disableWakeups();
+            Throwable failure = null;
+            failure = close(fetcher, failure);
+            failure = close(keyDeserializer, failure);
+            failure = close(valueDeserializer, failure);
+            failure = close(transport, failure);
+            if (failure != null)
+                throw new KafkaException("Failed to close global sequence consumer", failure);
+        } finally {
+            release();
+        }
     }
 
     private static Throwable close(AutoCloseable resource, Throwable firstFailure) {
@@ -245,5 +260,29 @@ public class KafkaGlobalSequenceConsumer<K, V> implements GlobalSequenceConsumer
             firstFailure.addSuppressed(failure);
         }
         return firstFailure;
+    }
+
+    private void acquireAndEnsureOpen() {
+        acquire();
+        if (closed) {
+            release();
+            throw new IllegalStateException("This global sequence consumer is closed");
+        }
+    }
+
+    private void acquire() {
+        Thread thread = Thread.currentThread();
+        long threadId = thread.getId();
+        if (threadId != currentThread.get() && !currentThread.compareAndSet(NO_CURRENT_THREAD, threadId)) {
+            throw new ConcurrentModificationException(
+                "KafkaGlobalSequenceConsumer is not safe for multi-threaded access. currentThread(name: " +
+                    thread.getName() + ", id: " + threadId + ") otherThread(id: " + currentThread.get() + ")");
+        }
+        refcount.incrementAndGet();
+    }
+
+    private void release() {
+        if (refcount.decrementAndGet() == 0)
+            currentThread.set(NO_CURRENT_THREAD);
     }
 }

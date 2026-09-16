@@ -25,6 +25,7 @@ import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.MetadataRequest;
@@ -58,13 +59,14 @@ class GlobalSequenceConsumerMetadataTest {
     private final ConsumerNetworkClient networkClient = new ConsumerNetworkClient(
         new LogContext(), mockClient, metadata, time, 10, 1000, Integer.MAX_VALUE);
     private final List<List<Node>> nodeUpdates = new ArrayList<>();
+    private final GlobalSequenceRequestScope requestScope = new GlobalSequenceRequestScope();
     private GlobalSequenceConsumerMetadata resolver;
 
     @BeforeEach
     void setUp() {
         MetadataResponse initial = response(Errors.NONE, TOPIC_ID, 2);
         mockClient.updateMetadata(initial);
-        resolver = new GlobalSequenceConsumerMetadata(networkClient, nodeUpdates::add, 10);
+        resolver = new GlobalSequenceConsumerMetadata(networkClient, nodeUpdates::add, 10, time, requestScope);
     }
 
     @Test
@@ -139,6 +141,21 @@ class GlobalSequenceConsumerMetadataTest {
             () -> resolver.resolveTopicId(TOPIC, Optional.of(Uuid.ZERO_UUID), time.timer(1000)));
         assertFalse(mockClient.hasInFlightRequests());
         assertEquals(0, mockClient.numAwaitingResponses());
+    }
+
+    @Test
+    void testWakeupCancelsPendingMetadataRequestBeforeTheNextResolve() {
+        mockClient.prepareResponse(request -> {
+            networkClient.wakeup();
+            return true;
+        }, response(Errors.NONE, TOPIC_ID, 2));
+        assertThrows(WakeupException.class,
+            () -> resolver.resolveTopicId(TOPIC, Optional.empty(), time.timer(1000)));
+        assertEquals(0, networkClient.pendingRequestCount());
+
+        mockClient.prepareResponse(response(Errors.NONE, TOPIC_ID, 2));
+        assertEquals(TOPIC_ID,
+            resolver.resolveTopicId(TOPIC, Optional.empty(), time.timer(1000)));
     }
 
     private static MetadataResponse response(Errors error, Uuid id, int nodes) {
