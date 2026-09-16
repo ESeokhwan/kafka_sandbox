@@ -21,7 +21,7 @@
 출발 API 커밋은 `672277695e`다.
 요구사항은 [examples/README.md](../../examples/README.md)의 `Global sequence consumer` 절이다.
 기존 broker 구현 1~18번 이후의 **별도 client 계획 C01~C07**이다.
-**C01~C06은 완료했고 C07은 미구현이다.**
+**C01~C07을 완료했다.**
 
 ## 1. 현재 구현과 목표
 
@@ -154,7 +154,7 @@ Deadline과 wakeup은 network poll뿐 아니라 batch/record decode 경계에서
 | C04 | 공개 consumer의 한 페이지 fetch와 retry | C02, C03 | 기본 사용 가능 | 완료 |
 | C05 | wakeup·close·deadline·잔여 요청 수명 완성 | C04 | 인터페이스의 lifecycle 계약 완료 | 완료 |
 | C06 | README의 consumer example와 사용 문서 | C05 | 명령으로 실행 가능 | 완료 |
-| C07 | 실제 장애·transaction·보안 통합 검증 | C06 | consumer 1차 구현 완료 | 미구현 |
+| C07 | 실제 장애·transaction·보안 통합 검증 | C06 | consumer 1차 구현 완료 | 완료 |
 
 각 단계는 필요한 테스트와 Javadoc을 함께 추가하여 하나의 커밋으로 저장한다.
 완료 시 해당 단계의 상태·검증 결과와 커밋을 이 문서에 기록한다.
@@ -464,7 +464,9 @@ ConsumerRecords 회귀 **총 72개**와 clients Checkstyle main/test, SpotBugs m
 
 ### C07. 실제 broker 통합 검증과 완료 기록
 
-예정 커밋: `test: verify global sequence consumer recovery and pagination`
+상태: 완료 · 커밋: 본 커밋
+
+커밋 제목: `test: verify global sequence consumer recovery and pagination`
 
 - 기존 core KafkaClusterTestKit fixture를 활용해 실제 Produce→index commit→consumer fetch를 연결한다.
 - 독립적으로 수집한 physical/index 로그의 매핑과 consumer 결과를 비교한다.
@@ -481,6 +483,44 @@ ConsumerRecords 회귀 **총 72개**와 clients Checkstyle main/test, SpotBugs m
 - ConsumerExample을 실행해 출력/cursor와 종료 조건을 비교하고, 마지막으로 관련 회귀를 수행한다.
 
 완료 기준: 기존 1~18번 계약을 유지하면서 README의 한 페이지 consumer 요구를 실제 client API로 충족한다.
+
+구현 내용:
+
+- `GlobalSequenceConsumerIntegrationTest`를 추가해 3 broker, RF=3/minISR=2의 실제 cluster에서 public
+  consumer를 실행한다. Gzip physical batch의 null key/value, header, timestamp, source leader epoch와
+  physical 위치를 실제 index log를 별도 KafkaConsumer로 읽어 만든 global oracle과 비교한다.
+- `global.sequence.fetch.max.batches=1`로 배치 중간 범위와 두 page cursor를 확인한다. 첫 page 뒤 source와
+  index leader를 옮기고 expected UUID로 이어 읽는다. 다른 broker를 bootstrap 목록에 남긴 채 한 broker를
+  중단한 새 consumer도 전체 범위를 읽는다.
+- Public fetch 전후 broker request metric에서 JoinGroup, Heartbeat, OffsetCommit이 증가하지 않고
+  FetchGlobalSequence가 증가하는지 확인한다. 같은 fixture에서 실제 ConsumerExample을 실행해 Base64
+  record 수, page 수, UUID, cursor, pending/error 출력을 검사한다.
+- 열린 transaction 앞에서 READ_COMMITTED가 빈 pending page와 같은 cursor를 반환하는지 확인한다.
+  Commit은 record를 반환하고 abort는 빈 page로 global hole을 한 칸 전진하며, 다음 committed batch는
+  두 경우 모두 같은 expected UUID와 cursor로 이어진다. READ_UNCOMMITTED는 열린 두 batch를 모두 본다.
+- 두 번째 global mapping의 source를 DeleteRecords로 제거하여 첫 record와 다음 cursor를 포함한
+  `OffsetOutOfRangeException` partial page를 확인한다. 이어 토픽을 삭제·같은 이름으로 재생성하고 옛
+  `(UUID, cursor)`가 `GlobalSequenceTopicIdMismatchException`으로 거절되는지 검사한다.
+- 기존 fault/transaction/retention broker 테스트를 함께 실행하여 index HW timeout, source/index leader
+  재시작과 미커밋 tail 복구를 회귀 검증한다. Lookup/Fetch API 테스트의 READ/CLUSTER_ACTION 권한 검사와
+  client MockClient의 v1 negotiation·no-downgrade·timeout 정리도 같은 C07 검증 묶음에 포함한다.
+
+검증 결과: 새 public consumer 실제 broker 시나리오 4개를 포함한 core 선별 회귀 31개와 C01~C06
+client 회귀 72개, **총 103개가 통과했고 실패/skip은 0개**다. Clients/examples/core Checkstyle,
+Clients/examples/core SpotBugs와 clients Javadoc도 통과했다. SASL/SSL 설정이 transport에 전달되는 경로는
+client 단위 테스트에서 확인했으며, 별도의 보안 listener cluster는 이번 C07 fixture에서 실행하지 않았다.
+
+```sh
+./gradlew :clients:test --tests 'org.apache.kafka.clients.consumer.*GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.internals.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.ConsumerRecordsTest' \
+  :clients:checkstyleMain :clients:checkstyleTest :clients:spotbugsMain :clients:javadoc \
+  :examples:jar :examples:checkstyleMain :examples:spotbugsMain \
+  :core:test --tests 'kafka.server.GlobalSequence*IntegrationTest' \
+  --tests 'kafka.server.GlobalSequenceFetchApisTest' \
+  --tests 'kafka.server.GlobalSequenceLookupApisTest' \
+  -PmaxParallelForks=1 --max-workers=4 --continue --console=plain
+```
 
 ## 4. 검증 명령과 범위
 
