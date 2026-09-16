@@ -17,11 +17,11 @@
 
 # Global sequence consumer 구현 계획
 
-작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C05 구현 작업 기준.
+작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C06 구현 작업 기준.
 출발 API 커밋은 `672277695e`다.
 요구사항은 [examples/README.md](../../examples/README.md)의 `Global sequence consumer` 절이다.
 기존 broker 구현 1~18번 이후의 **별도 client 계획 C01~C07**이다.
-**C01~C05는 완료했고 C06~C07은 미구현이다.**
+**C01~C06은 완료했고 C07은 미구현이다.**
 
 ## 1. 현재 구현과 목표
 
@@ -35,10 +35,10 @@
   immutable record 목록과 `nextGlobalOffset`을 담는 page. C01에서 topic UUID, committed end, pending과 부분 오류를 보강했다.
 
 C01의 공개 계약 테스트와 `GlobalSequenceTopicIdMismatchException`을 추가했고, C02~C05에서 전용 설정,
-transport, decoder, `KafkaGlobalSequenceConsumer`의 fetch와 lifecycle 경로를 구현했다.
-README에 기재된 `kafka.examples.GlobalSequenceConsumerExample`은 아직 없다. 기존 [GlobalSequenceReadDemo](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java)는
-UUID를 직접 입력하는 raw protocol 예제다. Metadata 조회·일관된 호출 deadline·일반적인 retry/wakeup을
-갖춘 공개 consumer 구현으로 그대로 사용할 수는 없다.
+transport, decoder, `KafkaGlobalSequenceConsumer`의 fetch와 lifecycle 경로를 구현했다. C06에서
+[GlobalSequenceConsumerExample](../../examples/src/main/java/kafka/examples/GlobalSequenceConsumerExample.java)과
+사용 문서를 추가했다. 기존 [GlobalSequenceReadDemo](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java)는
+UUID와 wire mapping을 직접 다루는 raw protocol 진단 예제로 유지한다.
 
 목표는 **그룹·읽기 position·offset commit을 관리하지 않는 동기식 한 페이지 client**다.
 호출자가 매번 topic과 `[start, endExclusive)`를 지정하고, 다음 호출의 시작 offset도 직접 결정한다.
@@ -153,7 +153,7 @@ Deadline과 wakeup은 network poll뿐 아니라 batch/record decode 경계에서
 | C03 | wire page 검증과 record 역직렬화 | C01 | 순서·selected range·cursor 보존 | 완료 |
 | C04 | 공개 consumer의 한 페이지 fetch와 retry | C02, C03 | 기본 사용 가능 | 완료 |
 | C05 | wakeup·close·deadline·잔여 요청 수명 완성 | C04 | 인터페이스의 lifecycle 계약 완료 | 완료 |
-| C06 | README의 consumer example와 사용 문서 | C05 | 명령으로 실행 가능 | 미구현 |
+| C06 | README의 consumer example와 사용 문서 | C05 | 명령으로 실행 가능 | 완료 |
 | C07 | 실제 장애·transaction·보안 통합 검증 | C06 | consumer 1차 구현 완료 | 미구현 |
 
 각 단계는 필요한 테스트와 Javadoc을 함께 추가하여 하나의 커밋으로 저장한다.
@@ -415,7 +415,9 @@ close 경합과 정확히 한 번 자원 해제를 확인했다. Checkstyle main
 
 ### C06. Consumer example와 문서 연결
 
-예정 커밋: `feat: add global sequence consumer example`
+상태: 완료 · 커밋: 본 커밋
+
+커밋 제목: `feat: add global sequence consumer example`
 
 - README에 적힌 `examples/src/main/java/kafka/examples/GlobalSequenceConsumerExample.java`를 추가한다.
 - 기본 CLI를 그대로 지원한다: `<bootstrap> <topic-name> <start> <end-exclusive>`.
@@ -431,6 +433,34 @@ close 경합과 정확히 한 번 자원 해제를 확인했다. Checkstyle main
   [운영 가이드](global-sequence-operations.md)에 public consumer 사용법과 오류 처리 예제를 추가한다.
 
 완료 기준: README에 적힌 명령이 이름 기반 consumer로 동작하며 앱이 위치를 직접 관리한다는 점이 드러난다.
+
+구현 내용:
+
+- CLI가 `<bootstrap> <topic-name> <start> <end-exclusive> [client.properties]`를 받고 properties의
+  SASL/SSL, isolation, page batch/byte 제한을 public consumer에 전달한다. Bootstrap 인자는 파일의
+  같은 설정보다 우선한다.
+- Key/value는 `ByteArrayDeserializer`로 고정하고 record의 global/physical 위치, timestamp/type,
+  source leader epoch와 Base64 key/value를 출력한다. Page마다 topic UUID, next cursor, committed end,
+  pending과 partial error를 함께 출력한다.
+- 첫 page의 UUID와 `min(requestedEnd, committedEnd)`를 실행 snapshot으로 고정한다. 이후 page는 expected
+  UUID overload를 사용하며, abort로 record가 없어도 cursor가 전진하면 계속한다.
+- End 도달과 pending에서는 정상 종료한다. Partial error는 처리 가능한 prefix와 cursor를 출력한 뒤
+  예외로 종료하며, 진전 없는 page는 무한 반복하지 않고 실패한다.
+- Examples README와 운영 가이드에서 public name-based consumer와 raw UUID/protocol 진단 도구를 구분하고,
+  `(topic UUID, next global offset)` 체크포인트와 stdout의 비원자성을 문서화했다.
+
+검증 결과: C06 예제 JAR 생성, Checkstyle main과 SpotBugs main이 통과했다. C01~C05 및
+ConsumerRecords 회귀 **총 72개**와 clients Checkstyle main/test, SpotBugs main, Javadoc도 통과 상태를
+재확인했다. 실제 broker에서 CLI 출력과 장애·transaction 동작을 확인하는 작업은 C07에 남아 있다.
+
+```sh
+./gradlew :clients:test --tests 'org.apache.kafka.clients.consumer.*GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.internals.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.ConsumerRecordsTest' \
+  :clients:checkstyleMain :clients:checkstyleTest :clients:spotbugsMain :clients:javadoc \
+  :examples:jar :examples:checkstyleMain :examples:spotbugsMain \
+  -PmaxParallelForks=2 --max-workers=4 --continue --console=plain
+```
 
 ### C07. 실제 broker 통합 검증과 완료 기록
 
