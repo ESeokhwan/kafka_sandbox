@@ -17,11 +17,11 @@
 
 # Global sequence consumer 구현 계획
 
-작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C01 구현 커밋 기준.
+작성 기준: 2026-09-16, `proj/globally_ordered_topic/develop_v4`, C02 구현 작업 기준.
 출발 API 커밋은 `672277695e`다.
 요구사항은 [examples/README.md](../../examples/README.md)의 `Global sequence consumer` 절이다.
 기존 broker 구현 1~18번 이후의 **별도 client 계획 C01~C07**이다.
-**C01은 완료했고 C02~C07은 미구현이다.**
+**C01~C02는 완료했고 C03~C07은 미구현이다.**
 
 ## 1. 현재 구현과 목표
 
@@ -148,7 +148,7 @@ Deadline과 wakeup은 network poll뿐 아니라 batch/record decode 경계에서
 | 단계 | 범위 | 의존 | 완료 시점 | 상태 |
 |---|---|---|---|---|
 | C01 | 결과·identity·오류 계약 보강 | 기존 API | 공개 계약 확정 | 완료 |
-| C02 | 전용 설정과 metadata/network 기반 | C01 | 실제 broker 연결·UUID 조회 | 미구현 |
+| C02 | 전용 설정과 metadata/network 기반 | C01 | 실제 broker 연결·UUID 조회 | 완료 |
 | C03 | wire page 검증과 record 역직렬화 | C01 | 순서·selected range·cursor 보존 | 미구현 |
 | C04 | 공개 consumer의 한 페이지 fetch와 retry | C02, C03 | 기본 사용 가능 | 미구현 |
 | C05 | wakeup·close·deadline·잔여 요청 수명 완성 | C04 | 인터페이스의 lifecycle 계약 완료 | 미구현 |
@@ -200,7 +200,9 @@ Checkstyle main/test, SpotBugs main과 Javadoc 생성도 통과했다. Java 17�
 
 ### C02. 설정·생성·Metadata 및 transport
 
-예정 커밋: `feat: add global sequence consumer configuration and transport`
+상태: 완료 · 커밋: 본 커밋
+
+커밋 제목: `feat: add global sequence consumer configuration and transport`
 
 - `GlobalSequenceConsumerConfig`를 추가한다. `ConsumerConfig`를 통째로 사용해 group/assignment 설정을
   초기화하지 않고 common networking/security/metrics 및 deserializer 설정을 재사용한다.
@@ -220,6 +222,37 @@ Checkstyle main/test, SpotBugs main과 Javadoc 생성도 통과했다. Java 17�
 
 검증: MockClient/MockTime 기반 bootstrap failover, metadata 갱신, UUID 확인, auth/config 오류,
 보안 channel 설정 전달, constructor 실패 정리. Clients 모듈의 Java 11 호환성을 유지한다.
+
+구현 내용:
+
+- `GlobalSequenceConsumerConfig`는 network, DNS, timeout/backoff, metrics, SSL/SASL과
+  optional deserializer class만 정의한다. ConsumerConfig를 상속하지 않으며 group, assignment,
+  auto commit, offset reset, ordinary fetch 설정을 전달하면 설정 이름을 포함한 ConfigException을 낸다.
+- Global fetch page는 기본 1 MiB/100 batches이고 각각 wire 상한 16,646,144 bytes와
+  1~1000 범위를 검사한다. isolation은 read_uncommitted가 기본이며 read_committed를 허용한다.
+- `GlobalSequenceConsumerTransport`는 `NetworkClient`, `ConsumerNetworkClient`, `ApiVersions`,
+  metrics와 bootstrap/갱신 broker 목록만 소유한다. Coordinator, SubscriptionState와 일반 Fetcher는
+  만들지 않으며 생성 중 주소 검증 등이 실패하면 이미 만든 metrics와 network 자원을 닫는다.
+- Metadata resolver는 요청마다 auto-create=false인 단일 topic MetadataRequest를 보낸다.
+  응답 broker 목록으로 다음 요청의 endpoint를 갱신하고 별도 topic cache를 쌓지 않는다.
+  disconnect와 retriable metadata 오류는 같은 Timer 안에서 재시도한다.
+- 응답 UUID가 없으면 구형 broker로 간주하고, expected UUID가 다르면 identity mismatch로 종료한다.
+  없는 topic, topic authorization, invalid/non-retriable 오류를 서로 다른 예외로 보존한다.
+
+완료 기준: group 상태 없이 실제 broker transport를 만들고, 하나의 호출 deadline 안에서 이름을
+현재 topic UUID로 확인하여 C04 fetch에 넘길 수 있다.
+
+검증 결과: C02 설정 12개, metadata 7개, transport 3개와 C01/ConsumerRecords 회귀를 합친
+**총 47개가 통과했고 실패/skip은 0개**다. Checkstyle main/test, SpotBugs main과 Javadoc도 통과했다.
+Java 17에서 Gradle 8.14.1로 빌드했으며 세 신규 main class가 Java 11 class version 55임을 확인했다.
+
+```sh
+./gradlew :clients:test --tests 'org.apache.kafka.clients.consumer.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.internals.GlobalSequenceConsumer*Test' \
+  --tests 'org.apache.kafka.clients.consumer.ConsumerRecordsTest' \
+  :clients:checkstyleMain :clients:checkstyleTest :clients:spotbugsMain :clients:javadoc \
+  -PmaxParallelForks=2 --max-workers=4 --continue --console=plain
+```
 
 ### C03. Page decoder와 deserializer
 
