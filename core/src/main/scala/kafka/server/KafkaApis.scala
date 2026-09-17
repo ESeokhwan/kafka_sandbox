@@ -70,14 +70,15 @@ import org.apache.kafka.server.share.{ErroneousAndValidPartitionData, ShareParti
 import org.apache.kafka.server.share.acknowledge.ShareAcknowledgementBatch
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams, FetchPartitionData}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
+import org.apache.kafka.server.util.Scheduler
 import org.apache.kafka.storage.internals.log.AppendOrigin
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.time.Duration
 import java.util
 import java.nio.ByteBuffer
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
-import java.util.concurrent.{CompletableFuture, ConcurrentHashMap}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ScheduledFuture}
 import java.util.stream.Collectors
 import java.util.{Collections, Optional}
 import scala.annotation.nowarn
@@ -112,7 +113,8 @@ class KafkaApis(val requestChannel: RequestChannel,
                 val apiVersionManager: ApiVersionManager,
                 val clientMetricsManager: ClientMetricsManager,
                 val groupConfigManager: GroupConfigManager,
-                brokerExtensionRegistry: BrokerExtensionRegistry = BrokerExtensionRegistry.empty
+                brokerExtensionRegistry: BrokerExtensionRegistry = BrokerExtensionRegistry.empty,
+                brokerExtensionScheduler: Scheduler = null
 ) extends ApiRequestHandler with Logging {
 
   type ProduceResponseStats = Map[TopicIdPartition, RecordValidationStats]
@@ -171,6 +173,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     val responseSent = new AtomicBoolean(false)
+    val timeoutTask = new AtomicReference[ScheduledFuture[_]]()
     def sendCompletion(result: BrokerExtensionResult): Unit = {
       requestHelper.sendResponseMaybeThrottle(request, throttleTimeMs => new BrokerExtensionResponse(
         new BrokerExtensionResponseData()
@@ -181,6 +184,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     def sendFailure(error: Throwable): Unit = sendError(error)
     def completeResponse(result: BrokerExtensionResult, error: Throwable): Unit = {
       if (responseSent.compareAndSet(false, true)) {
+        Option(timeoutTask.get()).foreach(_.cancel(false))
         if (error == null) {
           info(s"Broker extension request ${data.requestId} completed for target ${data.target}, operation ${data.operation}")
           sendCompletion(result)
@@ -199,8 +203,16 @@ class KafkaApis(val requestChannel: RequestChannel,
       inFlight.decrementAndGet()
       completeResponse(result, error)
     }
-    CompletableFuture.delayedExecutor(data.timeoutMs.toLong, java.util.concurrent.TimeUnit.MILLISECONDS).execute(() =>
-      completeResponse(null, Errors.REQUEST_TIMED_OUT.exception()))
+    if (brokerExtensionScheduler != null) {
+      val scheduledTimeout = brokerExtensionScheduler.scheduleOnce(
+        s"broker-extension-timeout-${data.requestId}",
+        () => completeResponse(null, Errors.REQUEST_TIMED_OUT.exception()),
+        data.timeoutMs.toLong)
+      timeoutTask.set(scheduledTimeout)
+      if (responseSent.get()) {
+        scheduledTimeout.cancel(false)
+      }
+    }
   }
 
   private def copyBrokerExtensionPayload(payload: ByteBuffer): Array[Byte] = {

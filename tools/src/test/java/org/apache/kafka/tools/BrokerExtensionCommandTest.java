@@ -23,6 +23,9 @@ import org.apache.kafka.common.message.BrokerExtensionResponseData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.BrokerExtensionRequest;
 import org.apache.kafka.common.requests.BrokerExtensionResponse;
+import org.apache.kafka.common.test.ClusterInstance;
+import org.apache.kafka.common.test.api.ClusterConfigProperty;
+import org.apache.kafka.common.test.api.ClusterTest;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -31,8 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BrokerExtensionCommandTest {
+    private static final String EXTENSION_ENABLED_CONFIG = "broker.extension.request.enabled";
+    private static final String EXTENSION_ALLOWED_LISTENERS_CONFIG = "broker.extension.request.allowed.listeners";
+
     @Test
     public void testCreatesFlushRequest() throws Exception {
         Uuid requestId = Uuid.randomUuid();
@@ -86,5 +93,40 @@ public class BrokerExtensionCommandTest {
             .setErrorCode(Errors.INVALID_REQUEST.code())
             .setErrorMessage("bad request"));
         assertThrows(RuntimeException.class, () -> BrokerExtensionCommand.printResponse(failure));
+    }
+
+    @ClusterTest(serverProperties = {
+        @ClusterConfigProperty(key = EXTENSION_ENABLED_CONFIG, value = "true"),
+        @ClusterConfigProperty(key = EXTENSION_ALLOWED_LISTENERS_CONFIG, value = "EXTERNAL")
+    })
+    public void testBrokerExtensionRequestEndToEnd(ClusterInstance clusterInstance) {
+        String output = ToolsTestUtils.captureStandardOut(() ->
+            executeUnchecked("--bootstrap-server", clusterInstance.bootstrapServers(), "--flush"));
+        assertTrue(output.startsWith("request succeeded"));
+
+        RuntimeException exception = assertThrows(RuntimeException.class, () ->
+            executeUnchecked("--bootstrap-server", clusterInstance.bootstrapServers(),
+                "--target", "missing-target", "--operation", "flush"));
+        assertTrue(exception.getMessage().contains("INVALID_REQUEST"));
+    }
+
+    @ClusterTest(serverProperties = {
+        @ClusterConfigProperty(key = EXTENSION_ENABLED_CONFIG, value = "true"),
+        @ClusterConfigProperty(key = EXTENSION_ALLOWED_LISTENERS_CONFIG, value = "EXTERNAL")
+    })
+    public void testBrokerExtensionClientFailsAfterTargetBrokerShutdown(ClusterInstance clusterInstance) {
+        int brokerId = clusterInstance.brokerIds().iterator().next();
+        clusterInstance.shutdownBroker(brokerId);
+
+        assertEquals(1, BrokerExtensionCommand.mainNoExit(
+            "--bootstrap-server", clusterInstance.bootstrapServers(), "--flush", "--timeout-ms", "100"));
+    }
+
+    private static void executeUnchecked(String... args) {
+        try {
+            BrokerExtensionCommand.execute(args);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }
