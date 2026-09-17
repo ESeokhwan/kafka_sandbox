@@ -42,6 +42,8 @@ final class BrokerExtensionRegistry(handlers: Seq[BrokerExtensionHandler]) {
 
   def targets: Set[String] = handlersByTarget.keySet
 
+  def containsTarget(target: String): Boolean = handlersByTarget.contains(target)
+
   private def failed(error: Throwable): CompletionStage[BrokerExtensionResult] =
     CompletableFuture.failedFuture[BrokerExtensionResult](error)
 }

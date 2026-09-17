@@ -18,6 +18,7 @@
 package kafka.server.builders;
 
 import kafka.coordinator.transaction.TransactionCoordinator;
+import kafka.interceptor.BrokerExtensionRegistry;
 import kafka.network.RequestChannel;
 import kafka.server.AutoTopicCreationManager;
 import kafka.server.FetchManager;
@@ -71,6 +72,7 @@ public class KafkaApisBuilder {
     private ClientMetricsManager clientMetricsManager = null;
     private ShareCoordinator shareCoordinator = null;
     private GroupConfigManager groupConfigManager = null;
+    private BrokerExtensionRegistry brokerExtensionRegistry = null;
 
     public KafkaApisBuilder setRequestChannel(RequestChannel requestChannel) {
         this.requestChannel = requestChannel;
@@ -187,6 +189,11 @@ public class KafkaApisBuilder {
         return this;
     }
 
+    public KafkaApisBuilder setBrokerExtensionRegistry(BrokerExtensionRegistry brokerExtensionRegistry) {
+        this.brokerExtensionRegistry = brokerExtensionRegistry;
+        return this;
+    }
+
     @SuppressWarnings({"CyclomaticComplexity"})
     public KafkaApis build() {
         if (requestChannel == null) throw new RuntimeException("you must set requestChannel");
@@ -230,6 +237,7 @@ public class KafkaApisBuilder {
                              tokenManager,
                              apiVersionManager,
                              clientMetricsManager,
-                             groupConfigManager);
+                             groupConfigManager,
+                             brokerExtensionRegistry);
     }
 }

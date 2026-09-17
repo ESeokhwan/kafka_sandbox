@@ -18,6 +18,7 @@
 package kafka.server
 
 import kafka.coordinator.transaction.{InitProducerIdResult, TransactionCoordinator}
+import kafka.interceptor.{BrokerExtensionCommand, BrokerExtensionContext, BrokerExtensionRegistry, BrokerExtensionResult}
 import kafka.network.RequestChannel
 import kafka.server.QuotaFactory.{QuotaManagers, UNBOUNDED_QUOTA}
 import kafka.server.handlers.DescribeTopicPartitionsRequestHandler
@@ -74,7 +75,8 @@ import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.time.Duration
 import java.util
-import java.util.concurrent.atomic.AtomicInteger
+import java.nio.ByteBuffer
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap}
 import java.util.stream.Collectors
 import java.util.{Collections, Optional}
@@ -109,7 +111,8 @@ class KafkaApis(val requestChannel: RequestChannel,
                 val tokenManager: DelegationTokenManager,
                 val apiVersionManager: ApiVersionManager,
                 val clientMetricsManager: ClientMetricsManager,
-                val groupConfigManager: GroupConfigManager
+                val groupConfigManager: GroupConfigManager,
+                brokerExtensionRegistry: BrokerExtensionRegistry = BrokerExtensionRegistry.empty
 ) extends ApiRequestHandler with Logging {
 
   type ProduceResponseStats = Map[TopicIdPartition, RecordValidationStats]
@@ -121,10 +124,93 @@ class KafkaApis(val requestChannel: RequestChannel,
   val configManager = new ConfigAdminManager(brokerId, config, configRepository)
   val describeTopicPartitionsRequestHandler = new DescribeTopicPartitionsRequestHandler(
     metadataCache, authHelper, config)
+  private val activeBrokerExtensionRegistry = Option(brokerExtensionRegistry).getOrElse(BrokerExtensionRegistry.empty)
+  private val brokerExtensionInFlight = new ConcurrentHashMap[String, AtomicInteger]()
 
   def close(): Unit = {
     aclApis.close()
     info("Shutdown complete.")
+  }
+
+  private def handleBrokerExtensionRequest(request: RequestChannel.Request): Unit = {
+    val extensionRequest = request.body[BrokerExtensionRequest]
+    val data = extensionRequest.data
+
+    def sendError(error: Throwable): Unit =
+      requestHelper.sendResponseMaybeThrottle(request, throttleTimeMs => extensionRequest.getErrorResponse(throttleTimeMs, error))
+
+    if (!config.brokerExtensionRequestEnabled ||
+      !config.brokerExtensionRequestAllowedListeners.contains(request.context.listenerName.value)) {
+      sendError(Errors.UNSUPPORTED_VERSION.exception())
+      return
+    }
+    if (!authHelper.authorize(request.context, ALTER, CLUSTER, CLUSTER_NAME)) {
+      sendError(Errors.CLUSTER_AUTHORIZATION_FAILED.exception())
+      return
+    }
+    if (data.target == null || data.target.isEmpty || data.operation == null || data.operation.isEmpty ||
+      !activeBrokerExtensionRegistry.containsTarget(data.target)) {
+      sendError(new InvalidRequestException(s"Unknown or invalid broker extension target: ${data.target}"))
+      return
+    }
+    val payload = copyBrokerExtensionPayload(data.payload)
+    if (payload.length > config.brokerExtensionRequestMaxPayloadBytes) {
+      sendError(new InvalidRequestException(s"Broker extension payload exceeds ${config.brokerExtensionRequestMaxPayloadBytes} bytes"))
+      return
+    }
+    if (data.timeoutMs <= 0 || data.timeoutMs > config.brokerExtensionRequestMaxTimeoutMs) {
+      sendError(new InvalidRequestException(s"Broker extension timeout must be between 1 and ${config.brokerExtensionRequestMaxTimeoutMs} ms"))
+      return
+    }
+
+    val inFlight = brokerExtensionInFlight.computeIfAbsent(data.target, _ => new AtomicInteger())
+    if (inFlight.incrementAndGet() > config.brokerExtensionRequestMaxInFlightPerTarget) {
+      inFlight.decrementAndGet()
+      sendError(Errors.THROTTLING_QUOTA_EXCEEDED.exception())
+      return
+    }
+
+    val responseSent = new AtomicBoolean(false)
+    def sendCompletion(result: BrokerExtensionResult): Unit = {
+      requestHelper.sendResponseMaybeThrottle(request, throttleTimeMs => new BrokerExtensionResponse(
+        new BrokerExtensionResponseData()
+          .setThrottleTimeMs(throttleTimeMs)
+          .setPayloadVersion(result.payloadVersion)
+          .setPayload(result.payload)))
+    }
+    def sendFailure(error: Throwable): Unit = sendError(error)
+    def completeResponse(result: BrokerExtensionResult, error: Throwable): Unit = {
+      if (responseSent.compareAndSet(false, true)) {
+        if (error == null) {
+          info(s"Broker extension request ${data.requestId} completed for target ${data.target}, operation ${data.operation}")
+          sendCompletion(result)
+        } else {
+          info(s"Broker extension request ${data.requestId} failed for target ${data.target}, operation ${data.operation}: ${error.getClass.getSimpleName}")
+          sendFailure(error)
+        }
+      }
+    }
+
+    val deadlineNanos = time.nanoseconds() + data.timeoutMs.toLong * 1000000L
+    val command = BrokerExtensionCommand(data.requestId, data.target, data.operation, data.payloadVersion, payload,
+      BrokerExtensionContext(brokerId, request.context.connectionId, request.context.principal.toString,
+        request.header.clientId, request.context.listenerName.value, deadlineNanos))
+    activeBrokerExtensionRegistry.dispatch(command).whenComplete { (result, error) =>
+      inFlight.decrementAndGet()
+      completeResponse(result, error)
+    }
+    CompletableFuture.delayedExecutor(data.timeoutMs.toLong, java.util.concurrent.TimeUnit.MILLISECONDS).execute(() =>
+      completeResponse(null, Errors.REQUEST_TIMED_OUT.exception()))
+  }
+
+  private def copyBrokerExtensionPayload(payload: ByteBuffer): Array[Byte] = {
+    if (payload == null) Array.emptyByteArray
+    else {
+      val copy = payload.duplicate()
+      val bytes = new Array[Byte](copy.remaining())
+      copy.get(bytes)
+      bytes
+    }
   }
 
   private def forwardToController(request: RequestChannel.Request): Unit = {
@@ -228,6 +314,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.DESCRIBE_TOPIC_PARTITIONS => handleDescribeTopicPartitionsRequest(request)
         case ApiKeys.GET_TELEMETRY_SUBSCRIPTIONS => handleGetTelemetrySubscriptionsRequest(request)
         case ApiKeys.PUSH_TELEMETRY => handlePushTelemetryRequest(request)
+        case ApiKeys.BROKER_EXTENSION => handleBrokerExtensionRequest(request)
         case ApiKeys.LIST_CONFIG_RESOURCES => handleListConfigResources(request)
         case ApiKeys.ADD_RAFT_VOTER => forwardToController(request)
         case ApiKeys.REMOVE_RAFT_VOTER => forwardToController(request)

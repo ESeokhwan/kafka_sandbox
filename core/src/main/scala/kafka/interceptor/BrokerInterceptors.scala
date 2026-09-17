@@ -33,6 +33,8 @@ class BrokerInterceptors(val interceptors: Vector[IBrokerInterceptor]) {
     extensionRegistry.dispatch(command)
   }
 
+  def brokerExtensionRegistry: BrokerExtensionRegistry = extensionRegistry
+
   def shutdown(): Unit = {
     extensionRegistry = BrokerExtensionRegistry.empty
     interceptors.foreach(_.shutdown())
