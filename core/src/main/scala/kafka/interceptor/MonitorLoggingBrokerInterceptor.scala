@@ -1,7 +1,7 @@
 package kafka.interceptor
 
 import kafka.network.RequestChannel
-import moniq.writer.strategy.FileMonitorLogWriteStrategy
+import moniq.writer.strategy.{CompositeMonitorLogWriteStrategy, FileMonitorLogWriteStrategy}
 import moniq.writer.MonitorLogWriter
 import moniq.{MonitorLog, MonitorQueue}
 import org.apache.kafka.common.protocol.ApiKeys
@@ -31,15 +31,17 @@ class MonitorLoggingBrokerInterceptor(
   private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
   private var monitorLogRollOutExtensionHandler: MonitorLogRollOutExtensionHandler = _
   private var monitorLogControlExecutor: ExecutorService = _
-  private var monitorWriteStrategy: FileMonitorLogWriteStrategy = _
+  private var fileMonitorWriteStrategy: FileMonitorLogWriteStrategy = _
+  private var monitorWriteStrategy: CompositeMonitorLogWriteStrategy = _
 
   private val requestMap = new ConcurrentHashMap[RequestChannel.Request, Timestamps]().asScala
   private val counter: AtomicLong = new AtomicLong(0)
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
-    monitorWriteStrategy = new FileMonitorLogWriteStrategy(
+    fileMonitorWriteStrategy = new FileMonitorLogWriteStrategy(
       settings.outputPath, settings.rollOutInterval, settings.maxLogsPerFile, settings.format)
+    monitorWriteStrategy = new CompositeMonitorLogWriteStrategy(fileMonitorWriteStrategy)
     monitorLogWriter = new MonitorLogWriter(
       monitorQueue, monitorWriteStrategy, settings.batchPolicy, settings.flushPolicy, settings.preprocessingWorkerCount)
     monitorLogThread = new Thread(monitorLogWriter)
@@ -47,7 +49,7 @@ class MonitorLoggingBrokerInterceptor(
     monitorLogControlExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-control")
     monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogControlExecutor)
     monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
-      monitorLogWriter, monitorWriteStrategy, monitorLogControlExecutor)
+      monitorLogWriter, fileMonitorWriteStrategy, monitorLogControlExecutor)
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
