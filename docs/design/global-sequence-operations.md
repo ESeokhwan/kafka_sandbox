@@ -80,10 +80,52 @@ commit 완료를 뜻하지 않는다. Abort된 데이터에도 할당된 global 
 
 ## 3. Lookup과 global 데이터 읽기
 
+[GlobalSequenceConsumerExample](../../examples/src/main/java/kafka/examples/GlobalSequenceConsumerExample.java)은
+공개 `KafkaGlobalSequenceConsumer`를 사용하는 이름 기반 예제다. 범위는 `[start, end-exclusive)`이며
+consumer group에 가입하거나 position·offset commit을 관리하지 않는다.
+
+```sh
+./gradlew :examples:jar :core:copyDependantLibs
+bin/kafka-run-class.sh kafka.examples.GlobalSequenceConsumerExample \
+  localhost:9092 global-events 0 100 client.properties
+```
+
+마지막 `client.properties` 인자는 선택 사항이다. 공통 SASL/SSL 설정과 다음 consumer 설정을 넣을 수 있다.
+
+```properties
+isolation.level=read_committed
+global.sequence.fetch.max.batches=2
+fetch.max.bytes=1048576
+```
+
+예제는 key와 value에 `ByteArrayDeserializer`를 사용해 Base64로 출력한다. 최초 요청은 이름으로 UUID를
+조회하고, 다음 page부터 최초 UUID를 expected UUID로 전달한다. 토픽이 같은 이름으로 재생성되면 이전
+cursor를 새 토픽에 적용하지 않고 실패한다. 첫 page의 committed end와 요청 end 중 작은 값을 이번 실행의
+끝으로 고정하므로 쓰기가 계속되어도 유한하게 끝난다.
+
+출력 형식은 다음과 같다. `leaderEpoch`는 source data partition의 leader epoch다.
+
+```text
+record globalOffset=<n> partition=<n> physicalOffset=<n> timestamp=<n> timestampType=<type> leaderEpoch=<n|none> key=<base64|null> value=<base64|null>
+page topicId=<uuid> next=<cursor> committedEnd=<index-committed-end> pending=<true|false> error=<error-class|NONE>
+```
+
+Page의 record를 모두 처리한 다음 `(topicId, next)`를 함께 체크포인트로 저장한다. 빈 record 목록이어도
+abort된 구간을 소비해 `next`가 전진했으면 계속 읽는다. `pending=true`이면 출력한 cursor에서 중단하고
+transaction이 끝난 뒤 같은 cursor로 다시 실행한다. Partial error는 앞의 유효 record와 page cursor를
+먼저 출력한 다음 예외로 종료한다. 응답을 받지 못한 호출은 마지막으로 저장한 cursor에서 재시도한다.
+한 `fetch` 내부의 metadata·연결·버전 협상·재시도는 10초 deadline에 묶인다. stdout 처리와 체크포인트
+저장은 원자적이지 않으므로 실제 애플리케이션은 둘을 직접 결합해야 한다.
+
+공개 lookup/fetch에는 데이터 토픽 `READ` 권한이 필요하다. 내부 RPC에는 `CLUSTER_ACTION`이 필요하므로
+broker 간 principal에도 부여한다. `read_committed`는 FetchGlobalSequence v1이 없는 broker에서 실패하며
+격리 수준을 자동으로 낮추지 않는다.
+
+### Raw protocol 진단 예제
+
 [GlobalSequenceReadDemo](../../examples/src/main/java/kafka/examples/globalsequence/GlobalSequenceReadDemo.java)는
-실제로 컴파일되고 장애 통합 테스트에서 실행되는 raw protocol 예제다. 임의의 broker에 요청하면
-broker가 index/source leader로 라우팅한다. ApiVersions로 버전을 협상하며, `read_committed`는
-v1이 없을 때 실패한다. 격리 수준을 자동으로 낮추지 않는다.
+UUID와 wire mapping을 직접 다루는 protocol 진단 예제다. 임의의 broker에 요청하면 broker가
+index/source leader로 라우팅한다.
 
 `TOPIC_ID`를 describe 결과의 TopicId로 바꾼다. 범위는 `[start, end-exclusive)`다.
 
@@ -98,10 +140,8 @@ bin/kafka-run-class.sh kafka.examples.globalsequence.GlobalSequenceReadDemo \
 ```
 
 마지막 `client.properties` 인자는 선택 사항이며 AdminClientConfig의 SASL/SSL 설정을 사용한다.
-공개 lookup/fetch에는 데이터 토픽 `READ` 권한이 필요하다. 내부 RPC에는 `CLUSTER_ACTION`이
-필요하므로 broker 간 principal에도 부여한다. 예제는 최초 연결 시 bootstrap 목록을 순서대로
-시도한다. 이후 연결/서버 오류는 호출자에게 반환한다. 자동 재시도·consumer group·체크포인트
-저장 기능이 있는 production consumer가 아니라 명시적 cursor 사용을 보여주는 유한 읽기 예제다.
+예제는 최초 연결 시 bootstrap 목록을 순서대로 시도한다. 이후 연결/서버 오류는 호출자에게 반환하며
+wire 응답과 mapping을 관찰하기 위한 도구다. 일반 애플리케이션은 위의 public consumer를 사용한다.
 
 예제의 탭 구분 출력은 다음과 같다. Value는 binary 데이터를 안전하게 표시하도록 Base64이며
 null value는 문자열 `null`로 표시한다.
@@ -112,8 +152,8 @@ record <globalOffset> <partition> <physicalOffset> <base64Value>
 page next=<cursor> committedEnd=<index-committed-end> pending=<true|false> error=<error>
 ```
 
-예제는 최대 2배치씩 페이지를 요청하고 첫 페이지의 committed global end까지로 읽기 끝을 고정한다. 쓰기가 계속되는 토픽에서도
-종료하며, 열린 transaction이나 오류가 있으면 해당 cursor를 출력하고 중단한다. 서버 오류에서는
+Raw 예제는 최대 2배치씩 페이지를 요청하고 첫 페이지의 committed global end까지로 읽기 끝을 고정한다.
+쓰기가 계속되는 토픽에서도 종료하며, 열린 transaction이나 오류가 있으면 해당 cursor를 출력하고 중단한다. 서버 오류에서는
 앞서 출력한 유효 prefix를 유지하고 예외로 종료한다. 연결 오류로 현재 페이지 응답 자체를 받지
 못했다면 마지막으로 처리한 페이지의 cursor부터 재시도한다. stdout 출력과 외부 처리의 원자성은
 제공하지 않으므로 실제 애플리케이션은 처리 완료와 체크포인트 저장을 직접 연결해야 한다.

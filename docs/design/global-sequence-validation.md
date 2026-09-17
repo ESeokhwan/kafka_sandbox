@@ -66,6 +66,19 @@ index leader 교체 뒤 해당 broker를 재시작하고 두 격리 수준의 �
 앞의 열린 transaction은 뒤 파티션을 막고, abort는 global hole로 남으며, 같은 producer의 다음
 transaction은 정상 반환된다. Control physical offset, 원본 CRC와 페이지 cursor도 확인한다.
 
+[GlobalSequenceConsumerIntegrationTest][consumer]는 raw protocol 대신 public
+`KafkaGlobalSequenceConsumer`와 README의 `GlobalSequenceConsumerExample`을 실제 broker에 연결한다.
+
+- 독립적으로 읽은 index log와 producer의 physical metadata를 기준으로 압축 배치의 global/physical
+  위치, null, header, timestamp와 source leader epoch를 비교한다.
+- 한 배치짜리 page 사이에서 source/index leader를 이동하고, broker 하나를 중단한 bootstrap에서도
+  최초 UUID로 범위를 이어 읽는다.
+- Commit/abort 양쪽에서 pending page와 빈 abort page의 cursor를 확인한다.
+- DeleteRecords 뒤 유효 prefix와 partial error를 함께 받고, 같은 이름으로 재생성된 토픽에 옛 UUID를
+  적용하지 않는지 확인한다.
+- Broker request metric으로 JoinGroup, Heartbeat, OffsetCommit이 발생하지 않고
+  FetchGlobalSequence가 실제 발생하는지 확인한다.
+
 ## 2. S01~S20 추적 표
 
 아래 메서드는 대표 진입점이다. 같은 클래스의 보조 경계 테스트도 함께 실행한다.
@@ -104,6 +117,25 @@ transaction은 정상 반환된다. Control physical offset, 원본 CRC와 페�
   -PmaxParallelForks=2 --max-workers=4 --console=plain
 ```
 
+Public consumer와 관련 broker/API/client 회귀만 실행하려면:
+
+```sh
+./gradlew :clients:test --tests 'org.apache.kafka.clients.consumer.*GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.internals.GlobalSequence*Test' \
+  --tests 'org.apache.kafka.clients.consumer.ConsumerRecordsTest' \
+  :clients:checkstyleMain :clients:checkstyleTest :clients:spotbugsMain :clients:javadoc \
+  :examples:jar :examples:checkstyleMain :examples:spotbugsMain \
+  :core:test --tests 'kafka.server.GlobalSequence*IntegrationTest' \
+  --tests 'kafka.server.GlobalSequenceFetchApisTest' \
+  --tests 'kafka.server.GlobalSequenceLookupApisTest' \
+  -PmaxParallelForks=1 --max-workers=4 --continue --console=plain
+```
+
+2026-09-16, C07 선별 회귀는 새 public consumer 실제 broker 시나리오 4개를 포함한 core 31개와
+client 72개, **총 103개 통과, 실패/skip 0개**다. Clients/examples/core Checkstyle,
+Clients/examples/core SpotBugs와 clients Javadoc도 통과했다. SASL/SSL 설정 전달은 client 단위에서
+검증했으며 별도의 보안 listener cluster는 이 선별 회귀에 포함하지 않았다.
+
 전체 global sequence 및 연결 지점 회귀 명령:
 
 ```sh
@@ -136,6 +168,7 @@ Core 581, global-sequence-coordinator 79, coordinator-common 102, storage 15, cl
 
 [fault]: ../../core/src/test/scala/unit/kafka/server/GlobalSequenceFaultIntegrationTest.scala
 [transaction]: ../../core/src/test/scala/unit/kafka/server/GlobalSequenceTransactionFetchIntegrationTest.scala
+[consumer]: ../../core/src/test/scala/unit/kafka/server/GlobalSequenceConsumerIntegrationTest.scala
 [coordinator]: ../../core/src/test/scala/unit/kafka/server/GlobalSequenceCoordinatorIntegrationTest.scala
 [retention]: ../../core/src/test/scala/unit/kafka/server/GlobalSequenceRetentionIntegrationTest.scala
 [retention-log]: ../../core/src/test/scala/unit/kafka/server/GlobalSequenceRetentionLogTest.scala
