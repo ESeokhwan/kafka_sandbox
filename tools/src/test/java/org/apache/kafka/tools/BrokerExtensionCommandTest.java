@@ -104,6 +104,11 @@ public class BrokerExtensionCommandTest {
             executeUnchecked("--bootstrap-server", clusterInstance.bootstrapServers(), "--flush"));
         assertTrue(output.startsWith("request succeeded"));
 
+        String rollOutOutput = ToolsTestUtils.captureStandardOut(() ->
+            executeUnchecked("--bootstrap-server", clusterInstance.bootstrapServers(),
+                "--target", "monitor-log-rollout", "--operation", "roll-out"));
+        assertTrue(rollOutOutput.startsWith("request succeeded"));
+
         RuntimeException exception = assertThrows(RuntimeException.class, () ->
             executeUnchecked("--bootstrap-server", clusterInstance.bootstrapServers(),
                 "--target", "missing-target", "--operation", "flush"));

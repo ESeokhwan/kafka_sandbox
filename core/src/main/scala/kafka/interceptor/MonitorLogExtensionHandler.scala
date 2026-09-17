@@ -23,7 +23,7 @@ import org.apache.kafka.common.errors.InvalidRequestException
 import java.nio.charset.StandardCharsets
 import java.util
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.{CompletableFuture, CompletionStage, ExecutorService, RejectedExecutionException}
+import java.util.concurrent.{ArrayBlockingQueue, CompletableFuture, CompletionStage, ExecutorService, RejectedExecutionException, ThreadFactory, ThreadPoolExecutor, TimeUnit}
 
 /** Handles broker extension operations for a monitor log writer. */
 final class MonitorLogExtensionHandler(
@@ -54,9 +54,7 @@ final class MonitorLogExtensionHandler(
   }
 
   def shutdown(): Unit = {
-    if (accepting.compareAndSet(true, false)) {
-      executor.shutdownNow()
-    }
+    accepting.compareAndSet(true, false)
   }
 
   private def execute(command: BrokerExtensionCommand): BrokerExtensionResult = {
@@ -112,4 +110,15 @@ final class MonitorLogExtensionHandler(
         throw new IllegalStateException("Monitor log flush interrupted", error)
     }
   }
+}
+
+object MonitorLogExtensionHandler {
+  def newBoundedExecutor(threadName: String): ExecutorService = new ThreadPoolExecutor(
+    1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue[Runnable](1), new ThreadFactory {
+      override def newThread(runnable: Runnable): Thread = {
+        val thread = new Thread(runnable, threadName)
+        thread.setDaemon(true)
+        thread
+      }
+    }, new ThreadPoolExecutor.AbortPolicy())
 }
