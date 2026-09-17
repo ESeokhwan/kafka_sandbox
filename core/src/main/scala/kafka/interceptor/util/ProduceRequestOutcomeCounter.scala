@@ -16,7 +16,7 @@
  */
 package kafka.interceptor.util
 
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.LongAdder
 
 final case class ProduceRequestOutcomeSnapshot(
   successfulRequestCount: Long,
@@ -26,16 +26,16 @@ final case class ProduceRequestOutcomeSnapshot(
 }
 
 final class ProduceRequestOutcomeCounter {
-  private val successfulRequestCount = new AtomicLong(0)
-  private val failedRequestCount = new AtomicLong(0)
+  private val successfulRequestCount = new LongAdder
+  private val failedRequestCount = new LongAdder
 
   def record(successful: Boolean): Unit = {
-    if (successful) successfulRequestCount.incrementAndGet()
-    else failedRequestCount.incrementAndGet()
+    if (successful) successfulRequestCount.increment()
+    else failedRequestCount.increment()
   }
 
-  def snapshotAndReset(): ProduceRequestOutcomeSnapshot = ProduceRequestOutcomeSnapshot(
-    successfulRequestCount.getAndSet(0L),
-    failedRequestCount.getAndSet(0L)
+  def snapshot(): ProduceRequestOutcomeSnapshot = ProduceRequestOutcomeSnapshot(
+    successfulRequestCount.sum(),
+    failedRequestCount.sum()
   )
 }

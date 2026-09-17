@@ -46,7 +46,7 @@ class ProduceRequestRateCheckInterceptorTest {
       "throughput_req_per_sec"
     ), log.getHeaders)
     assertEquals(util.List.of(
-      "1970-01-01T00:00:02.001Z",
+      "2001",
       "1001",
       "2",
       "1",
@@ -82,7 +82,7 @@ class ProduceRequestRateCheckInterceptorTest {
 
     assertEquals(util.List.of(
       "measured_at,measurement_duration_ms,success_processed_req_cnt,failed_processed_req_cnt,throughput_req_per_sec",
-      "1970-01-01T00:00:02.001Z,1001,2,1,2.00"
+      "2001,1001,2,1,2.00"
     ), Files.readAllLines(output))
   }
 

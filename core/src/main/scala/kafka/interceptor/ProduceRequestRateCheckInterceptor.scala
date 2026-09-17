@@ -29,6 +29,8 @@ class ProduceRequestRateCheckInterceptor(
   private var monitorWriteStrategy: CompositeMonitorLogWriteStrategy = _
   private var measurementScheduler: ScheduledExecutorService = _
   private var lastMeasurementTimeMs = 0L
+  private var previousSuccessfulRequestCount = 0L
+  private var previousFailedRequestCount = 0L
 
   override def init(): Unit = {
     val fileWriteStrategy = new FileMonitorLogWriteStrategy(
@@ -46,6 +48,8 @@ class ProduceRequestRateCheckInterceptor(
     monitorLogThread = new Thread(monitorLogWriter, "produce-request-throughput-writer")
     responseCounter = new ProduceRequestOutcomeCounter
     lastMeasurementTimeMs = currentTimeMillis()
+    previousSuccessfulRequestCount = 0L
+    previousFailedRequestCount = 0L
     measurementScheduler = newMeasurementScheduler()
     acceptingRecords.set(true)
     monitorLogThread.start()
@@ -91,16 +95,22 @@ class ProduceRequestRateCheckInterceptor(
       return
     }
 
-    val snapshot = responseCounter.snapshotAndReset()
-    lastMeasurementTimeMs = currentTimeMs
-    if (includeEmpty || !snapshot.isEmpty) {
+    val snapshot = responseCounter.snapshot()
+    val successfulRequestCount = snapshot.successfulRequestCount - previousSuccessfulRequestCount
+    val failedRequestCount = snapshot.failedRequestCount - previousFailedRequestCount
+    val hasRequests = successfulRequestCount > 0L || failedRequestCount > 0L
+    val doesFirstRequestCome = previousSuccessfulRequestCount > 0L || previousFailedRequestCount > 0L
+    if (hasRequests || (includeEmpty && doesFirstRequestCome)) {
       monitorLogWriter.submit(new ProduceRequestThroughputMonitorLog(
         currentTimeMs,
         measurementDurationMs,
-        snapshot.successfulRequestCount,
-        snapshot.failedRequestCount
+        successfulRequestCount,
+        failedRequestCount
       ))
     }
+    previousSuccessfulRequestCount = snapshot.successfulRequestCount
+    previousFailedRequestCount = snapshot.failedRequestCount
+    lastMeasurementTimeMs = currentTimeMs
   }
 
   private def runScheduledMeasurement(): Unit = {

@@ -18,7 +18,6 @@ package kafka.interceptor
 
 import moniq.IMonitorLog
 
-import java.time.Instant
 import java.util
 import java.util.Locale
 
@@ -44,7 +43,7 @@ final class ProduceRequestThroughputMonitorLog(
   override def getHeaders: util.List[String] = ProduceRequestThroughputMonitorLog.Headers
 
   override def getValues: util.List[String] = util.List.of(
-    Instant.ofEpochMilli(measuredAtMs).toString,
+    measuredAtMs.toString,
     measurementDurationMs.toString,
     successfulProcessedRequestCount.toString,
     failedProcessedRequestCount.toString,
