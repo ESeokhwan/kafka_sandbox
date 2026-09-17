@@ -1,8 +1,9 @@
 package kafka.interceptor
 
-import kafka.interceptor.strategy.KafkaLogWriteStrategy
 import kafka.network.RequestChannel
 import moniq.util.{FastExtractOnlyJsonBasedLatencyMonitoringMessageAdaptor, ILatencyMonitoringMessageAdaptor}
+import moniq.writer.strategy.FileMonitorLogWriteStrategy
+import moniq.writer.strategy.FileMonitorLogWriteStrategy.Format
 import moniq.writer.{BatchPolicy, MonitorLogWriter}
 import moniq.{JsonBasedLatencyMonitorLog, MonitorQueue}
 import org.apache.kafka.common.protocol.ApiKeys
@@ -10,6 +11,8 @@ import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.ProduceRequest
 import org.apache.kafka.common.utils.{LogContext, Utils}
 
+import java.nio.file.Path
+import java.time.Duration
 import java.util.concurrent.{ArrayBlockingQueue, ExecutorService, ThreadFactory, ThreadPoolExecutor, TimeUnit}
 
 class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
@@ -24,8 +27,8 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
-    monitorLogWriter = new MonitorLogWriter(
-      monitorQueue, new KafkaLogWriteStrategy(logContext), BatchPolicy.fixedSize(1))
+    val monitorWriteStrategy = new FileMonitorLogWriteStrategy(Path.of("output/json-based-monitor.log"), Duration.ZERO, 1_000_000, Format.COMMA_SEPARATED)
+    monitorLogWriter = new MonitorLogWriter(monitorQueue, monitorWriteStrategy, BatchPolicy.unbounded())
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
     monitorLogExtensionExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue[Runnable](1), new ThreadFactory {
