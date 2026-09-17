@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.interceptor.{BrokerInterceptors, JsonBasedMonitorLoggingBrokerInterceptor, MonitorLoggingBrokerInterceptor, MonitorLoggingSettings, ProduceRequestRateCheckInterceptor}
+import kafka.interceptor.{BrokerInterceptors, JsonBasedMonitorLoggingBrokerInterceptor, MonitorLoggingBrokerInterceptor, MonitorLoggingSettings, ProduceRequestRateCheckInterceptor, ProduceRequestThroughputSettings}
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.QuotaFactory.QuotaManagers
@@ -170,7 +170,7 @@ class ControllerServer(
       // For testing purposes, backdoor for unused imports
       unusedBrokerInterceptors = new BrokerInterceptors(Vector(
         new MonitorLoggingBrokerInterceptor(logContext, MonitorLoggingSettings.monitorLogging(config)),
-        new ProduceRequestRateCheckInterceptor()
+        new ProduceRequestRateCheckInterceptor(logContext, ProduceRequestThroughputSettings.from(config))
       ))
       unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
 

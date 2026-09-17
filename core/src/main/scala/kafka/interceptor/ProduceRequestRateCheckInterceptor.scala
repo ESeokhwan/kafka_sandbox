@@ -1,52 +1,84 @@
 package kafka.interceptor
 
+import kafka.interceptor.strategy.ProduceRequestThroughputKafkaLogWriteStrategy
 import kafka.interceptor.util.PrintableMessageCounter
 import kafka.network.RequestChannel
+import moniq.MonitorQueue
+import moniq.writer.strategy.FileMonitorLogWriteStrategy.Format
+import moniq.writer.strategy.{CompositeMonitorLogWriteStrategy, FileMonitorLogWriteStrategy}
+import moniq.writer.{BatchPolicy, MonitorLogWriter}
 import org.apache.kafka.common.protocol.ApiKeys
-import kafka.utils._
+import org.apache.kafka.common.utils.LogContext
 
-class ProduceRequestRateCheckInterceptor extends IBrokerInterceptor with Logging {
+class ProduceRequestRateCheckInterceptor(
+  val logContext: LogContext,
+  settings: ProduceRequestThroughputSettings,
+  currentTimeMillis: () => Long = () => System.currentTimeMillis()
+) extends IBrokerInterceptor {
 
-  private val commitTerm = 1000
-
-  var onRequestQueueCounter: PrintableMessageCounter = _
-  var onResponseQueueCounter: PrintableMessageCounter = _
+  private var responseCounter: PrintableMessageCounter = _
+  private var monitorLogWriter: MonitorLogWriter = _
+  private var monitorLogThread: Thread = _
+  private var monitorWriteStrategy: CompositeMonitorLogWriteStrategy = _
 
   override def init(): Unit = {
-    onRequestQueueCounter = new PrintableMessageCounter(commitTerm)
-    onResponseQueueCounter = new PrintableMessageCounter(commitTerm)
+    val fileWriteStrategy = new FileMonitorLogWriteStrategy(
+      settings.outputPath,
+      settings.rollOutInterval,
+      settings.maxRecordsPerFile,
+      Format.COMMA_SEPARATED
+    )
+    monitorWriteStrategy = new CompositeMonitorLogWriteStrategy(
+      new ProduceRequestThroughputKafkaLogWriteStrategy(logContext),
+      fileWriteStrategy
+    )
+    monitorLogWriter = new MonitorLogWriter(
+      new MonitorQueue(), monitorWriteStrategy, BatchPolicy.fixedSize(1))
+    monitorLogThread = new Thread(monitorLogWriter, "produce-request-throughput-writer")
+    responseCounter = new PrintableMessageCounter(settings.measurementIntervalMs, currentTimeMillis)
+    monitorLogThread.start()
   }
 
-  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
-    if (request.header.apiKey() == ApiKeys.PRODUCE) {
-      onRequestQueueCounter.increaseCounter(1)
-      onRequestQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
-        val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
-        infoWithTag(
-          "produce-rate-check-enqueue",
-          f"Entered Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
-        )
-      })
-    }
-  }
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
 
   override def beforeHandleRequest(request: RequestChannel.Request): Unit = {}
 
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
-      onResponseQueueCounter.increaseCounter(1)
-      onResponseQueueCounter.tryCommit((lastCommitTime, lastCommitCount, curTime, curCount) => {
-        val messageRate = (curCount - lastCommitCount).toDouble / ((curTime - lastCommitTime).toDouble / 1000.0)
-        infoWithTag(
-          "produce-rate-check",
-          f"Committed Produce Request Rate: ${messageRate}%.2f req/s (appended requests: ${curCount - lastCommitCount})"
-        )
-      })
+      recordHandledProduceRequest()
     }
   }
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
-  override def shutdown(): Unit = {}
+  private[interceptor] def recordHandledProduceRequest(): Unit = {
+    responseCounter.increaseCounter(1)
+    responseCounter.tryCommit((lastCommitTime, lastCommitCount, currentTime, currentCount) => {
+      val measurementDurationMs = currentTime - lastCommitTime
+      val processedRequestCount = currentCount - lastCommitCount
+      val throughput = processedRequestCount.toDouble * 1000.0 / measurementDurationMs.toDouble
+      monitorLogWriter.submit(new ProduceRequestThroughputMonitorLog(
+        currentTime,
+        measurementDurationMs,
+        processedRequestCount,
+        throughput
+      ))
+    })
+  }
+
+  override def shutdown(): Unit = {
+    if (monitorLogWriter == null || monitorLogThread == null) {
+      return
+    }
+    monitorLogWriter.gracefulShutdown()
+    try {
+      monitorLogThread.join()
+    } catch {
+      case error: InterruptedException =>
+        Thread.currentThread().interrupt()
+        throw new RuntimeException("ProduceRequestRateCheckInterceptor shutdown interrupted", error)
+    }
+    monitorWriteStrategy.close()
+  }
 
 }

@@ -2,7 +2,12 @@ package kafka.interceptor.util
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
-class PrintableMessageCounter(val commitTerm: Long) {
+class PrintableMessageCounter(
+  val commitTerm: Long,
+  currentTimeMillis: () => Long = () => System.currentTimeMillis()
+) {
+
+  require(commitTerm > 0, "commitTerm must be positive")
 
   private val counter: AtomicLong = new AtomicLong(0)
   private val isCommitting: AtomicBoolean = new AtomicBoolean(false)
@@ -16,16 +21,19 @@ class PrintableMessageCounter(val commitTerm: Long) {
 
   def tryCommit(f: (Long, Long, Long, Long) => Unit): Unit = {
     if (isCommitting.compareAndSet(false, true)) {
-      if (lastCommitTime == 0L) {
-        lastCommitTime = System.currentTimeMillis()
-      } else if (System.currentTimeMillis() > lastCommitTime + commitTerm) {
-        val curCount = counter.get()
-        val curTimeMilli = System.currentTimeMillis()
-        f(lastCommitTime, lastCommitCount, curTimeMilli, curCount)
-        lastCommitTime = curTimeMilli
-        lastCommitCount = curCount
+      try {
+        val currentTime = currentTimeMillis()
+        if (lastCommitTime == 0L) {
+          lastCommitTime = currentTime
+        } else if (currentTime - lastCommitTime > commitTerm) {
+          val currentCount = counter.get()
+          f(lastCommitTime, lastCommitCount, currentTime, currentCount)
+          lastCommitTime = currentTime
+          lastCommitCount = currentCount
+        }
+      } finally {
+        isCommitting.set(false)
       }
-      isCommitting.set(false)
     }
   }
 

@@ -75,7 +75,8 @@ public abstract class AbstractKafkaConfig extends AbstractConfig {
         DelegationTokenManagerConfigs.CONFIG_DEF,
         AddPartitionsToTxnConfig.CONFIG_DEF,
         BrokerExtensionConfigs.CONFIG_DEF,
-        MonitorLoggingConfigs.CONFIG_DEF
+        MonitorLoggingConfigs.CONFIG_DEF,
+        ProduceRequestThroughputConfigs.CONFIG_DEF
     ));
 
     public AbstractKafkaConfig(ConfigDef definition, Map<?, ?> originals, Map<String, ?> configProviderProps, boolean doLog) {
