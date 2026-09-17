@@ -17,14 +17,16 @@
 package kafka.interceptor
 
 import moniq.writer.strategy.FileMonitorLogWriteStrategy
+import moniq.writer.MonitorLogWriter
 import org.apache.kafka.common.errors.InvalidRequestException
 
 import java.util
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{CompletableFuture, CompletionStage, ExecutorService, RejectedExecutionException}
 
-/** Rolls out the active monitor log file without imposing a writer queue boundary. */
+/** Flushes and rolls out the active monitor log file at a writer queue boundary. */
 final class MonitorLogRollOutExtensionHandler(
+  monitorLogWriter: MonitorLogWriter,
   fileMonitorLogWriteStrategy: FileMonitorLogWriteStrategy,
   executor: ExecutorService,
   maxRememberedRequestIds: Int = 1024
@@ -73,8 +75,20 @@ final class MonitorLogRollOutExtensionHandler(
       }
     }
     if (isNew) {
-      fileMonitorLogWriteStrategy.rollOut()
+      flushAndRollOut()
     }
     BrokerExtensionResult()
+  }
+
+  private def flushAndRollOut(): Unit = {
+    try {
+      if (!monitorLogWriter.flushAndRun(fileMonitorLogWriteStrategy.rollOutAction())) {
+        throw new IllegalStateException("Monitor log commit failed")
+      }
+    } catch {
+      case error: InterruptedException =>
+        Thread.currentThread().interrupt()
+        throw new IllegalStateException("Monitor log flush and roll-out interrupted", error)
+    }
   }
 }

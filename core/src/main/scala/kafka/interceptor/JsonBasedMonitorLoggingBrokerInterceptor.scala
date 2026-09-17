@@ -38,7 +38,7 @@ class JsonBasedMonitorLoggingBrokerInterceptor(
     monitorLogControlExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-control")
     monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogControlExecutor)
     monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
-      monitorWriteStrategy, monitorLogControlExecutor)
+      monitorLogWriter, monitorWriteStrategy, monitorLogControlExecutor)
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
