@@ -18,6 +18,7 @@ package kafka.interceptor
 
 import org.apache.kafka.common.utils.LogContext
 import kafka.network.RequestChannel
+import kafka.utils.TestUtils
 import org.apache.kafka.common.network.Send
 import org.apache.kafka.common.protocol.Errors
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertTrue}
@@ -64,7 +65,7 @@ class ProduceRequestRateCheckInterceptorTest {
     var currentTimeMs = 1_000L
     val interceptor = new ProduceRequestRateCheckInterceptor(
       new LogContext("[produce-throughput-test] "),
-      ProduceRequestThroughputSettings(output, 1_000L, Duration.ZERO, 0L),
+      ProduceRequestThroughputSettings(output, 60_000L, Duration.ZERO, 0L),
       () => currentTimeMs
     )
     interceptor.init()
@@ -72,8 +73,9 @@ class ProduceRequestRateCheckInterceptorTest {
     try {
       interceptor.recordHandledProduceRequest(successful = true)
       interceptor.recordHandledProduceRequest(successful = false)
-      currentTimeMs = 2_001L
       interceptor.recordHandledProduceRequest(successful = true)
+      currentTimeMs = 2_001L
+      interceptor.emitMeasurement()
     } finally {
       interceptor.shutdown()
     }
@@ -82,6 +84,31 @@ class ProduceRequestRateCheckInterceptorTest {
       "measured_at,measurement_duration_ms,success_processed_req_cnt,failed_processed_req_cnt,throughput_req_per_sec",
       "1970-01-01T00:00:02.001Z,1001,2,1,2.00"
     ), Files.readAllLines(output))
+  }
+
+  @Test
+  def testWritesZeroMeasurementWhenNoRequestsArrive(): Unit = {
+    val output = tempDir.resolve("idle-produce-throughput.csv")
+    val interceptor = new ProduceRequestRateCheckInterceptor(
+      new LogContext("[idle-produce-throughput-test] "),
+      ProduceRequestThroughputSettings(output, 50L, Duration.ZERO, 0L)
+    )
+    interceptor.init()
+
+    try {
+      TestUtils.waitUntilTrue(
+        () => Files.exists(output) && Files.readAllLines(output).size() >= 2,
+        "Timed out waiting for an idle produce throughput measurement"
+      )
+    } finally {
+      interceptor.shutdown()
+    }
+
+    val measurement = Files.readAllLines(output).get(1).split(",")
+    assertTrue(measurement(1).toLong > 0L)
+    assertEquals("0", measurement(2))
+    assertEquals("0", measurement(3))
+    assertEquals("0.00", measurement(4))
   }
 
   @Test

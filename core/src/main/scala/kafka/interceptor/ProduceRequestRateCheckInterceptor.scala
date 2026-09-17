@@ -10,16 +10,25 @@ import moniq.writer.{BatchPolicy, MonitorLogWriter}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.utils.LogContext
 
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.{Executors, ScheduledExecutorService, ThreadFactory, TimeUnit}
+import scala.util.control.NonFatal
+
 class ProduceRequestRateCheckInterceptor(
   val logContext: LogContext,
   settings: ProduceRequestThroughputSettings,
   currentTimeMillis: () => Long = () => System.currentTimeMillis()
 ) extends IBrokerInterceptor {
 
+  private val logger = logContext.logger(classOf[ProduceRequestRateCheckInterceptor])
+  private val acceptingRecords = new AtomicBoolean(false)
+
   private var responseCounter: ProduceRequestOutcomeCounter = _
   private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
   private var monitorWriteStrategy: CompositeMonitorLogWriteStrategy = _
+  private var measurementScheduler: ScheduledExecutorService = _
+  private var lastMeasurementTimeMs = 0L
 
   override def init(): Unit = {
     val fileWriteStrategy = new FileMonitorLogWriteStrategy(
@@ -35,8 +44,17 @@ class ProduceRequestRateCheckInterceptor(
     monitorLogWriter = new MonitorLogWriter(
       new MonitorQueue(), monitorWriteStrategy, BatchPolicy.fixedSize(1))
     monitorLogThread = new Thread(monitorLogWriter, "produce-request-throughput-writer")
-    responseCounter = new ProduceRequestOutcomeCounter(settings.measurementIntervalMs, currentTimeMillis)
+    responseCounter = new ProduceRequestOutcomeCounter
+    lastMeasurementTimeMs = currentTimeMillis()
+    measurementScheduler = newMeasurementScheduler()
+    acceptingRecords.set(true)
     monitorLogThread.start()
+    measurementScheduler.scheduleAtFixedRate(
+      () => runScheduledMeasurement(),
+      settings.measurementIntervalMs,
+      settings.measurementIntervalMs,
+      TimeUnit.MILLISECONDS
+    )
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {}
@@ -61,30 +79,81 @@ class ProduceRequestRateCheckInterceptor(
     }
 
   private[interceptor] def recordHandledProduceRequest(successful: Boolean): Unit = {
-    responseCounter.record(successful, (currentTime, measurementDurationMs,
-                                        successfulRequestCount, failedRequestCount) => {
+    if (acceptingRecords.get()) {
+      responseCounter.record(successful)
+    }
+  }
+
+  private[interceptor] def emitMeasurement(includeEmpty: Boolean = true): Unit = synchronized {
+    val currentTimeMs = currentTimeMillis()
+    val measurementDurationMs = currentTimeMs - lastMeasurementTimeMs
+    if (measurementDurationMs <= 0L) {
+      return
+    }
+
+    val snapshot = responseCounter.snapshotAndReset()
+    lastMeasurementTimeMs = currentTimeMs
+    if (includeEmpty || !snapshot.isEmpty) {
       monitorLogWriter.submit(new ProduceRequestThroughputMonitorLog(
-        currentTime,
+        currentTimeMs,
         measurementDurationMs,
-        successfulRequestCount,
-        failedRequestCount
+        snapshot.successfulRequestCount,
+        snapshot.failedRequestCount
       ))
+    }
+  }
+
+  private def runScheduledMeasurement(): Unit = {
+    try {
+      emitMeasurement()
+    } catch {
+      case NonFatal(error) =>
+        logger.error("Failed to emit produce request throughput measurement", error)
+    }
+  }
+
+  private def newMeasurementScheduler(): ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor(new ThreadFactory {
+      override def newThread(runnable: Runnable): Thread = {
+        val thread = new Thread(runnable, "produce-request-throughput-scheduler")
+        thread.setDaemon(true)
+        thread
+      }
     })
+
+  private def stopMeasurementScheduler(): Option[InterruptedException] = {
+    measurementScheduler.shutdown()
+    try {
+      if (!measurementScheduler.awaitTermination(5L, TimeUnit.SECONDS)) {
+        measurementScheduler.shutdownNow()
+      }
+      None
+    } catch {
+      case error: InterruptedException =>
+        measurementScheduler.shutdownNow()
+        Some(error)
+    }
   }
 
   override def shutdown(): Unit = {
-    if (monitorLogWriter == null || monitorLogThread == null) {
+    if (monitorLogWriter == null || monitorLogThread == null || !acceptingRecords.compareAndSet(true, false)) {
       return
     }
+    val schedulerInterruption = stopMeasurementScheduler()
+    emitMeasurement(includeEmpty = false)
     monitorLogWriter.gracefulShutdown()
+    var writerInterruption: Option[InterruptedException] = None
     try {
       monitorLogThread.join()
     } catch {
       case error: InterruptedException =>
-        Thread.currentThread().interrupt()
-        throw new RuntimeException("ProduceRequestRateCheckInterceptor shutdown interrupted", error)
+        writerInterruption = Some(error)
     }
     monitorWriteStrategy.close()
+    schedulerInterruption.orElse(writerInterruption).foreach { error =>
+      Thread.currentThread().interrupt()
+      throw new RuntimeException("ProduceRequestRateCheckInterceptor shutdown interrupted", error)
+    }
   }
 
 }

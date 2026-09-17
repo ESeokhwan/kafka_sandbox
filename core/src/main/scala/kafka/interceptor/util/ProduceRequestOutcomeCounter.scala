@@ -16,50 +16,26 @@
  */
 package kafka.interceptor.util
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import java.util.concurrent.atomic.AtomicLong
 
-final class ProduceRequestOutcomeCounter(
-  measurementIntervalMs: Long,
-  currentTimeMillis: () => Long = () => System.currentTimeMillis()
+final case class ProduceRequestOutcomeSnapshot(
+  successfulRequestCount: Long,
+  failedRequestCount: Long
 ) {
-  require(measurementIntervalMs > 0, "measurementIntervalMs must be positive")
+  def isEmpty: Boolean = successfulRequestCount == 0L && failedRequestCount == 0L
+}
 
+final class ProduceRequestOutcomeCounter {
   private val successfulRequestCount = new AtomicLong(0)
   private val failedRequestCount = new AtomicLong(0)
-  private val isMeasuring = new AtomicBoolean(false)
 
-  private var lastMeasurementTimeMs = 0L
-  private var lastSuccessfulRequestCount = 0L
-  private var lastFailedRequestCount = 0L
-
-  def record(
-    successful: Boolean,
-    onMeasurement: (Long, Long, Long, Long) => Unit
-  ): Unit = {
+  def record(successful: Boolean): Unit = {
     if (successful) successfulRequestCount.incrementAndGet()
     else failedRequestCount.incrementAndGet()
-
-    if (isMeasuring.compareAndSet(false, true)) {
-      try {
-        val currentTimeMs = currentTimeMillis()
-        if (lastMeasurementTimeMs == 0L) {
-          lastMeasurementTimeMs = currentTimeMs
-        } else if (currentTimeMs - lastMeasurementTimeMs > measurementIntervalMs) {
-          val currentSuccessfulRequestCount = successfulRequestCount.get()
-          val currentFailedRequestCount = failedRequestCount.get()
-          onMeasurement(
-            currentTimeMs,
-            currentTimeMs - lastMeasurementTimeMs,
-            currentSuccessfulRequestCount - lastSuccessfulRequestCount,
-            currentFailedRequestCount - lastFailedRequestCount
-          )
-          lastMeasurementTimeMs = currentTimeMs
-          lastSuccessfulRequestCount = currentSuccessfulRequestCount
-          lastFailedRequestCount = currentFailedRequestCount
-        }
-      } finally {
-        isMeasuring.set(false)
-      }
-    }
   }
+
+  def snapshotAndReset(): ProduceRequestOutcomeSnapshot = ProduceRequestOutcomeSnapshot(
+    successfulRequestCount.getAndSet(0L),
+    failedRequestCount.getAndSet(0L)
+  )
 }
