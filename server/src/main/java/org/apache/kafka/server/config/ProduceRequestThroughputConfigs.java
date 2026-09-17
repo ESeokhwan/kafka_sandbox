@@ -22,6 +22,8 @@ import static org.apache.kafka.common.config.ConfigDef.Importance.LOW;
 import static org.apache.kafka.common.config.ConfigDef.Importance.MEDIUM;
 import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
 import static org.apache.kafka.common.config.ConfigDef.Range.between;
+import static org.apache.kafka.common.config.ConfigDef.Type.BOOLEAN;
+import static org.apache.kafka.common.config.ConfigDef.Type.INT;
 import static org.apache.kafka.common.config.ConfigDef.Type.LONG;
 import static org.apache.kafka.common.config.ConfigDef.Type.STRING;
 
@@ -31,6 +33,9 @@ public final class ProduceRequestThroughputConfigs {
     public static final String MEASUREMENT_INTERVAL_MS_CONFIG = "produce.request.throughput.measurement.interval.ms";
     public static final String ROLL_OUT_INTERVAL_MS_CONFIG = "produce.request.throughput.rollout.interval.ms";
     public static final String MAX_RECORDS_PER_FILE_CONFIG = "produce.request.throughput.max.records.per.file";
+    public static final String REALTIME_LOG_ENABLED_CONFIG = "produce.request.throughput.realtime.log.enabled";
+    public static final String BATCH_SIZE_CONFIG = "produce.request.throughput.batch.size";
+    public static final String FLUSH_INTERVAL_MS_CONFIG = "produce.request.throughput.flush.interval.ms";
 
     private static final long MAX_DURATION_MS = Long.MAX_VALUE / 1_000_000L;
 
@@ -43,7 +48,13 @@ public final class ProduceRequestThroughputConfigs {
         .define(ROLL_OUT_INTERVAL_MS_CONFIG, LONG, 0L, between(0L, MAX_DURATION_MS), LOW,
             "Automatic throughput file roll-out interval in milliseconds; 0 disables it.")
         .define(MAX_RECORDS_PER_FILE_CONFIG, LONG, 1_000_000L, atLeast(0L), LOW,
-            "Maximum throughput records per file; 0 disables count-based roll-out.");
+            "Maximum throughput records per file; 0 disables count-based roll-out.")
+        .define(REALTIME_LOG_ENABLED_CONFIG, BOOLEAN, true, LOW,
+            "Whether to write throughput measurements to the broker log in real time.")
+        .define(BATCH_SIZE_CONFIG, INT, 0, atLeast(0), LOW,
+            "Throughput writer batch size when real-time logging is disabled; 0 uses an unbounded batch policy.")
+        .define(FLUSH_INTERVAL_MS_CONFIG, LONG, 0L, between(0L, MAX_DURATION_MS), LOW,
+            "Throughput writer automatic flush interval when real-time logging is disabled; 0 disables time-based flushing.");
 
     private ProduceRequestThroughputConfigs() {
     }

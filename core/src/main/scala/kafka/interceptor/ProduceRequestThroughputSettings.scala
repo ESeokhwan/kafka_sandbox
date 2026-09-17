@@ -17,6 +17,7 @@
 package kafka.interceptor
 
 import kafka.server.KafkaConfig
+import moniq.writer.{BatchPolicy, FlushPolicy}
 import org.apache.kafka.server.config.ProduceRequestThroughputConfigs
 
 import java.nio.file.Path
@@ -26,7 +27,10 @@ final case class ProduceRequestThroughputSettings(
   outputPath: Path,
   measurementIntervalMs: Long,
   rollOutInterval: Duration,
-  maxRecordsPerFile: Long
+  maxRecordsPerFile: Long,
+  realtimeLogEnabled: Boolean = true,
+  batchPolicy: BatchPolicy = BatchPolicy.unbounded(),
+  flushPolicy: FlushPolicy = FlushPolicy.disabled()
 )
 
 object ProduceRequestThroughputSettings {
@@ -34,6 +38,16 @@ object ProduceRequestThroughputSettings {
     Path.of(config.getString(ProduceRequestThroughputConfigs.OUTPUT_PATH_CONFIG)),
     config.getLong(ProduceRequestThroughputConfigs.MEASUREMENT_INTERVAL_MS_CONFIG),
     Duration.ofMillis(config.getLong(ProduceRequestThroughputConfigs.ROLL_OUT_INTERVAL_MS_CONFIG)),
-    config.getLong(ProduceRequestThroughputConfigs.MAX_RECORDS_PER_FILE_CONFIG)
+    config.getLong(ProduceRequestThroughputConfigs.MAX_RECORDS_PER_FILE_CONFIG),
+    config.getBoolean(ProduceRequestThroughputConfigs.REALTIME_LOG_ENABLED_CONFIG),
+    batchPolicy(config.getInt(ProduceRequestThroughputConfigs.BATCH_SIZE_CONFIG)),
+    flushPolicy(config.getLong(ProduceRequestThroughputConfigs.FLUSH_INTERVAL_MS_CONFIG))
   )
+
+  private def batchPolicy(batchSize: Int): BatchPolicy =
+    if (batchSize == 0) BatchPolicy.unbounded() else BatchPolicy.fixedSize(batchSize)
+
+  private def flushPolicy(flushIntervalMs: Long): FlushPolicy =
+    if (flushIntervalMs == 0L) FlushPolicy.disabled()
+    else FlushPolicy.after(Duration.ofMillis(flushIntervalMs))
 }

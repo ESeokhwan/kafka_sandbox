@@ -112,6 +112,25 @@ class ProduceRequestRateCheckInterceptorTest {
   }
 
   @Test
+  def testRegistersDedicatedExtensionTargets(): Unit = {
+    val interceptor = new ProduceRequestRateCheckInterceptor(
+      new LogContext("[produce-throughput-extension-test] "),
+      ProduceRequestThroughputSettings(tempDir.resolve("extension.csv"), 60_000L, Duration.ZERO, 0L,
+        realtimeLogEnabled = false)
+    )
+
+    interceptor.init()
+    try {
+      assertEquals(
+        Set("produce-request-throughput", "produce-request-throughput-rollout"),
+        interceptor.extensionHandlers.map(_.target).toSet
+      )
+    } finally {
+      interceptor.shutdown()
+    }
+  }
+
+  @Test
   def testClassifiesOnlyTerminalProduceResponses(): Unit = {
     val interceptor = new ProduceRequestRateCheckInterceptor(
       new LogContext(),

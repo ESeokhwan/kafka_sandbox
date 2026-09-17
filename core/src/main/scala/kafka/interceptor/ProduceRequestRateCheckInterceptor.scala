@@ -11,7 +11,7 @@ import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.utils.LogContext
 
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.{Executors, ScheduledExecutorService, ThreadFactory, TimeUnit}
+import java.util.concurrent.{ExecutorService, Executors, ScheduledExecutorService, ThreadFactory, TimeUnit}
 import scala.util.control.NonFatal
 
 class ProduceRequestRateCheckInterceptor(
@@ -27,24 +27,34 @@ class ProduceRequestRateCheckInterceptor(
   private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
   private var monitorWriteStrategy: CompositeMonitorLogWriteStrategy = _
+  private var fileMonitorWriteStrategy: FileMonitorLogWriteStrategy = _
+  private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
+  private var monitorLogRollOutExtensionHandler: MonitorLogRollOutExtensionHandler = _
+  private var monitorLogControlExecutor: ExecutorService = _
   private var measurementScheduler: ScheduledExecutorService = _
   private var lastMeasurementTimeMs = 0L
   private var previousSuccessfulRequestCount = 0L
   private var previousFailedRequestCount = 0L
 
   override def init(): Unit = {
-    val fileWriteStrategy = new FileMonitorLogWriteStrategy(
+    fileMonitorWriteStrategy = new FileMonitorLogWriteStrategy(
       settings.outputPath,
       settings.rollOutInterval,
       settings.maxRecordsPerFile,
       Format.COMMA_SEPARATED
     )
-    monitorWriteStrategy = new CompositeMonitorLogWriteStrategy(
-      new ProduceRequestThroughputKafkaLogWriteStrategy(logContext),
-      fileWriteStrategy
-    )
+    monitorWriteStrategy = if (settings.realtimeLogEnabled) {
+      new CompositeMonitorLogWriteStrategy(
+        new ProduceRequestThroughputKafkaLogWriteStrategy(logContext),
+        fileMonitorWriteStrategy
+      )
+    } else {
+      new CompositeMonitorLogWriteStrategy(fileMonitorWriteStrategy)
+    }
+    val batchPolicy = if (settings.realtimeLogEnabled) BatchPolicy.fixedSize(1) else settings.batchPolicy
+    val flushPolicy = if (settings.realtimeLogEnabled) moniq.writer.FlushPolicy.disabled() else settings.flushPolicy
     monitorLogWriter = new MonitorLogWriter(
-      new MonitorQueue(), monitorWriteStrategy, BatchPolicy.fixedSize(1))
+      new MonitorQueue(), monitorWriteStrategy, batchPolicy, flushPolicy)
     monitorLogThread = new Thread(monitorLogWriter, "produce-request-throughput-writer")
     responseCounter = new ProduceRequestOutcomeCounter
     lastMeasurementTimeMs = currentTimeMillis()
@@ -53,6 +63,18 @@ class ProduceRequestRateCheckInterceptor(
     measurementScheduler = newMeasurementScheduler()
     acceptingRecords.set(true)
     monitorLogThread.start()
+    monitorLogControlExecutor = MonitorLogExtensionHandler.newBoundedExecutor("produce-request-throughput-control")
+    monitorLogExtensionHandler = new MonitorLogExtensionHandler(
+      monitorLogWriter,
+      monitorLogControlExecutor,
+      targetName = "produce-request-throughput"
+    )
+    monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
+      monitorLogWriter,
+      fileMonitorWriteStrategy,
+      monitorLogControlExecutor,
+      targetName = "produce-request-throughput-rollout"
+    )
     measurementScheduler.scheduleAtFixedRate(
       () => runScheduledMeasurement(),
       settings.measurementIntervalMs,
@@ -72,6 +94,9 @@ class ProduceRequestRateCheckInterceptor(
   }
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
+
+  override def extensionHandlers: Seq[BrokerExtensionHandler] =
+    Option(monitorLogExtensionHandler).toSeq ++ Option(monitorLogRollOutExtensionHandler).toSeq
 
   private[interceptor] def produceRequestSucceeded(response: RequestChannel.Response): Option[Boolean] =
     response match {
@@ -151,6 +176,15 @@ class ProduceRequestRateCheckInterceptor(
     }
     val schedulerInterruption = stopMeasurementScheduler()
     emitMeasurement(includeEmpty = false)
+    if (monitorLogExtensionHandler != null) {
+      monitorLogExtensionHandler.shutdown()
+    }
+    if (monitorLogRollOutExtensionHandler != null) {
+      monitorLogRollOutExtensionHandler.shutdown()
+    }
+    if (monitorLogControlExecutor != null) {
+      monitorLogControlExecutor.shutdownNow()
+    }
     monitorLogWriter.gracefulShutdown()
     var writerInterruption: Option[InterruptedException] = None
     try {

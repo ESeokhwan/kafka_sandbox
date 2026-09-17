@@ -18,9 +18,10 @@ package kafka.interceptor
 
 import kafka.server.KafkaConfig
 import kafka.utils.TestUtils
+import moniq.writer.{BatchPolicy, FlushPolicy}
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.server.config.ProduceRequestThroughputConfigs
-import org.junit.jupiter.api.Assertions.{assertEquals, assertThrows}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertInstanceOf, assertThrows}
 import org.junit.jupiter.api.Test
 
 import java.nio.file.Path
@@ -34,6 +35,9 @@ class ProduceRequestThroughputSettingsTest {
     props.setProperty(ProduceRequestThroughputConfigs.MEASUREMENT_INTERVAL_MS_CONFIG, "5000")
     props.setProperty(ProduceRequestThroughputConfigs.ROLL_OUT_INTERVAL_MS_CONFIG, "60000")
     props.setProperty(ProduceRequestThroughputConfigs.MAX_RECORDS_PER_FILE_CONFIG, "500")
+    props.setProperty(ProduceRequestThroughputConfigs.REALTIME_LOG_ENABLED_CONFIG, "false")
+    props.setProperty(ProduceRequestThroughputConfigs.BATCH_SIZE_CONFIG, "10")
+    props.setProperty(ProduceRequestThroughputConfigs.FLUSH_INTERVAL_MS_CONFIG, "2000")
 
     val settings = ProduceRequestThroughputSettings.from(KafkaConfig.fromProps(props))
 
@@ -41,6 +45,9 @@ class ProduceRequestThroughputSettingsTest {
     assertEquals(5_000L, settings.measurementIntervalMs)
     assertEquals(Duration.ofMinutes(1), settings.rollOutInterval)
     assertEquals(500L, settings.maxRecordsPerFile)
+    assertFalse(settings.realtimeLogEnabled)
+    assertEquals(10, assertInstanceOf(classOf[BatchPolicy.FixedSize], settings.batchPolicy).size())
+    assertEquals(Duration.ofSeconds(2), assertInstanceOf(classOf[FlushPolicy.After], settings.flushPolicy).timeout())
   }
 
   @Test
