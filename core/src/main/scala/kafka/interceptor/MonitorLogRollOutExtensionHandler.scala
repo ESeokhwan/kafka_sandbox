@@ -30,7 +30,8 @@ final class MonitorLogRollOutExtensionHandler(
   fileMonitorLogWriteStrategy: FileMonitorLogWriteStrategy,
   executor: ExecutorService,
   maxRememberedRequestIds: Int = 1024,
-  targetName: String = "monitor-log-rollout"
+  targetName: String = "monitor-log-rollout",
+  afterRollOut: () => Unit = () => ()
 ) extends BrokerExtensionHandler {
   require(targetName != null && targetName.nonEmpty, "targetName must not be empty")
 
@@ -88,6 +89,7 @@ final class MonitorLogRollOutExtensionHandler(
       if (!monitorLogWriter.flushAndRun(fileMonitorLogWriteStrategy.rollOutAction())) {
         throw new IllegalStateException("Monitor log commit failed")
       }
+      afterRollOut()
     } catch {
       case error: InterruptedException =>
         Thread.currentThread().interrupt()
