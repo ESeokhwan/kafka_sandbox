@@ -34,7 +34,10 @@ class MonitorLogExtensionHandlerTest {
   private val handler = new MonitorLogExtensionHandler(writer, executor)
 
   @AfterEach
-  def tearDown(): Unit = handler.shutdown()
+  def tearDown(): Unit = {
+    handler.shutdown()
+    executor.shutdownNow()
+  }
 
   @Test
   def testFlushCompletesOnlyAfterWriterFlush(): Unit = {

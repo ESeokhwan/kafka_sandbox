@@ -52,9 +52,7 @@ final class MonitorLogRollOutExtensionHandler(
   }
 
   def shutdown(): Unit = {
-    if (accepting.compareAndSet(true, false)) {
-      executor.shutdownNow()
-    }
+    accepting.compareAndSet(true, false)
   }
 
   private def rollOut(command: BrokerExtensionCommand): BrokerExtensionResult = {

@@ -38,6 +38,7 @@ class MonitorLogRollOutExtensionHandlerTest {
   @AfterEach
   def tearDown(): Unit = {
     if (handler != null) handler.shutdown()
+    executor.shutdownNow()
     if (strategy != null) strategy.close()
   }
 

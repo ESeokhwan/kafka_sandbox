@@ -23,9 +23,8 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
   private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
   private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
-  private var monitorLogExtensionExecutor: ExecutorService = _
   private var monitorLogRollOutExtensionHandler: MonitorLogRollOutExtensionHandler = _
-  private var monitorLogRollOutExtensionExecutor: ExecutorService = _
+  private var monitorLogControlExecutor: ExecutorService = _
   private var monitorWriteStrategy: FileMonitorLogWriteStrategy = _
 
   override def init(): Unit = {
@@ -34,11 +33,10 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
     monitorLogWriter = new MonitorLogWriter(monitorQueue, monitorWriteStrategy, BatchPolicy.unbounded())
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
-    monitorLogExtensionExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-extension")
-    monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogExtensionExecutor)
-    monitorLogRollOutExtensionExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-rollout-extension")
+    monitorLogControlExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-control")
+    monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogControlExecutor)
     monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
-      monitorWriteStrategy, monitorLogRollOutExtensionExecutor)
+      monitorWriteStrategy, monitorLogControlExecutor)
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
@@ -99,6 +97,9 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
     }
     if (monitorLogRollOutExtensionHandler != null) {
       monitorLogRollOutExtensionHandler.shutdown()
+    }
+    if (monitorLogControlExecutor != null) {
+      monitorLogControlExecutor.shutdownNow()
     }
 
     monitorLogWriter.gracefulShutdown()

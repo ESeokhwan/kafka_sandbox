@@ -54,9 +54,7 @@ final class MonitorLogExtensionHandler(
   }
 
   def shutdown(): Unit = {
-    if (accepting.compareAndSet(true, false)) {
-      executor.shutdownNow()
-    }
+    accepting.compareAndSet(true, false)
   }
 
   private def execute(command: BrokerExtensionCommand): BrokerExtensionResult = {
