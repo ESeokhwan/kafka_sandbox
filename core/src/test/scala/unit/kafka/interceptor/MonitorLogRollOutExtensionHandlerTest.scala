@@ -85,6 +85,20 @@ class MonitorLogRollOutExtensionHandlerTest {
   }
 
   @Test
+  def testSupportsCustomTarget(): Unit = {
+    strategy = new FileMonitorLogWriteStrategy(tempDir.resolve("monitor.log"))
+    writer = mock(classOf[MonitorLogWriter])
+    handler = new MonitorLogRollOutExtensionHandler(
+      writer,
+      strategy,
+      executor,
+      targetName = "produce-request-throughput-rollout"
+    )
+
+    assertEquals("produce-request-throughput-rollout", handler.target)
+  }
+
+  @Test
   def testRejectsUnsupportedOperationAndPayload(): Unit = {
     initializeHandler(tempDir.resolve("monitor.log"))
 
@@ -108,7 +122,7 @@ class MonitorLogRollOutExtensionHandlerTest {
 
   private def command(
     requestId: Uuid = Uuid.randomUuid(),
-    operation: String = "roll-out",
+    operation: String = "flush-and-rollout",
     payload: Array[Byte] = Array.emptyByteArray
   ): BrokerExtensionCommand = BrokerExtensionCommand(
     requestId,

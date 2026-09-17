@@ -49,6 +49,13 @@ class MonitorLogExtensionHandlerTest {
   }
 
   @Test
+  def testSupportsCustomTarget(): Unit = {
+    val customHandler = new MonitorLogExtensionHandler(writer, executor, targetName = "produce-request-throughput")
+
+    assertEquals("produce-request-throughput", customHandler.target)
+  }
+
+  @Test
   def testFlushFailureIsReturnedAsHandlerFailure(): Unit = {
     when(writer.flush()).thenReturn(false)
 
