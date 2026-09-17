@@ -13,7 +13,7 @@ import org.apache.kafka.common.utils.{LogContext, Utils}
 
 import java.nio.file.Path
 import java.time.Duration
-import java.util.concurrent.{ArrayBlockingQueue, ExecutorService, ThreadFactory, ThreadPoolExecutor, TimeUnit}
+import java.util.concurrent.ExecutorService
 
 class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
@@ -24,21 +24,21 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
   private var monitorLogThread: Thread = _
   private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
   private var monitorLogExtensionExecutor: ExecutorService = _
+  private var monitorLogRollOutExtensionHandler: MonitorLogRollOutExtensionHandler = _
+  private var monitorLogRollOutExtensionExecutor: ExecutorService = _
+  private var monitorWriteStrategy: FileMonitorLogWriteStrategy = _
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
-    val monitorWriteStrategy = new FileMonitorLogWriteStrategy(Path.of("output/json-based-monitor.log"), Duration.ZERO, 1_000_000, Format.COMMA_SEPARATED)
+    monitorWriteStrategy = new FileMonitorLogWriteStrategy(Path.of("output/json-based-monitor.log"), Duration.ZERO, 1_000_000, Format.COMMA_SEPARATED)
     monitorLogWriter = new MonitorLogWriter(monitorQueue, monitorWriteStrategy, BatchPolicy.unbounded())
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
-    monitorLogExtensionExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue[Runnable](1), new ThreadFactory {
-      override def newThread(runnable: Runnable): Thread = {
-        val thread = new Thread(runnable, "monitor-log-extension")
-        thread.setDaemon(true)
-        thread
-      }
-    }, new ThreadPoolExecutor.AbortPolicy())
+    monitorLogExtensionExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-extension")
     monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogExtensionExecutor)
+    monitorLogRollOutExtensionExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-rollout-extension")
+    monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
+      monitorWriteStrategy, monitorLogRollOutExtensionExecutor)
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
@@ -86,7 +86,8 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
-  override def extensionHandlers: Seq[BrokerExtensionHandler] = Option(monitorLogExtensionHandler).toSeq
+  override def extensionHandlers: Seq[BrokerExtensionHandler] =
+    Option(monitorLogExtensionHandler).toSeq ++ Option(monitorLogRollOutExtensionHandler).toSeq
 
   override def shutdown(): Unit = {
     if (monitorLogWriter == null || monitorLogThread == null) {
@@ -95,6 +96,9 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
 
     if (monitorLogExtensionHandler != null) {
       monitorLogExtensionHandler.shutdown()
+    }
+    if (monitorLogRollOutExtensionHandler != null) {
+      monitorLogRollOutExtensionHandler.shutdown()
     }
 
     monitorLogWriter.gracefulShutdown()
@@ -106,5 +110,6 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
         Thread.currentThread().interrupt()
         throw new RuntimeException("MonitorLoggingBrokerInterceptor shutdown interrupted", e)
     }
+    monitorWriteStrategy.close()
   }
 }

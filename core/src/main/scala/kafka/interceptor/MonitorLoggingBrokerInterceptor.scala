@@ -12,7 +12,7 @@ import org.apache.kafka.common.utils.{LogContext, Utils}
 
 import java.nio.file.Path
 import java.time.Duration
-import java.util.concurrent.{ArrayBlockingQueue, ConcurrentHashMap, ExecutorService, ThreadFactory, ThreadPoolExecutor, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, ExecutorService}
 import java.util.concurrent.atomic.AtomicLong
 import scala.jdk.CollectionConverters.ConcurrentMapHasAsScala
 
@@ -30,24 +30,24 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
   private var monitorLogThread: Thread = _
   private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
   private var monitorLogExtensionExecutor: ExecutorService = _
+  private var monitorLogRollOutExtensionHandler: MonitorLogRollOutExtensionHandler = _
+  private var monitorLogRollOutExtensionExecutor: ExecutorService = _
+  private var monitorWriteStrategy: FileMonitorLogWriteStrategy = _
 
   private val requestMap = new ConcurrentHashMap[RequestChannel.Request, Timestamps]().asScala
   private val counter: AtomicLong = new AtomicLong(0)
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
-    val monitorWriteStrategy = new FileMonitorLogWriteStrategy(Path.of("output/monitor.log"), Duration.ZERO, 1_000_000, Format.COMMA_SEPARATED)
+    monitorWriteStrategy = new FileMonitorLogWriteStrategy(Path.of("output/monitor.log"), Duration.ZERO, 1_000_000, Format.COMMA_SEPARATED)
     monitorLogWriter = new MonitorLogWriter(monitorQueue, monitorWriteStrategy, BatchPolicy.unbounded())
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
-    monitorLogExtensionExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue[Runnable](1), new ThreadFactory {
-      override def newThread(runnable: Runnable): Thread = {
-        val thread = new Thread(runnable, "monitor-log-extension")
-        thread.setDaemon(true)
-        thread
-      }
-    }, new ThreadPoolExecutor.AbortPolicy())
+    monitorLogExtensionExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-extension")
     monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogExtensionExecutor)
+    monitorLogRollOutExtensionExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-rollout-extension")
+    monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
+      monitorWriteStrategy, monitorLogRollOutExtensionExecutor)
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
@@ -114,7 +114,8 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
-  override def extensionHandlers: Seq[BrokerExtensionHandler] = Option(monitorLogExtensionHandler).toSeq
+  override def extensionHandlers: Seq[BrokerExtensionHandler] =
+    Option(monitorLogExtensionHandler).toSeq ++ Option(monitorLogRollOutExtensionHandler).toSeq
 
   override def shutdown(): Unit = {
     if (monitorLogWriter == null || monitorLogThread == null) {
@@ -123,6 +124,9 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
 
     if (monitorLogExtensionHandler != null) {
       monitorLogExtensionHandler.shutdown()
+    }
+    if (monitorLogRollOutExtensionHandler != null) {
+      monitorLogRollOutExtensionHandler.shutdown()
     }
 
     monitorLogWriter.gracefulShutdown()
@@ -134,5 +138,6 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
         Thread.currentThread().interrupt()
         throw new RuntimeException("MonitorLoggingBrokerInterceptor shutdown interrupted", e)
     }
+    monitorWriteStrategy.close()
   }
 }
