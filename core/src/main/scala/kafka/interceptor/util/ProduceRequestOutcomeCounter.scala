@@ -38,4 +38,9 @@ final class ProduceRequestOutcomeCounter {
     successfulRequestCount.sum(),
     failedRequestCount.sum()
   )
+
+  def reset(): Unit = {
+    successfulRequestCount.reset()
+    failedRequestCount.reset()
+  }
 }

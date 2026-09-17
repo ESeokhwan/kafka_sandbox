@@ -29,7 +29,7 @@ class ProduceRequestRateCheckInterceptor(
   private var monitorWriteStrategy: CompositeMonitorLogWriteStrategy = _
   private var fileMonitorWriteStrategy: FileMonitorLogWriteStrategy = _
   private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
-  private var monitorLogRollOutExtensionHandler: MonitorLogRollOutExtensionHandler = _
+  private var monitorLogRollOutExtensionHandler: ProduceRequestMonitorLogRollOutExtensionHandler = _
   private var monitorLogControlExecutor: ExecutorService = _
   private var measurementScheduler: ScheduledExecutorService = _
   private var lastMeasurementTimeMs = 0L
@@ -67,13 +67,16 @@ class ProduceRequestRateCheckInterceptor(
     monitorLogExtensionHandler = new MonitorLogExtensionHandler(
       monitorLogWriter,
       monitorLogControlExecutor,
-      targetName = "produce-request-throughput"
+      targetName = "produce-request-throughput",
     )
-    monitorLogRollOutExtensionHandler = new MonitorLogRollOutExtensionHandler(
+    val monitorLogRollOutDelegate = new MonitorLogRollOutExtensionHandler(
       monitorLogWriter,
       fileMonitorWriteStrategy,
-      monitorLogControlExecutor,
-      targetName = "produce-request-throughput-rollout"
+      monitorLogControlExecutor
+    )
+    monitorLogRollOutExtensionHandler = new ProduceRequestMonitorLogRollOutExtensionHandler(
+      monitorLogRollOutDelegate,
+      () => resetMeasurementBaseline()
     )
     measurementScheduler.scheduleAtFixedRate(
       () => runScheduledMeasurement(),
@@ -145,6 +148,13 @@ class ProduceRequestRateCheckInterceptor(
       case NonFatal(error) =>
         logger.error("Failed to emit produce request throughput measurement", error)
     }
+  }
+
+  private def resetMeasurementBaseline(): Unit = synchronized {
+    responseCounter.reset()
+    previousSuccessfulRequestCount = 0L
+    previousFailedRequestCount = 0L
+    lastMeasurementTimeMs = currentTimeMillis()
   }
 
   private def newMeasurementScheduler(): ScheduledExecutorService =
