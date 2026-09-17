@@ -17,9 +17,13 @@
 package kafka.interceptor
 
 import org.apache.kafka.common.utils.LogContext
-import org.junit.jupiter.api.Assertions.assertEquals
+import kafka.network.RequestChannel
+import org.apache.kafka.common.network.Send
+import org.apache.kafka.common.protocol.Errors
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertTrue}
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import org.mockito.Mockito.mock
 
 import java.nio.file.{Files, Path}
 import java.time.Duration
@@ -31,21 +35,27 @@ class ProduceRequestRateCheckInterceptorTest {
 
   @Test
   def testMonitorLogColumnOrderAndKafkaMessage(): Unit = {
-    val log = new ProduceRequestThroughputMonitorLog(2_001L, 1_001L, 2L, 1.998001998)
+    val log = new ProduceRequestThroughputMonitorLog(2_001L, 1_001L, 2L, 1L)
 
     assertEquals(util.List.of(
       "measured_at",
       "measurement_duration_ms",
-      "processed_req_cnt",
+      "success_processed_req_cnt",
+      "failed_processed_req_cnt",
       "throughput_req_per_sec"
     ), log.getHeaders)
     assertEquals(util.List.of(
       "1970-01-01T00:00:02.001Z",
       "1001",
       "2",
+      "1",
       "2.00"
     ), log.getValues)
     assertEquals("Produce Request Handling Thourghput: 2.00 req/s (2 reqs)", log.kafkaLogMessage)
+
+    val failedOnlyLog = new ProduceRequestThroughputMonitorLog(3_002L, 1_001L, 0L, 3L)
+    assertEquals("0.00", failedOnlyLog.formattedThroughput)
+    assertEquals("Produce Request Handling Thourghput: 0.00 req/s (0 reqs)", failedOnlyLog.kafkaLogMessage)
   }
 
   @Test
@@ -60,16 +70,39 @@ class ProduceRequestRateCheckInterceptorTest {
     interceptor.init()
 
     try {
-      interceptor.recordHandledProduceRequest()
+      interceptor.recordHandledProduceRequest(successful = true)
+      interceptor.recordHandledProduceRequest(successful = false)
       currentTimeMs = 2_001L
-      interceptor.recordHandledProduceRequest()
+      interceptor.recordHandledProduceRequest(successful = true)
     } finally {
       interceptor.shutdown()
     }
 
     assertEquals(util.List.of(
-      "measured_at,measurement_duration_ms,processed_req_cnt,throughput_req_per_sec",
-      "1970-01-01T00:00:02.001Z,1001,2,2.00"
+      "measured_at,measurement_duration_ms,success_processed_req_cnt,failed_processed_req_cnt,throughput_req_per_sec",
+      "1970-01-01T00:00:02.001Z,1001,2,1,2.00"
     ), Files.readAllLines(output))
+  }
+
+  @Test
+  def testClassifiesOnlyTerminalProduceResponses(): Unit = {
+    val interceptor = new ProduceRequestRateCheckInterceptor(
+      new LogContext(),
+      ProduceRequestThroughputSettings(tempDir.resolve("unused.csv"), 1_000L, Duration.ZERO, 0L)
+    )
+    val request = mock(classOf[RequestChannel.Request])
+    val send = mock(classOf[Send])
+
+    val successful = new RequestChannel.SendResponse(
+      request, send, None, None, errorCounts = Map(Errors.NONE -> 2))
+    val partiallyFailed = new RequestChannel.SendResponse(
+      request, send, None, None, errorCounts = Map(Errors.NONE -> 1, Errors.NOT_LEADER_OR_FOLLOWER -> 1))
+
+    assertTrue(interceptor.produceRequestSucceeded(successful).contains(true))
+    assertTrue(interceptor.produceRequestSucceeded(partiallyFailed).contains(false))
+    assertTrue(interceptor.produceRequestSucceeded(new RequestChannel.NoOpResponse(request)).contains(true))
+    assertTrue(interceptor.produceRequestSucceeded(new RequestChannel.CloseConnectionResponse(request)).contains(false))
+    assertFalse(interceptor.produceRequestSucceeded(new RequestChannel.StartThrottlingResponse(request)).isDefined)
+    assertFalse(interceptor.produceRequestSucceeded(new RequestChannel.EndThrottlingResponse(request)).isDefined)
   }
 }

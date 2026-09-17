@@ -25,26 +25,29 @@ import java.util.Locale
 final class ProduceRequestThroughputMonitorLog(
   val measuredAtMs: Long,
   val measurementDurationMs: Long,
-  val processedRequestCount: Long,
-  val throughputRequestPerSec: Double
+  val successfulProcessedRequestCount: Long,
+  val failedProcessedRequestCount: Long
 ) extends IMonitorLog {
   require(measurementDurationMs > 0, "measurementDurationMs must be positive")
-  require(processedRequestCount >= 0, "processedRequestCount must not be negative")
-  require(java.lang.Double.isFinite(throughputRequestPerSec) && throughputRequestPerSec >= 0,
-    "throughputRequestPerSec must be finite and non-negative")
+  require(successfulProcessedRequestCount >= 0, "successfulProcessedRequestCount must not be negative")
+  require(failedProcessedRequestCount >= 0, "failedProcessedRequestCount must not be negative")
+
+  val throughputRequestPerSec: Double =
+    successfulProcessedRequestCount.toDouble * 1000.0 / measurementDurationMs.toDouble
 
   val formattedThroughput: String =
     String.format(Locale.ROOT, "%.2f", Double.box(throughputRequestPerSec))
 
   def kafkaLogMessage: String =
-    s"Produce Request Handling Thourghput: $formattedThroughput req/s ($processedRequestCount reqs)"
+    s"Produce Request Handling Thourghput: $formattedThroughput req/s ($successfulProcessedRequestCount reqs)"
 
   override def getHeaders: util.List[String] = ProduceRequestThroughputMonitorLog.Headers
 
   override def getValues: util.List[String] = util.List.of(
     Instant.ofEpochMilli(measuredAtMs).toString,
     measurementDurationMs.toString,
-    processedRequestCount.toString,
+    successfulProcessedRequestCount.toString,
+    failedProcessedRequestCount.toString,
     formattedThroughput
   )
 }
@@ -53,7 +56,8 @@ object ProduceRequestThroughputMonitorLog {
   private val Headers: util.List[String] = util.List.of(
     "measured_at",
     "measurement_duration_ms",
-    "processed_req_cnt",
+    "success_processed_req_cnt",
+    "failed_processed_req_cnt",
     "throughput_req_per_sec"
   )
 }
