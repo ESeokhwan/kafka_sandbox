@@ -2,21 +2,21 @@ package kafka.interceptor
 
 import kafka.network.RequestChannel
 import moniq.writer.strategy.FileMonitorLogWriteStrategy
-import moniq.writer.strategy.FileMonitorLogWriteStrategy.Format
-import moniq.writer.{BatchPolicy, MonitorLogWriter}
+import moniq.writer.MonitorLogWriter
 import moniq.{MonitorLog, MonitorQueue}
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.ProduceRequest
 import org.apache.kafka.common.utils.{LogContext, Utils}
 
-import java.nio.file.Path
-import java.time.Duration
 import java.util.concurrent.{ConcurrentHashMap, ExecutorService}
 import java.util.concurrent.atomic.AtomicLong
 import scala.jdk.CollectionConverters.ConcurrentMapHasAsScala
 
-class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
+class MonitorLoggingBrokerInterceptor(
+  val logContext: LogContext,
+  settings: MonitorLoggingSettings
+) extends IBrokerInterceptor {
 
   private class Timestamps {
     var requestedTime: Long = _
@@ -38,8 +38,10 @@ class MonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBroke
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
-    monitorWriteStrategy = new FileMonitorLogWriteStrategy(Path.of("output/monitor.log"), Duration.ZERO, 1_000_000, Format.COMMA_SEPARATED)
-    monitorLogWriter = new MonitorLogWriter(monitorQueue, monitorWriteStrategy, BatchPolicy.unbounded())
+    monitorWriteStrategy = new FileMonitorLogWriteStrategy(
+      settings.outputPath, settings.rollOutInterval, settings.maxLogsPerFile, settings.format)
+    monitorLogWriter = new MonitorLogWriter(
+      monitorQueue, monitorWriteStrategy, settings.batchPolicy, settings.flushPolicy, settings.preprocessingWorkerCount)
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
     monitorLogControlExecutor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-control")
