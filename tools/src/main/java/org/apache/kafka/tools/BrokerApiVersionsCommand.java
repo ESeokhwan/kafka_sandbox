@@ -241,6 +241,11 @@ public class BrokerApiVersionsCommand {
             throw new RuntimeException("Request " + request.apiKey() + " failed on brokers " + bootstrapBrokers);
         }
 
+        /** Sends a broker-local request to one of the configured bootstrap brokers. */
+        public AbstractResponse sendToBootstrapBroker(AbstractRequest.Builder<?> request) {
+            return sendAnyNode(request);
+        }
+
         protected KafkaFuture<NodeApiVersions> getNodeApiVersions(Node node) {
             final KafkaFutureImpl<NodeApiVersions> future = new KafkaFutureImpl<>();
             try {

@@ -10,6 +10,8 @@ import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.ProduceRequest
 import org.apache.kafka.common.utils.{LogContext, Utils}
 
+import java.util.concurrent.{ArrayBlockingQueue, ExecutorService, ThreadFactory, ThreadPoolExecutor, TimeUnit}
+
 class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) extends IBrokerInterceptor {
 
   private val messageAdapter: ILatencyMonitoringMessageAdaptor = new FastExtractOnlyJsonBasedLatencyMonitoringMessageAdaptor()
@@ -17,6 +19,8 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
   private var monitorQueue: MonitorQueue = _
   private var monitorLogWriter: MonitorLogWriter = _
   private var monitorLogThread: Thread = _
+  private var monitorLogExtensionHandler: MonitorLogExtensionHandler = _
+  private var monitorLogExtensionExecutor: ExecutorService = _
 
   override def init(): Unit = {
     monitorQueue = new MonitorQueue()
@@ -24,6 +28,14 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
       monitorQueue, new KafkaLogWriteStrategy(logContext), BatchPolicy.unbounded())
     monitorLogThread = new Thread(monitorLogWriter)
     monitorLogThread.start()
+    monitorLogExtensionExecutor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue[Runnable](1), new ThreadFactory {
+      override def newThread(runnable: Runnable): Thread = {
+        val thread = new Thread(runnable, "monitor-log-extension")
+        thread.setDaemon(true)
+        thread
+      }
+    }, new ThreadPoolExecutor.AbortPolicy())
+    monitorLogExtensionHandler = new MonitorLogExtensionHandler(monitorLogWriter, monitorLogExtensionExecutor)
   }
 
   override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
@@ -79,9 +91,15 @@ class JsonBasedMonitorLoggingBrokerInterceptor(val logContext: LogContext) exten
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {}
 
+  override def extensionHandlers: Seq[BrokerExtensionHandler] = Option(monitorLogExtensionHandler).toSeq
+
   override def shutdown(): Unit = {
     if (monitorLogWriter == null || monitorLogThread == null) {
       return
+    }
+
+    if (monitorLogExtensionHandler != null) {
+      monitorLogExtensionHandler.shutdown()
     }
 
     monitorLogWriter.gracefulShutdown()

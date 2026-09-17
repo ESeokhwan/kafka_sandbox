@@ -46,7 +46,7 @@ import org.apache.kafka.server.ProcessRole
 import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.kafka.server.common.MetadataVersion
 import org.apache.kafka.server.config.AbstractKafkaConfig.getMap
-import org.apache.kafka.server.config.{AbstractKafkaConfig, KRaftConfigs, QuotaConfig, ReplicationConfigs, ServerConfigs, ServerLogConfigs}
+import org.apache.kafka.server.config.{AbstractKafkaConfig, BrokerExtensionConfigs, KRaftConfigs, QuotaConfig, ReplicationConfigs, ServerConfigs, ServerLogConfigs}
 import org.apache.kafka.server.log.remote.storage.RemoteLogManagerConfig
 import org.apache.kafka.server.metrics.MetricConfigs
 import org.apache.kafka.storage.internals.log.{CleanerConfig, LogConfig}
@@ -218,6 +218,12 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
   val brokerSessionTimeoutMs: Int = getInt(KRaftConfigs.BROKER_SESSION_TIMEOUT_MS_CONFIG)
   val controllerPerformanceSamplePeriodMs: Long = getLong(KRaftConfigs.CONTROLLER_PERFORMANCE_SAMPLE_PERIOD_MS)
   val controllerPerformanceAlwaysLogThresholdMs: Long = getLong(KRaftConfigs.CONTROLLER_PERFORMANCE_ALWAYS_LOG_THRESHOLD_MS)
+
+  val brokerExtensionRequestEnabled: Boolean = getBoolean(BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_ENABLED_CONFIG)
+  val brokerExtensionRequestAllowedListeners: Set[String] = getList(BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_ALLOWED_LISTENERS_CONFIG).asScala.toSet
+  val brokerExtensionRequestMaxPayloadBytes: Int = getInt(BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_MAX_PAYLOAD_BYTES_CONFIG)
+  val brokerExtensionRequestMaxTimeoutMs: Int = getInt(BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_MAX_TIMEOUT_MS_CONFIG)
+  val brokerExtensionRequestMaxInFlightPerTarget: Int = getInt(BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_MAX_IN_FLIGHT_PER_TARGET_CONFIG)
 
   private def parseProcessRoles(): Set[ProcessRole] = {
     val roles = getList(KRaftConfigs.PROCESS_ROLES_CONFIG).asScala.map {
