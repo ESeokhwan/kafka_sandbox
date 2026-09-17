@@ -17,12 +17,16 @@
 package kafka.interceptor
 
 import moniq.MonitorLog
+import moniq.MonitorQueue
+import moniq.writer.{BatchPolicy, MonitorLogWriter}
 import moniq.writer.strategy.FileMonitorLogWriteStrategy
 import org.apache.kafka.common.Uuid
 import org.apache.kafka.common.errors.InvalidRequestException
-import org.junit.jupiter.api.Assertions.{assertFalse, assertInstanceOf, assertThrows, assertTrue}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertInstanceOf, assertThrows, assertTrue}
 import org.junit.jupiter.api.{AfterEach, Test}
 import org.junit.jupiter.api.io.TempDir
+import org.mockito.ArgumentMatchers.any
+import org.mockito.Mockito.{mock, verify, when}
 
 import java.nio.file.{Files, Path}
 import java.util.concurrent.{ExecutionException, TimeUnit}
@@ -33,28 +37,33 @@ class MonitorLogRollOutExtensionHandlerTest {
 
   private val executor = MonitorLogExtensionHandler.newBoundedExecutor("monitor-log-rollout-test")
   private var strategy: FileMonitorLogWriteStrategy = _
+  private var writer: MonitorLogWriter = _
+  private var writerThread: Thread = _
   private var handler: MonitorLogRollOutExtensionHandler = _
 
   @AfterEach
   def tearDown(): Unit = {
     if (handler != null) handler.shutdown()
     executor.shutdownNow()
+    if (writer != null && writerThread != null) {
+      writer.gracefulShutdown()
+      writerThread.join()
+    }
     if (strategy != null) strategy.close()
   }
 
   @Test
-  def testRollOutClosesCurrentFileAndDeduplicatesRequestId(): Unit = {
+  def testFlushAndRollOutClosesCurrentFileAndDeduplicatesRequestId(): Unit = {
     val file = tempDir.resolve("monitor.log")
-    strategy = new FileMonitorLogWriteStrategy(file)
-    handler = new MonitorLogRollOutExtensionHandler(strategy, executor)
+    initializeHandler(file)
     val requestId = Uuid.randomUuid()
 
-    strategy.write(log("before"))
+    writer.submit(log("before"))
     handler.handle(command(requestId)).toCompletableFuture.get(5, TimeUnit.SECONDS)
-    strategy.write(log("after-first-roll-out"))
+    writer.submit(log("after-first-roll-out"))
     handler.handle(command(requestId)).toCompletableFuture.get(5, TimeUnit.SECONDS)
-    strategy.write(log("after-retry"))
-    strategy.commit()
+    writer.submit(log("after-retry"))
+    writer.flush()
 
     assertTrue(Files.exists(file))
     assertTrue(Files.exists(tempDir.resolve("monitor.1.log")))
@@ -62,9 +71,22 @@ class MonitorLogRollOutExtensionHandlerTest {
   }
 
   @Test
-  def testRejectsUnsupportedOperationAndPayload(): Unit = {
+  def testReturnsFailureWhenFlushAndRunReportsCommitFailure(): Unit = {
     strategy = new FileMonitorLogWriteStrategy(tempDir.resolve("monitor.log"))
-    handler = new MonitorLogRollOutExtensionHandler(strategy, executor)
+    writer = mock(classOf[MonitorLogWriter])
+    when(writer.flushAndRun(any(classOf[Runnable]))).thenReturn(false)
+    handler = new MonitorLogRollOutExtensionHandler(writer, strategy, executor)
+
+    val error = awaitFailure(command())
+
+    assertInstanceOf(classOf[IllegalStateException], error)
+    assertEquals("Monitor log commit failed", error.getMessage)
+    verify(writer).flushAndRun(any(classOf[Runnable]))
+  }
+
+  @Test
+  def testRejectsUnsupportedOperationAndPayload(): Unit = {
+    initializeHandler(tempDir.resolve("monitor.log"))
 
     assertInstanceOf(classOf[InvalidRequestException], awaitFailure(command(operation = "rollup")))
     assertInstanceOf(classOf[InvalidRequestException], awaitFailure(command(payload = Array[Byte](1))))
@@ -74,6 +96,14 @@ class MonitorLogRollOutExtensionHandlerTest {
     val error = assertThrows(classOf[ExecutionException], () =>
       handler.handle(command).toCompletableFuture.get(5, TimeUnit.SECONDS))
     error.getCause
+  }
+
+  private def initializeHandler(file: Path): Unit = {
+    strategy = new FileMonitorLogWriteStrategy(file)
+    writer = new MonitorLogWriter(new MonitorQueue(), strategy, BatchPolicy.unbounded())
+    writerThread = new Thread(writer)
+    writerThread.start()
+    handler = new MonitorLogRollOutExtensionHandler(writer, strategy, executor)
   }
 
   private def command(

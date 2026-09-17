@@ -17,14 +17,16 @@
 package kafka.interceptor
 
 import moniq.writer.strategy.FileMonitorLogWriteStrategy
+import moniq.writer.MonitorLogWriter
 import org.apache.kafka.common.errors.InvalidRequestException
 
 import java.util
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{CompletableFuture, CompletionStage, ExecutorService, RejectedExecutionException}
 
-/** Rolls out the active monitor log file without imposing a writer queue boundary. */
+/** Flushes and rolls out the active monitor log file at a writer queue boundary. */
 final class MonitorLogRollOutExtensionHandler(
+  monitorLogWriter: MonitorLogWriter,
   fileMonitorLogWriteStrategy: FileMonitorLogWriteStrategy,
   executor: ExecutorService,
   maxRememberedRequestIds: Int = 1024
@@ -41,13 +43,13 @@ final class MonitorLogRollOutExtensionHandler(
 
   override def handle(command: BrokerExtensionCommand): CompletionStage[BrokerExtensionResult] = {
     if (!accepting.get()) {
-      return CompletableFuture.failedFuture(new IllegalStateException("Monitor log roll-out handler is shutting down"))
+      return CompletableFuture.failedFuture(new IllegalStateException("Monitor log rollout handler is shutting down"))
     }
     try {
       CompletableFuture.supplyAsync(() => rollOut(command), executor)
     } catch {
       case _: RejectedExecutionException =>
-        CompletableFuture.failedFuture(new IllegalStateException("Monitor log roll-out handler is shutting down"))
+        CompletableFuture.failedFuture(new IllegalStateException("Monitor log rollout handler is shutting down"))
     }
   }
 
@@ -56,7 +58,7 @@ final class MonitorLogRollOutExtensionHandler(
   }
 
   private def rollOut(command: BrokerExtensionCommand): BrokerExtensionResult = {
-    if (command.operation != "roll-out") {
+    if (command.operation != "flush-and-rollout") {
       throw new InvalidRequestException(s"Unknown monitor-log-rollout operation: ${command.operation}")
     }
     if (command.payloadVersion != 0) {
@@ -73,8 +75,20 @@ final class MonitorLogRollOutExtensionHandler(
       }
     }
     if (isNew) {
-      fileMonitorLogWriteStrategy.rollOut()
+      flushAndRollOut()
     }
     BrokerExtensionResult()
+  }
+
+  private def flushAndRollOut(): Unit = {
+    try {
+      if (!monitorLogWriter.flushAndRun(fileMonitorLogWriteStrategy.rollOutAction())) {
+        throw new IllegalStateException("Monitor log commit failed")
+      }
+    } catch {
+      case error: InterruptedException =>
+        Thread.currentThread().interrupt()
+        throw new IllegalStateException("Monitor log flush and rollout interrupted", error)
+    }
   }
 }
