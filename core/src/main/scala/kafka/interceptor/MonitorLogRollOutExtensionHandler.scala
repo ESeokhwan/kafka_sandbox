@@ -43,13 +43,13 @@ final class MonitorLogRollOutExtensionHandler(
 
   override def handle(command: BrokerExtensionCommand): CompletionStage[BrokerExtensionResult] = {
     if (!accepting.get()) {
-      return CompletableFuture.failedFuture(new IllegalStateException("Monitor log roll-out handler is shutting down"))
+      return CompletableFuture.failedFuture(new IllegalStateException("Monitor log rollout handler is shutting down"))
     }
     try {
       CompletableFuture.supplyAsync(() => rollOut(command), executor)
     } catch {
       case _: RejectedExecutionException =>
-        CompletableFuture.failedFuture(new IllegalStateException("Monitor log roll-out handler is shutting down"))
+        CompletableFuture.failedFuture(new IllegalStateException("Monitor log rollout handler is shutting down"))
     }
   }
 
@@ -58,7 +58,7 @@ final class MonitorLogRollOutExtensionHandler(
   }
 
   private def rollOut(command: BrokerExtensionCommand): BrokerExtensionResult = {
-    if (command.operation != "roll-out") {
+    if (command.operation != "flush-and-rollout") {
       throw new InvalidRequestException(s"Unknown monitor-log-rollout operation: ${command.operation}")
     }
     if (command.payloadVersion != 0) {
@@ -88,7 +88,7 @@ final class MonitorLogRollOutExtensionHandler(
     } catch {
       case error: InterruptedException =>
         Thread.currentThread().interrupt()
-        throw new IllegalStateException("Monitor log flush and roll-out interrupted", error)
+        throw new IllegalStateException("Monitor log flush and rollout interrupted", error)
     }
   }
 }
