@@ -29,9 +29,12 @@ import java.util.concurrent.{ArrayBlockingQueue, CompletableFuture, CompletionSt
 final class MonitorLogExtensionHandler(
   monitorLogWriter: MonitorLogWriter,
   executor: ExecutorService,
-  maxRememberedDividerRequestIds: Int = 1024
+  maxRememberedDividerRequestIds: Int = 1024,
+  targetName: String = "monitor-log"
 ) extends BrokerExtensionHandler {
-  override val target: String = "monitor-log"
+  require(targetName != null && targetName.nonEmpty, "targetName must not be empty")
+
+  override val target: String = targetName
 
   private val accepting = new AtomicBoolean(true)
   private val dividerRequestIds = new util.LinkedHashMap[String, java.lang.Boolean]() {

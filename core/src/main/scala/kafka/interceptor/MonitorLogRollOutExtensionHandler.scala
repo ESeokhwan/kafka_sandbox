@@ -29,9 +29,12 @@ final class MonitorLogRollOutExtensionHandler(
   monitorLogWriter: MonitorLogWriter,
   fileMonitorLogWriteStrategy: FileMonitorLogWriteStrategy,
   executor: ExecutorService,
-  maxRememberedRequestIds: Int = 1024
+  maxRememberedRequestIds: Int = 1024,
+  targetName: String = "monitor-log-rollout"
 ) extends BrokerExtensionHandler {
-  override val target: String = "monitor-log-rollout"
+  require(targetName != null && targetName.nonEmpty, "targetName must not be empty")
+
+  override val target: String = targetName
 
   private val accepting = new AtomicBoolean(true)
   private val requestIds = new util.LinkedHashMap[String, java.lang.Boolean]() {
