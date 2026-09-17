@@ -22,9 +22,11 @@ import moniq.writer.{BatchPolicy, MonitorLogWriter}
 import moniq.writer.strategy.FileMonitorLogWriteStrategy
 import org.apache.kafka.common.Uuid
 import org.apache.kafka.common.errors.InvalidRequestException
-import org.junit.jupiter.api.Assertions.{assertFalse, assertInstanceOf, assertThrows, assertTrue}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertInstanceOf, assertThrows, assertTrue}
 import org.junit.jupiter.api.{AfterEach, Test}
 import org.junit.jupiter.api.io.TempDir
+import org.mockito.ArgumentMatchers.any
+import org.mockito.Mockito.{mock, verify, when}
 
 import java.nio.file.{Files, Path}
 import java.util.concurrent.{ExecutionException, TimeUnit}
@@ -43,7 +45,7 @@ class MonitorLogRollOutExtensionHandlerTest {
   def tearDown(): Unit = {
     if (handler != null) handler.shutdown()
     executor.shutdownNow()
-    if (writer != null) {
+    if (writer != null && writerThread != null) {
       writer.gracefulShutdown()
       writerThread.join()
     }
@@ -51,7 +53,7 @@ class MonitorLogRollOutExtensionHandlerTest {
   }
 
   @Test
-  def testRollOutClosesCurrentFileAndDeduplicatesRequestId(): Unit = {
+  def testFlushAndRollOutClosesCurrentFileAndDeduplicatesRequestId(): Unit = {
     val file = tempDir.resolve("monitor.log")
     initializeHandler(file)
     val requestId = Uuid.randomUuid()
@@ -66,6 +68,20 @@ class MonitorLogRollOutExtensionHandlerTest {
     assertTrue(Files.exists(file))
     assertTrue(Files.exists(tempDir.resolve("monitor.1.log")))
     assertFalse(Files.exists(tempDir.resolve("monitor.2.log")))
+  }
+
+  @Test
+  def testReturnsFailureWhenFlushAndRunReportsCommitFailure(): Unit = {
+    strategy = new FileMonitorLogWriteStrategy(tempDir.resolve("monitor.log"))
+    writer = mock(classOf[MonitorLogWriter])
+    when(writer.flushAndRun(any(classOf[Runnable]))).thenReturn(false)
+    handler = new MonitorLogRollOutExtensionHandler(writer, strategy, executor)
+
+    val error = awaitFailure(command())
+
+    assertInstanceOf(classOf[IllegalStateException], error)
+    assertEquals("Monitor log commit failed", error.getMessage)
+    verify(writer).flushAndRun(any(classOf[Runnable]))
   }
 
   @Test
