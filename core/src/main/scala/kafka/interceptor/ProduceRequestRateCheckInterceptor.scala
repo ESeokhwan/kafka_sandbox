@@ -4,11 +4,14 @@ import kafka.interceptor.strategy.ProduceRequestThroughputKafkaLogWriteStrategy
 import kafka.interceptor.util.ProduceRequestOutcomeCounter
 import kafka.network.RequestChannel
 import moniq.MonitorQueue
+import moniq.util.{FastExtractOnlyJsonBasedLatencyMonitoringMessageAdaptor, ILatencyMonitoringMessageAdaptor}
 import moniq.writer.strategy.FileMonitorLogWriteStrategy.Format
 import moniq.writer.strategy.{CompositeMonitorLogWriteStrategy, FileMonitorLogWriteStrategy}
 import moniq.writer.{BatchPolicy, MonitorLogWriter}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
-import org.apache.kafka.common.utils.LogContext
+import org.apache.kafka.common.record.MemoryRecords
+import org.apache.kafka.common.requests.ProduceRequest
+import org.apache.kafka.common.utils.{LogContext, Utils}
 
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{ExecutorService, Executors, ScheduledExecutorService, ThreadFactory, TimeUnit}
@@ -22,6 +25,7 @@ class ProduceRequestRateCheckInterceptor(
 
   private val logger = logContext.logger(classOf[ProduceRequestRateCheckInterceptor])
   private val acceptingRecords = new AtomicBoolean(false)
+  private val messageAdapter: ILatencyMonitoringMessageAdaptor = new FastExtractOnlyJsonBasedLatencyMonitoringMessageAdaptor()
 
   private var responseCounter: ProduceRequestOutcomeCounter = _
   private var monitorLogWriter: MonitorLogWriter = _
@@ -92,7 +96,24 @@ class ProduceRequestRateCheckInterceptor(
 
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = {
     if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
-      produceRequestSucceeded(response).foreach(recordHandledProduceRequest)
+      produceRequestSucceeded(response).foreach(success => {
+        val produceRequest = response.request.body[ProduceRequest]
+        produceRequest.data().topicData().forEach(topic => topic.partitionData.forEach { partition =>
+          val memoryRecords: MemoryRecords = partition.records.asInstanceOf[MemoryRecords]
+          memoryRecords.batches.forEach(batch => {
+            batch.forEach(record => {
+              val value = record.value()
+              if (value != null) {
+                val message = Utils.utf8(value)
+                val coreMessage = messageAdapter.extractMessageId(message)
+                if (coreMessage.startsWith("R")) {
+                  recordHandledProduceRequest(success)
+                }
+              }
+            })
+          })
+        })
+      })
     }
   }
 
