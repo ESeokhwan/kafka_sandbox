@@ -38,12 +38,14 @@ import org.apache.kafka.server.network.BrokerEndPoint
 import org.apache.kafka.storage.internals.log.AppendOrigin
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{Test, Timeout}
+import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 
 import java.io.{ByteArrayOutputStream, PrintStream}
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.UTF_8
+import java.nio.file.{Files, Path}
 import java.time.Duration
 import java.util
 import java.util.concurrent.TimeUnit
@@ -64,8 +66,8 @@ class GlobalSequenceFaultIntegrationTest {
   private def records(numbers: Seq[Int]): MemoryRecords =
     MemoryRecords.withRecords(Compression.NONE, numbers.map(n => new SimpleRecord(value(n))): _*)
 
-  private class Context extends AutoCloseable {
-    val cluster = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder().setNumBrokerNodes(3).setNumControllerNodes(1).build())
+  private class Context(overrides: Map[String, String] = Map.empty) extends AutoCloseable {
+    private val builder = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder().setNumBrokerNodes(3).setNumControllerNodes(1).build())
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "2")
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, "3")
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, "2")
@@ -73,7 +75,8 @@ class GlobalSequenceFaultIntegrationTest {
       .setConfigProp(GlobalSequenceCoordinatorConfig.RETENTION_REFRESH_INTERVAL_MS_CONFIG, "100")
       // Paused index followers must stay in ISR, so the test controls HW rather than racing ISR eviction.
       .setConfigProp("replica.lag.time.max.ms", "600000")
-      .build()
+    overrides.foreach { case (key, value) => builder.setConfigProp(key, value) }
+    val cluster = builder.build()
     var admin: Admin = _
     val stopped = mutable.Set.empty[Int]
     def brokers: Vector[BrokerServer] = cluster.brokers().values().asScala.toVector.sortBy(_.config.brokerId)
@@ -372,8 +375,12 @@ class GlobalSequenceFaultIntegrationTest {
   }
 
   @Test
-  def testRetainedIndexReportsMissingDataAndRecreatedTopicStartsANewSequence(): Unit = {
-    val c = new Context
+  def testRetainedIndexReportsMissingDataAndRecreatedTopicStartsANewSequence(@TempDir monitorOutput: Path): Unit = {
+    val c = new Context(Map(
+      GlobalSequenceCoordinatorConfig.MONITOR_TOPIC_CONFIG -> "recreated",
+      GlobalSequenceCoordinatorConfig.MONITOR_INTERVAL_MS_CONFIG -> "100",
+      GlobalSequenceCoordinatorConfig.MONITOR_OUTPUT_DIR_CONFIG -> monitorOutput.toString
+    ))
     try {
       c.start()
       val old = c.create("recreated")
@@ -382,7 +389,13 @@ class GlobalSequenceFaultIntegrationTest {
       val owner = c.live.head.indexRoutingManager.describePartition(old.key(1), 5000).get(6, TimeUnit.SECONDS).value.currentIndexer().get()
       val delayed = new AppendRequest(new PhysicalBatch(old.key(1), 0, 0, 1), -1, 1, owner)
       val indexes = c.verify(old, Map(0 -> Seq(10, 11, 12), 1 -> Seq(20)))
-      val cacheMetrics = c.leader(c.indexTp(old)).metrics
+      val indexLeader = c.leader(c.indexTp(old))
+      val monitorCsv = monitorOutput.resolve(s"global-sequence-monitor-${indexLeader.config.nodeId}.csv")
+      c.await("The index leader sampled the committed global end") {
+        Files.exists(monitorCsv) && Files.readAllLines(monitorCsv).asScala.exists(
+          _.endsWith(s",${old.name},${old.id},global-sequence-monitor,committed-global-end-offset,${c.indexTp(old).partition()},4"))
+      }
+      val cacheMetrics = indexLeader.metrics
       def cacheHits: Long = cacheMetrics.metric(cacheMetrics.metricName("hits-total", "global-sequence-index-cache"))
         .metricValue().asInstanceOf[java.lang.Number].longValue()
       val beforeWarm = cacheHits

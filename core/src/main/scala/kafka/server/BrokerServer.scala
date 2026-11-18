@@ -19,7 +19,7 @@ package kafka.server
 
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter}
 import kafka.coordinator.transaction.TransactionCoordinator
-import kafka.interceptor.{BrokerInterceptors, JsonBasedMonitorLoggingBrokerInterceptor, MonitorLoggingBrokerInterceptor, MonitorLoggingSettings, ProduceRequestRateCheckInterceptor, ProduceRequestThroughputSettings}
+import kafka.interceptor.{BrokerInterceptors, GlobalSequenceMonitoringInterceptor, JsonBasedMonitorLoggingBrokerInterceptor, MonitorLoggingBrokerInterceptor, MonitorLoggingSettings, ProduceRequestRateCheckInterceptor, ProduceRequestThroughputSettings}
 import kafka.log.LogManager
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
@@ -286,10 +286,14 @@ class BrokerServer(
       ))
       unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
 
+      val globalConfig = config.globalSequenceCoordinatorConfig
+      val globalSequenceMonitor = Option.when(globalConfig.monitorTopic().nonEmpty) {
+        new GlobalSequenceMonitoringInterceptor(globalConfig, config.nodeId, () => metadataCache.getImage(), metrics, time, logContext)
+      }
       brokerInterceptors = new BrokerInterceptors(Vector(
         new JsonBasedMonitorLoggingBrokerInterceptor(logContext, MonitorLoggingSettings.jsonBasedMonitorLogging(config)),
         new ProduceRequestRateCheckInterceptor(logContext, ProduceRequestThroughputSettings.from(config))
-      ))
+      ) ++ globalSequenceMonitor)
       brokerInterceptors.init()
 
       // Create and start the socket server acceptor threads so that the bound port is known.
@@ -422,7 +426,6 @@ class BrokerServer(
         config, clientToControllerChannelManager, groupCoordinator,
         transactionCoordinator, shareCoordinator)
 
-      val globalConfig = config.globalSequenceCoordinatorConfig
       globalSequenceResources = new org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources(globalConfig, metrics, time)
       globalSequenceCoordinator = createGlobalSequenceCoordinator()
       val globalSequenceTransport = new GlobalSequenceNetworkClient(NetworkUtils.buildNetworkClient("GlobalSequence", config, metrics, time,
@@ -442,6 +445,7 @@ class BrokerServer(
       globalSequenceIndexerManager = GlobalSequenceIndexerManager(config.brokerId, config.globalSequenceCoordinatorConfig,
         replicaManager, indexRoutingManager, kafkaScheduler, time, globalSequenceResources)
       replicaManager.setGlobalSequenceIndexerManager(globalSequenceIndexerManager)
+      globalSequenceMonitor.foreach(_.start(globalSequenceCoordinator))
 
       dynamicConfigHandlers = Map[ConfigType, ConfigHandler](
         ConfigType.TOPIC -> new TopicConfigHandler(replicaManager, config, quotaManagers),

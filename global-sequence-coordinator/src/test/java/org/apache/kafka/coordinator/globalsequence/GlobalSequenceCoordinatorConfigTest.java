@@ -68,6 +68,8 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(4096, config.spiMaxEntriesPerTopic());
         assertEquals(100000, config.indexCacheMaxEntries());
         assertEquals(10000, config.indexCacheMaxEntriesPerTopic());
+        assertEquals("", config.monitorTopic());
+        assertEquals(1000, config.monitorIntervalMs());
 
         Properties props = config.indexTopicConfigs();
         assertEquals("delete", props.getProperty(TopicConfig.CLEANUP_POLICY_CONFIG));

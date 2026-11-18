@@ -58,6 +58,8 @@ public interface GlobalSequenceCoordinator {
 
     CompletableFuture<Optional<PhysicalBatch>> committedProgress(PartitionKey partition);
 
+    CompletableFuture<GlobalSequenceLookup.Snapshot> committedSnapshot(Uuid topicId, int expectedCoordinatorEpoch);
+
     CompletableFuture<GlobalSequenceLookup.Result> lookupIndex(GlobalSequenceLookup.Request request, int expectedCoordinatorEpoch);
 
     void shutdown();

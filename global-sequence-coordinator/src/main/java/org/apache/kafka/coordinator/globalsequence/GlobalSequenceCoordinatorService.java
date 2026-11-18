@@ -407,6 +407,24 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                                GlobalSequenceCoordinatorShard shard) { }
 
     @Override
+    public CompletableFuture<GlobalSequenceLookup.Snapshot> committedSnapshot(Uuid topicId, int expectedCoordinatorEpoch) {
+        try {
+            requireReady();
+            int partition = partitionFor(topicId);
+            return runtime.scheduleReadOperationWithContext("sample-global-index-progress", indexPartition(partition), (shard, context) -> {
+                requireReady();
+                requireEnabledTopic(new PartitionKey(topicId, 0));
+                validateCoordinatorEpoch(expectedCoordinatorEpoch, context.leaderEpoch());
+                return new GlobalSequenceLookup.Snapshot(
+                    metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id(), partition,
+                    context.leaderEpoch(), context.highWatermark(), shard.committedNextGlobalOffset(topicId));
+            });
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    @Override
     public CompletableFuture<GlobalSequenceLookup.Result> lookupIndex(GlobalSequenceLookup.Request request, int expectedCoordinatorEpoch) {
         try {
             requireReady();

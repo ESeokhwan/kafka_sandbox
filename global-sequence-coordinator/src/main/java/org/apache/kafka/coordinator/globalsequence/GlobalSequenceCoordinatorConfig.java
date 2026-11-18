@@ -30,6 +30,7 @@ import static org.apache.kafka.common.config.ConfigDef.Importance.MEDIUM;
 import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
 import static org.apache.kafka.common.config.ConfigDef.Type.INT;
 import static org.apache.kafka.common.config.ConfigDef.Type.SHORT;
+import static org.apache.kafka.common.config.ConfigDef.Type.STRING;
 
 /**
  * Static broker settings for the global sequence coordinator.
@@ -143,6 +144,10 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT = 10000;
     public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum lookup cache entries per source topic UUID across index generations. The least recently used entries are evicted first.";
 
+    public static final String MONITOR_TOPIC_CONFIG = "global.sequence.monitor.topic";
+    public static final String MONITOR_INTERVAL_MS_CONFIG = "global.sequence.monitor.interval.ms";
+    public static final String MONITOR_OUTPUT_DIR_CONFIG = "global.sequence.monitor.output.dir";
+
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
         .define(INDEX_TOPIC_NUM_PARTITIONS_CONFIG, INT, INDEX_TOPIC_NUM_PARTITIONS_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_NUM_PARTITIONS_DOC)
         .define(INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, SHORT, INDEX_TOPIC_REPLICATION_FACTOR_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_REPLICATION_FACTOR_DOC)
@@ -168,7 +173,10 @@ public class GlobalSequenceCoordinatorConfig {
         .define(SPI_ENTRIES_PER_LEVEL_CONFIG, INT, SPI_ENTRIES_PER_LEVEL_DEFAULT, atLeast(1), MEDIUM, SPI_ENTRIES_PER_LEVEL_DOC)
         .define(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, SPI_MAX_ENTRIES_PER_TOPIC_DOC)
         .define(INDEX_CACHE_MAX_ENTRIES_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_DEFAULT, atLeast(0), MEDIUM, INDEX_CACHE_MAX_ENTRIES_DOC)
-        .define(INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC);
+        .define(INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC)
+        .define(MONITOR_TOPIC_CONFIG, STRING, "", MEDIUM, "Topic to monitor for global sequence benchmark diagnostics. An empty name disables monitoring.")
+        .define(MONITOR_INTERVAL_MS_CONFIG, INT, 1000, atLeast(1), MEDIUM, "Interval in milliseconds between global sequence monitoring samples.")
+        .define(MONITOR_OUTPUT_DIR_CONFIG, STRING, "global-sequence-monitor", MEDIUM, "Directory for broker-specific global sequence monitoring CSV files.");
 
     private final AbstractConfig config;
 
@@ -225,6 +233,18 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int appendLingerMs() {
         return config.getInt(APPEND_LINGER_MS_CONFIG);
+    }
+
+    public String monitorTopic() {
+        return config.getString(MONITOR_TOPIC_CONFIG);
+    }
+
+    public int monitorIntervalMs() {
+        return config.getInt(MONITOR_INTERVAL_MS_CONFIG);
+    }
+
+    public String monitorOutputDir() {
+        return config.getString(MONITOR_OUTPUT_DIR_CONFIG);
     }
 
     public int maxPendingOperations() {
