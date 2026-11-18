@@ -17,9 +17,13 @@
 
 package org.apache.kafka.coordinator.globalsequence;
 
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.timeline.SnapshotRegistry;
 
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +32,7 @@ import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GlobalSequenceCoordinatorConfigTest {
     private GlobalSequenceCoordinatorConfig config(Map<String, ?> overrides) {
@@ -58,6 +63,9 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(128, config.workerQueueSize());
         assertEquals(2, config.readerNumThreads());
         assertEquals(256 * 1024 * 1024, config.lookupScanMaxBytes());
+        assertEquals(8, config.spiBaseIntervalBatches());
+        assertEquals(256, config.spiEntriesPerLevel());
+        assertEquals(4096, config.spiMaxEntriesPerTopic());
 
         Properties props = config.indexTopicConfigs();
         assertEquals("delete", props.getProperty(TopicConfig.CLEANUP_POLICY_CONFIG));
@@ -110,5 +118,31 @@ class GlobalSequenceCoordinatorConfigTest {
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, 4)));
         assertThrows(ConfigException.class, () -> config(Map.of(
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_SEGMENT_BYTES_CONFIG, 1024)));
+    }
+
+    @Test
+    void testSparseOverridesReachShardConstruction() {
+        GlobalSequenceCoordinatorConfig config = config(Map.of(
+            GlobalSequenceCoordinatorConfig.SPI_BASE_INTERVAL_BATCHES_CONFIG, 2,
+            GlobalSequenceCoordinatorConfig.SPI_ENTRIES_PER_LEVEL_CONFIG, 2,
+            GlobalSequenceCoordinatorConfig.SPI_MAX_ENTRIES_PER_TOPIC_CONFIG, 3));
+        assertEquals(2, config.spiBaseIntervalBatches());
+        assertEquals(2, config.spiEntriesPerLevel());
+        assertEquals(3, config.spiMaxEntriesPerTopic());
+        GlobalSequenceCoordinatorShard shard = new GlobalSequenceCoordinatorShardBuilder().withConfig(config)
+            .withSnapshotRegistry(new SnapshotRegistry(new LogContext())).build();
+        Uuid topicId = new Uuid(1, 2);
+        shard.replay(0, RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH,
+            GlobalSequenceCoordinatorRecordHelpers.newIndexerFenceRecord(topicId, 0, 1, 1, 0, new Uuid(3, 4)));
+        for (int i = 0; i < 10; i++) {
+            shard.replay(2L * i + 1, RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH,
+                GlobalSequenceCoordinatorRecordHelpers.newBatchIndexRecord(topicId, 0, i, i, 1, i));
+            shard.replay(2L * i + 2, RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH,
+                GlobalSequenceCoordinatorRecordHelpers.newTopicMetadataRecord(topicId, i + 1));
+        }
+        shard.onHighWatermarkUpdated(21);
+        assertTrue(shard.lookupPosition(topicId, 0).isEmpty());
+        assertEquals(4, shard.lookupPosition(topicId, 7).orElseThrow().globalBaseOffset());
+        assertEquals(8, shard.lookupPosition(topicId, 9).orElseThrow().globalBaseOffset());
     }
 }

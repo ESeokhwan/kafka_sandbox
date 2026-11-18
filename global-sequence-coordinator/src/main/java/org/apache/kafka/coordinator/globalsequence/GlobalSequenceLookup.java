@@ -54,6 +54,16 @@ public final class GlobalSequenceLookup {
         }
     }
 
+    /** A committed BatchIndex record offset and the topic's global cursor at that record. */
+    public record Position(long globalBaseOffset, long indexOffset) {
+        public static final Position START = new Position(0, 0);
+
+        public Position {
+            if (globalBaseOffset < 0 || indexOffset < 0 || indexOffset > Long.MAX_VALUE - 2)
+                throw new IllegalArgumentException("Invalid global index position");
+        }
+    }
+
     public record Mapping(long globalBaseOffset, PhysicalBatch batch) {
         public Mapping {
             Objects.requireNonNull(batch, "batch");
@@ -78,6 +88,10 @@ public final class GlobalSequenceLookup {
     /** Broker-owned log I/O, performed outside coordinator event threads and locks. */
     public interface Reader extends AutoCloseable {
         CompletableFuture<Result> read(Request request, Snapshot snapshot, long deadlineNs);
+
+        default CompletableFuture<Result> read(Request request, Snapshot snapshot, Position position, long deadlineNs) {
+            return read(request, snapshot, deadlineNs);
+        }
 
         @Override
         default void close() { }

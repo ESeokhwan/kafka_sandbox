@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorServiceTest.image;
@@ -59,17 +60,18 @@ class GlobalSequenceLookupServiceTest {
         ctx.publish(image(2, true));
         GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
         when(shard.committedNextGlobalOffset(TOPIC)).thenReturn(3L);
+        when(shard.lookupPosition(TOPIC, 1)).thenReturn(Optional.of(new GlobalSequenceLookup.Position(0, 4)));
         when(ctx.runtime.scheduleReadOperationWithContext(anyString(), any(), any())).thenAnswer(invocation -> {
             CoordinatorReadOperationWithContext<GlobalSequenceCoordinatorShard, Object> op = invocation.getArgument(2);
             return CompletableFuture.completedFuture(op.generateResponse(shard, new CoordinatorReadContext(6L, 10)));
         });
         CompletableFuture<GlobalSequenceLookup.Result> scan = new CompletableFuture<>();
-        when(ctx.reader.read(any(), any(), anyLong())).thenReturn(scan);
+        when(ctx.reader.read(any(), any(), any(), anyLong())).thenReturn(scan);
         GlobalSequenceLookup.Request request = new GlobalSequenceLookup.Request(TOPIC, 1, 100, 2, 1000);
         long start = ctx.time.nanoseconds();
         CompletableFuture<GlobalSequenceLookup.Result> result = ctx.service.lookupIndex(request, 10);
         ArgumentCaptor<GlobalSequenceLookup.Snapshot> snapshot = ArgumentCaptor.forClass(GlobalSequenceLookup.Snapshot.class);
-        verify(ctx.reader).read(eq(request), snapshot.capture(), eq(start + 1000000000L));
+        verify(ctx.reader).read(eq(request), snapshot.capture(), eq(new GlobalSequenceLookup.Position(0, 4)), eq(start + 1000000000L));
         assertEquals(new GlobalSequenceLookup.Snapshot(INDEX, 1, 10, 6, 3), snapshot.getValue());
         assertFalse(result.isDone());
         when(shard.committedNextGlobalOffset(TOPIC)).thenReturn(6L);
@@ -101,7 +103,7 @@ class GlobalSequenceLookupServiceTest {
                 }
             });
             CompletableFuture<GlobalSequenceLookup.Result> scan = new CompletableFuture<>();
-            when(ctx.reader.read(any(), any(), anyLong())).thenReturn(scan);
+            when(ctx.reader.read(any(), any(), any(), anyLong())).thenReturn(scan);
             CompletableFuture<GlobalSequenceLookup.Result> result = ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 0, 3, 1, 1000), 10);
             switch (change) {
                 case "epoch" -> context.set(new CoordinatorReadContext(6, 11));
@@ -139,7 +141,7 @@ class GlobalSequenceLookupServiceTest {
             ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 4, 4, 1, 1000), 10));
         assertFutureThrows(NotCoordinatorException.class,
             ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 0, 3, 1, 1000), 9));
-        verify(ctx.reader, never()).read(any(), any(), anyLong());
+        verify(ctx.reader, never()).read(any(), any(), any(), anyLong());
         ctx.service.shutdown();
     }
 

@@ -86,11 +86,18 @@ class GlobalSequenceCoordinatorShardTest {
 
     private static class Context {
         final SnapshotRegistry registry = new SnapshotRegistry(new LogContext());
-        final GlobalSequenceCoordinatorShard shard = new GlobalSequenceCoordinatorShard(registry);
+        final GlobalSequenceCoordinatorShard shard;
         long endOffset;
         long highWatermark;
 
         Context(PartitionKey... partitions) {
+            this(GlobalSequenceCoordinatorConfig.SPI_BASE_INTERVAL_BATCHES_DEFAULT,
+                GlobalSequenceCoordinatorConfig.SPI_ENTRIES_PER_LEVEL_DEFAULT,
+                GlobalSequenceCoordinatorConfig.SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT, partitions);
+        }
+
+        Context(int interval, int entriesPerLevel, int maxEntries, PartitionKey... partitions) {
+            shard = new GlobalSequenceCoordinatorShard(registry, interval, entriesPerLevel, maxEntries);
             registry.idempotentCreateSnapshot(0);
             for (PartitionKey partition : partitions) {
                 replay(List.of(fence(partition, OWNER)));
@@ -132,6 +139,47 @@ class GlobalSequenceCoordinatorShardTest {
             shard.onRollback(offset);
             endOffset = offset;
         }
+    }
+
+    @Test
+    void testSparsePositionsOnlyTrackCommittedPairsAndSurviveRollback() {
+        Context ctx = new Context(1, 4, 8, P0, P1);
+        assertTrue(ctx.shard.lookupPosition(TOPIC, 0).isEmpty());
+        ctx.append(A, -1);
+        long firstEnd = ctx.endOffset;
+        ctx.commit(firstEnd - 1);
+        assertTrue(ctx.shard.lookupPosition(TOPIC, 0).isEmpty());
+        ctx.commit(firstEnd);
+        var first = new GlobalSequenceLookup.Position(0, firstEnd - 2);
+        assertEquals(Optional.of(first), ctx.shard.lookupPosition(TOPIC, 2));
+        ctx.append(C, -1);
+        assertEquals(Optional.of(first), ctx.shard.lookupPosition(TOPIC, 4));
+        ctx.rollback(firstEnd);
+        ctx.append(B, A.baseOffset());
+        ctx.commit(ctx.endOffset);
+        assertEquals(Optional.of(new GlobalSequenceLookup.Position(3, firstEnd)), ctx.shard.lookupPosition(TOPIC, 4));
+        assertEquals(Optional.of(first), ctx.shard.lookupPosition(TOPIC, 2));
+    }
+
+    @Test
+    void testSparsePositionsRebuildFromReplayAndSeparateTopicBatchCounts() {
+        PartitionKey other = new PartitionKey(new Uuid(8, 9), 0);
+        Context ctx = new Context(2, 4, 8, P0, other);
+        var records = List.of(fence(P0, OWNER), fence(other, OWNER),
+            allocation(A, 0).get(0), allocation(A, 0).get(1),
+            allocation(batch(other, 0, 1), 0).get(0), allocation(batch(other, 0, 1), 0).get(1),
+            allocation(B, 3).get(0), allocation(B, 3).get(1),
+            allocation(batch(P0, 7, 1), 5).get(0), allocation(batch(P0, 7, 1), 5).get(1));
+        // A new shard replays the complete history, as it would after a leadership change.
+        Context rebuilt = new Context(2, 4, 8);
+        rebuilt.replay(records);
+        rebuilt.commit(rebuilt.endOffset);
+        ctx.replay(records.subList(2, records.size()));
+        ctx.commit(ctx.endOffset);
+        assertEquals(Optional.of(new GlobalSequenceLookup.Position(5, 8)), rebuilt.shard.lookupPosition(TOPIC, 5));
+        assertEquals(Optional.of(new GlobalSequenceLookup.Position(0, 4)), rebuilt.shard.lookupPosition(other.topicId(), 0));
+        assertEquals(rebuilt.shard.lookupPosition(TOPIC, 5), ctx.shard.lookupPosition(TOPIC, 5));
+        assertTrue(rebuilt.shard.lookupPosition(new Uuid(8, 10), 5).isEmpty());
     }
 
     @Test

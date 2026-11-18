@@ -32,6 +32,12 @@ import java.util.Objects;
 /** Adapts the allocator to CoordinatorRuntime's shard construction contract. */
 public class GlobalSequenceCoordinatorShardBuilder implements CoordinatorShardBuilder<GlobalSequenceCoordinatorShard, CoordinatorRecord> {
     private SnapshotRegistry snapshotRegistry;
+    private GlobalSequenceCoordinatorConfig config;
+
+    public GlobalSequenceCoordinatorShardBuilder withConfig(GlobalSequenceCoordinatorConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+        return this;
+    }
 
     @Override
     public GlobalSequenceCoordinatorShardBuilder withSnapshotRegistry(SnapshotRegistry snapshotRegistry) {
@@ -71,6 +77,10 @@ public class GlobalSequenceCoordinatorShardBuilder implements CoordinatorShardBu
 
     @Override
     public GlobalSequenceCoordinatorShard build() {
+        if (config != null) {
+            return new GlobalSequenceCoordinatorShard(Objects.requireNonNull(snapshotRegistry, "snapshotRegistry"),
+                config.spiBaseIntervalBatches(), config.spiEntriesPerLevel(), config.spiMaxEntriesPerTopic());
+        }
         return new GlobalSequenceCoordinatorShard(Objects.requireNonNull(snapshotRegistry, "snapshotRegistry"));
     }
 }
