@@ -424,7 +424,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                     metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id(), partition,
                     context.leaderEpoch(), context.highWatermark(), globalEnd),
                     shard.lookupPosition(request.topicId(), request.startOffset()).orElse(GlobalSequenceLookup.Position.START), shard);
-            }).thenCompose(state -> indexReader.read(request, state.snapshot(), state.position(), deadline).thenCompose(result ->
+            }).thenCompose(state -> indexReader.read(request, state.snapshot(), state.position(), state.shard(), deadline).thenCompose(result ->
                 runtime.scheduleReadOperationWithContext("validate-global-lookup", tp, (shard, context) -> {
                     requireReady();
                     requireEnabledTopic(new PartitionKey(request.topicId(), 0));

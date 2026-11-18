@@ -93,6 +93,11 @@ public final class GlobalSequenceLookup {
             return read(request, snapshot, deadlineNs);
         }
 
+        /** The identity of the loaded shard scopes broker-local caches across reloads. */
+        default CompletableFuture<Result> read(Request request, Snapshot snapshot, Position position, Object generation, long deadlineNs) {
+            return read(request, snapshot, position, deadlineNs);
+        }
+
         @Override
         default void close() { }
     }

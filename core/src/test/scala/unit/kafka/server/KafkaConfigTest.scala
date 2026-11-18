@@ -64,6 +64,11 @@ class KafkaConfigTest {
     assertEquals(2, sparse.spiBaseIntervalBatches())
     assertEquals(3, sparse.spiEntriesPerLevel())
     assertEquals(7, sparse.spiMaxEntriesPerTopic())
+    props.setProperty(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_CONFIG, "20")
+    props.setProperty(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG, "5")
+    val cache = KafkaConfig.fromProps(props).globalSequenceCoordinatorConfig
+    assertEquals(20, cache.indexCacheMaxEntries())
+    assertEquals(5, cache.indexCacheMaxEntriesPerTopic())
     props.setProperty(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, "4")
     assertThrows(classOf[ConfigException], () => KafkaConfig.fromProps(props))
   }

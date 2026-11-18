@@ -61,12 +61,16 @@ class GlobalSequenceIndexReaderTest {
     MemoryRecords.readableRecords(buffer)
   }
 
-  private class Context(initial: Records = records(history), snapshotHw: Long = 6, globalEnd: Long = 5, scanBytes: Int = Int.MaxValue) extends AutoCloseable {
+  private class Context(initial: Records = records(history), snapshotHw: Long = 6, globalEnd: Long = 5, scanBytes: Int = Int.MaxValue,
+                        cacheEntries: Int = 100000, cachePerTopic: Int = 10000) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val workers = new GlobalSequenceTestExecutor
     val replicas: ReplicaManager = mock(classOf[ReplicaManager])
     val partition: Partition = mock(classOf[Partition])
     val log: UnifiedLog = mock(classOf[UnifiedLog])
+    var currentLog: UnifiedLog = log
+    var contents = initial
+    var generation: AnyRef = new Object
     var hw = 8L
     var start = 0L
     var fenced = false
@@ -74,22 +78,23 @@ class GlobalSequenceIndexReaderTest {
     var bytesRead = 0L
     val readOffsets = ArrayBuffer.empty[Long]
     var onRead: () => Unit = () => ()
+    var onBoundsRead: () => Unit = () => ()
     when(replicas.getPartitionOrException(any[TopicIdPartition])).thenReturn(partition)
     when(log.topicId()).thenReturn(Optional.of(index))
     when(log.logEndOffset()).thenReturn(8L)
     when(partition.localLogWithEpochOrThrow(any(), anyBoolean())).thenAnswer { _ =>
       if (fenced) throw new FencedLeaderEpochException("moved")
-      log
+      currentLog
     }
     when(partition.fetchRecords(any(), any(), anyLong(), anyInt(), anyBoolean(), anyBoolean())).thenAnswer { call =>
       val request = call.getArgument[FetchRequest.PartitionData](1)
-      assertEquals(Optional.of(Int.box(10)), request.currentLeaderEpoch)
+      assertEquals(Optional.of(Int.box(snapshot.leaderEpoch())), request.currentLeaderEpoch)
       assertFalse(call.getArgument[Boolean](5))
-      val data = if (call.getArgument[Int](3) == 0) MemoryRecords.EMPTY else {
+      val data = if (call.getArgument[Int](3) == 0) { onBoundsRead(); MemoryRecords.EMPTY } else {
         reads += 1
         readOffsets += request.fetchOffset
         onRead()
-        val batches = initial.batches().asScala.filter(_.lastOffset() >= request.fetchOffset).toList
+        val batches = contents.batches().asScala.filter(_.lastOffset() >= request.fetchOffset).toList
         val buffer = ByteBuffer.allocate(batches.map(_.sizeInBytes()).sum)
         batches.foreach(_.writeTo(buffer))
         buffer.flip()
@@ -101,15 +106,116 @@ class GlobalSequenceIndexReaderTest {
     }
     val limits = new GlobalSequenceTestResources(time, Map(
       org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig.LOOKUP_SCAN_MAX_BYTES_CONFIG -> Int.box(scanBytes)))
-    val reader = new GlobalSequenceIndexReader(replicas, time.scheduler, time, workers, if (scanBytes == Int.MaxValue) null else limits.resources)
-    val snapshot = new Snapshot(index, 1, 10, snapshotHw, globalEnd)
+    val cache = new GlobalSequenceIndexCache(cacheEntries, cachePerTopic)
+    val reader = new GlobalSequenceIndexReader(replicas, time.scheduler, time, workers,
+      if (scanBytes == Int.MaxValue) null else limits.resources, cache)
+    var snapshot = new Snapshot(index, 1, 10, snapshotHw, globalEnd)
     def read(startOffset: Long = 0, endOffset: Long = 100, maxBatches: Int = 100,
              position: Position = Position.START): CompletableFuture[Result] = {
       val request = new Request(topic, startOffset, endOffset, maxBatches, 100)
-      reader.read(request, snapshot, position, time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(100))
+      reader.read(request, snapshot, position, generation, time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(100))
     }
     def finish(future: CompletableFuture[Result]): Result = { workers.runAll(); future.join() }
     override def close(): Unit = { reader.close(); limits.close(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testCacheHitsCoverBatchInteriorAndPartialMissResumesAfterCachedPair(): Unit = {
+    val c = new Context
+    val cold = new Context(cacheEntries = 0)
+    try {
+      c.finish(c.read(1, 3, 1))
+      val before = c.reads
+      assertEquals(cold.finish(cold.read(1, 2)), c.finish(c.read(1, 2)))
+      assertEquals(before, c.reads, "A complete hit must not fetch index payload")
+      val page = c.finish(c.read(1, 5))
+      assertEquals(cold.finish(cold.read(1, 5)), page)
+      assertEquals(Seq(0L, 2L), c.readOffsets.toSeq, "A partial hit resumes after the validated allocation pair")
+      val warmed = c.reads
+      assertEquals(page, c.finish(c.read(1, 5)))
+      assertEquals(warmed, c.reads)
+      val first = c.finish(c.read(1, 5, 1))
+      assertEquals(3L, first.nextGlobalOffset())
+      assertEquals(4L, c.finish(c.read(first.nextGlobalOffset(), 4)).nextGlobalOffset())
+    } finally { c.close(); cold.close() }
+  }
+
+  @Test
+  def testCacheOnlyStoresSelectedMappingsAndEvictedMappingsCanBeRestored(): Unit = {
+    val c = new Context(cacheEntries = 1, cachePerTopic = 1)
+    try {
+      c.finish(c.read(3, 5))
+      assertEquals(1, c.cache.size)
+      c.finish(c.read(0, 3))
+      assertEquals(2, c.reads, "Scanning past a mapping must not warm it")
+      c.finish(c.read(0, 3))
+      assertEquals(2, c.reads)
+      c.finish(c.read(3, 5))
+      assertEquals(3, c.reads, "An evicted mapping must be restored from the index")
+      assertEquals(1, c.cache.size)
+    } finally c.close()
+  }
+
+  @Test
+  def testNewerCachedMappingsCannotExpandAnOlderSnapshot(): Unit = {
+    val c = new Context(snapshotHw = 8, globalEnd = 6)
+    try {
+      c.finish(c.read(0, 6))
+      c.snapshot = new Snapshot(index, 1, 10, 6, 5)
+      val reads = c.reads
+      assertEquals(5L, c.finish(c.read(0, 100)).nextGlobalOffset())
+      assertEquals(reads, c.reads)
+      // The [3, 5) mapping ends at internal offset 6 and is too new for this HW.
+      c.snapshot = new Snapshot(index, 1, 10, 4, 5)
+      val invalid = c.read(3, 5)
+      c.workers.runAll()
+      assertFutureThrows(classOf[CorruptRecordException], invalid)
+      assertEquals(reads + 1, c.reads, "An ineligible cache entry must not hide missing committed history")
+    } finally c.close()
+  }
+
+  @Test
+  def testShardLogAndLeaderChangesRequireColdLookupAndHitsAreRevalidated(): Unit = {
+    val c = new Context
+    try {
+      c.finish(c.read())
+      c.generation = new Object
+      c.finish(c.read())
+      assertEquals(2, c.reads)
+      val replacement = mock(classOf[UnifiedLog])
+      when(replacement.topicId()).thenReturn(Optional.of(index))
+      when(replacement.logEndOffset()).thenReturn(8L)
+      c.currentLog = replacement
+      c.finish(c.read())
+      assertEquals(3, c.reads)
+      c.snapshot = new Snapshot(index, 1, 11, 6, 5)
+      c.finish(c.read())
+      assertEquals(4, c.reads)
+      var checks = 0
+      c.onBoundsRead = () => {
+        checks += 1
+        if (checks == 2) c.fenced = true
+      }
+      val fenced = c.read()
+      c.workers.runAll()
+      assertFutureThrows(classOf[NotCoordinatorException], fenced)
+      assertEquals(4, c.reads, "A full cache hit still validates its log and leader")
+    } finally c.close()
+  }
+
+  @Test
+  def testFailedPageDoesNotPopulateTheCache(): Unit = {
+    val bad = records(history.take(5) :+ newTopicMetadataRecord(topic, 99))
+    val c = new Context(bad)
+    try {
+      val result = c.read()
+      c.workers.runAll()
+      assertFutureThrows(classOf[CorruptRecordException], result)
+      assertEquals(0, c.cache.size)
+      c.contents = records(history)
+      c.finish(c.read())
+      assertEquals(2, c.reads)
+    } finally c.close()
   }
 
   @Test
