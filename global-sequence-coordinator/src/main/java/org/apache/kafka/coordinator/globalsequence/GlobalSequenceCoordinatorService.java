@@ -156,7 +156,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                             tp, 0)::close)
                         .withPartitionWriter(writer)
                         .withLoader(loader)
-                        .withCoordinatorShardBuilderSupplier(GlobalSequenceCoordinatorShardBuilder::new)
+                        .withCoordinatorShardBuilderSupplier(() -> new GlobalSequenceCoordinatorShardBuilder().withConfig(config))
                         .withDefaultWriteTimeOut(Duration.ofMillis(config.writeTimeoutMs()))
                         .withCoordinatorRuntimeMetrics(runtimeMetrics)
                         .withCoordinatorMetrics(new GlobalSequenceCoordinatorMetrics())
@@ -403,7 +403,8 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         }
     }
 
-    private record LookupState(GlobalSequenceLookup.Snapshot snapshot, GlobalSequenceCoordinatorShard shard) { }
+    private record LookupState(GlobalSequenceLookup.Snapshot snapshot, GlobalSequenceLookup.Position position,
+                               GlobalSequenceCoordinatorShard shard) { }
 
     @Override
     public CompletableFuture<GlobalSequenceLookup.Result> lookupIndex(GlobalSequenceLookup.Request request, int expectedCoordinatorEpoch) {
@@ -421,8 +422,9 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                     throw new org.apache.kafka.common.errors.OffsetOutOfRangeException("Global start exceeds the committed end");
                 return new LookupState(new GlobalSequenceLookup.Snapshot(
                     metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id(), partition,
-                    context.leaderEpoch(), context.highWatermark(), globalEnd), shard);
-            }).thenCompose(state -> indexReader.read(request, state.snapshot(), deadline).thenCompose(result ->
+                    context.leaderEpoch(), context.highWatermark(), globalEnd),
+                    shard.lookupPosition(request.topicId(), request.startOffset()).orElse(GlobalSequenceLookup.Position.START), shard);
+            }).thenCompose(state -> indexReader.read(request, state.snapshot(), state.position(), deadline).thenCompose(result ->
                 runtime.scheduleReadOperationWithContext("validate-global-lookup", tp, (shard, context) -> {
                     requireReady();
                     requireEnabledTopic(new PartitionKey(request.topicId(), 0));

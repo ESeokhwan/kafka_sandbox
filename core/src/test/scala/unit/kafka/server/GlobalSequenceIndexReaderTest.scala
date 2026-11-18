@@ -26,7 +26,7 @@ import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.{newBatchIndexRecord, newTopicMetadataRecord}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordSerde
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Request, Result, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Position, Request, Result, Snapshot}
 import org.apache.kafka.server.util.MockTime
 import org.apache.kafka.storage.internals.log.{FetchDataInfo, LogOffsetMetadata, LogReadInfo, UnifiedLog}
 import org.apache.kafka.test.TestUtils.assertFutureThrows
@@ -36,7 +36,9 @@ import org.mockito.ArgumentMatchers.{any, anyBoolean, anyInt, anyLong}
 import org.mockito.Mockito.{mock, when}
 
 import java.util.Optional
+import java.nio.ByteBuffer
 import java.util.concurrent.{CompletableFuture, TimeUnit}
+import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
 class GlobalSequenceIndexReaderTest {
@@ -48,9 +50,16 @@ class GlobalSequenceIndexReaderTest {
     newBatchIndexRecord(id, partition, base, base + count - 1, count, global), newTopicMetadataRecord(id, global + count))
   private val history = allocation(topic, 0, 0, 10, 3) ++ allocation(other, 0, 0, 0, 2) ++
     allocation(topic, 3, 1, 0, 2) ++ allocation(topic, 5, 0, 13, 1)
-  private def records(entries: Seq[CoordinatorRecord], offset: Long = 0): MemoryRecords =
-    MemoryRecords.withRecords(offset, Compression.NONE,
+  private def records(entries: Seq[CoordinatorRecord], offset: Long = 0, compression: Compression = Compression.NONE): MemoryRecords =
+    MemoryRecords.withRecords(offset, compression,
       entries.map(record => new SimpleRecord(serde.serializeKey(record), serde.serializeValue(record))): _*)
+
+  private def combine(records: MemoryRecords*): MemoryRecords = {
+    val buffer = ByteBuffer.allocate(records.map(_.sizeInBytes()).sum)
+    records.foreach(data => buffer.put(data.buffer().duplicate()))
+    buffer.flip()
+    MemoryRecords.readableRecords(buffer)
+  }
 
   private class Context(initial: Records = records(history), snapshotHw: Long = 6, globalEnd: Long = 5, scanBytes: Int = Int.MaxValue) extends AutoCloseable {
     val time = new MockTime(0, 0)
@@ -62,6 +71,8 @@ class GlobalSequenceIndexReaderTest {
     var start = 0L
     var fenced = false
     var reads = 0
+    var bytesRead = 0L
+    val readOffsets = ArrayBuffer.empty[Long]
     var onRead: () => Unit = () => ()
     when(replicas.getPartitionOrException(any[TopicIdPartition])).thenReturn(partition)
     when(log.topicId()).thenReturn(Optional.of(index))
@@ -76,8 +87,15 @@ class GlobalSequenceIndexReaderTest {
       assertFalse(call.getArgument[Boolean](5))
       val data = if (call.getArgument[Int](3) == 0) MemoryRecords.EMPTY else {
         reads += 1
+        readOffsets += request.fetchOffset
         onRead()
-        initial
+        val batches = initial.batches().asScala.filter(_.lastOffset() >= request.fetchOffset).toList
+        val buffer = ByteBuffer.allocate(batches.map(_.sizeInBytes()).sum)
+        batches.foreach(_.writeTo(buffer))
+        buffer.flip()
+        val data = MemoryRecords.readableRecords(buffer)
+        bytesRead += data.sizeInBytes()
+        data
       }
       new LogReadInfo(new FetchDataInfo(new LogOffsetMetadata(request.fetchOffset), data), Optional.empty(), hw, start, 8L, 0L)
     }
@@ -85,12 +103,64 @@ class GlobalSequenceIndexReaderTest {
       org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorConfig.LOOKUP_SCAN_MAX_BYTES_CONFIG -> Int.box(scanBytes)))
     val reader = new GlobalSequenceIndexReader(replicas, time.scheduler, time, workers, if (scanBytes == Int.MaxValue) null else limits.resources)
     val snapshot = new Snapshot(index, 1, 10, snapshotHw, globalEnd)
-    def read(startOffset: Long = 0, endOffset: Long = 100, maxBatches: Int = 100): CompletableFuture[Result] = {
+    def read(startOffset: Long = 0, endOffset: Long = 100, maxBatches: Int = 100,
+             position: Position = Position.START): CompletableFuture[Result] = {
       val request = new Request(topic, startOffset, endOffset, maxBatches, 100)
-      reader.read(request, snapshot, time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(100))
+      reader.read(request, snapshot, position, time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(100))
     }
     def finish(future: CompletableFuture[Result]): Result = { workers.runAll(); future.join() }
     override def close(): Unit = { reader.close(); limits.close(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testSparseSeekInsideCompressedKafkaBatchMatchesColdScanAndReadsLess(): Unit = {
+    val data = combine(records(history.take(2)),
+      records(history.slice(2, 6), 2, Compression.gzip().build()), records(history.drop(6), 6))
+    val cold = new Context(data)
+    val sparse = new Context(data)
+    try {
+      val expected = cold.finish(cold.read(4, 5, 1))
+      val result = sparse.finish(sparse.read(4, 5, 1, new Position(3, 4)))
+      assertEquals(expected, result)
+      assertEquals(Seq(4L), sparse.readOffsets.toSeq)
+      assertEquals(Seq(0L), cold.readOffsets.toSeq)
+      assertTrue(sparse.bytesRead < cold.bytesRead)
+      assertEquals(3L, result.mappings().get(0).globalBaseOffset())
+      assertEquals(5L, result.nextGlobalOffset())
+    } finally { cold.close(); sparse.close() }
+  }
+
+  @Test
+  def testSparseSeekRetainsPaginationAndSnapshotBoundary(): Unit = {
+    val c = new Context(snapshotHw = 8, globalEnd = 6)
+    try {
+      val first = c.finish(c.read(4, 100, 1, new Position(3, 4)))
+      assertEquals(Seq(3L), first.mappings().asScala.map(_.globalBaseOffset()).toSeq)
+      assertEquals(5L, first.nextGlobalOffset())
+      val second = c.finish(c.read(first.nextGlobalOffset(), 100, 1, new Position(5, 6)))
+      assertEquals(Seq(5L), second.mappings().asScala.map(_.globalBaseOffset()).toSeq)
+      assertEquals(6L, second.nextGlobalOffset())
+    } finally c.close()
+    val old = new Context
+    try {
+      // A position learned after this snapshot cannot expand its visible range.
+      val result = old.finish(old.read(4, 100, 100, new Position(5, 6)))
+      assertEquals(Seq(0L), old.readOffsets.toSeq)
+      assertEquals(5L, result.nextGlobalOffset())
+      assertEquals(Seq(3L), result.mappings().asScala.map(_.globalBaseOffset()).toSeq)
+    } finally old.close()
+  }
+
+  @Test
+  def testSparsePositionMustIdentifyTheRequestedTopicsCompleteAllocation(): Unit = {
+    for (position <- Seq(new Position(0, 2), new Position(4, 4), new Position(3, 5))) {
+      val c = new Context(snapshotHw = 8, globalEnd = 6)
+      try {
+        val result = c.read(4, 6, 100, position)
+        c.workers.runAll()
+        assertFutureThrows(classOf[CorruptRecordException], result)
+      } finally c.close()
+    }
   }
 
   @Test
