@@ -198,6 +198,10 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     private final Map<Uuid, Long> committedGlobalOffsets = new HashMap<>();
     private final Map<PartitionKey, Allocation> committedAllocations = new HashMap<>();
     private final Map<PartitionKey, Fence> committedFences = new HashMap<>();
+    private final Map<Uuid, GlobalSequenceSparseIndex> sparseIndexes = new HashMap<>();
+    private final int spiBaseIntervalBatches;
+    private final int spiEntriesPerLevel;
+    private final int spiMaxEntriesPerTopic;
 
     // Retained only until commit or actual rollback, never removed by a request timeout.
     private final TreeMap<Long, PendingChange> pendingChanges = new TreeMap<>();
@@ -209,7 +213,16 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     private Allocation stagedAllocation;
 
     public GlobalSequenceCoordinatorShard(SnapshotRegistry snapshotRegistry) {
+        this(snapshotRegistry, GlobalSequenceCoordinatorConfig.SPI_BASE_INTERVAL_BATCHES_DEFAULT,
+            GlobalSequenceCoordinatorConfig.SPI_ENTRIES_PER_LEVEL_DEFAULT,
+            GlobalSequenceCoordinatorConfig.SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT);
+    }
+
+    GlobalSequenceCoordinatorShard(SnapshotRegistry snapshotRegistry, int baseIntervalBatches, int entriesPerLevel, int maxEntriesPerTopic) {
         Objects.requireNonNull(snapshotRegistry, "snapshotRegistry");
+        spiBaseIntervalBatches = baseIntervalBatches;
+        spiEntriesPerLevel = entriesPerLevel;
+        spiMaxEntriesPerTopic = maxEntriesPerTopic;
         nextGlobalOffsets = new TimelineHashMap<>(snapshotRegistry, 0);
         latestAllocations = new TimelineHashMap<>(snapshotRegistry, 0);
         latestFences = new TimelineHashMap<>(snapshotRegistry, 0);
@@ -360,6 +373,11 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         return committedGlobalOffsets.getOrDefault(topicId, 0L);
     }
 
+    public Optional<GlobalSequenceLookup.Position> lookupPosition(Uuid topicId, long globalOffset) {
+        GlobalSequenceSparseIndex index = sparseIndexes.get(topicId);
+        return index == null ? Optional.empty() : index.floor(globalOffset);
+    }
+
     /** Includes allocations which have not yet committed. Not a public read boundary. */
     long nextGlobalOffset(Uuid topicId) {
         return nextGlobalOffsets.getOrDefault(topicId, 0L);
@@ -454,6 +472,9 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
                 committedGlobalOffsets.put(allocation.batch().partition().topicId(), allocation.globalEndOffset());
                 committedAllocations.put(allocation.batch().partition(), allocation);
                 pendingAllocations.remove(allocation.batch().id());
+                sparseIndexes.computeIfAbsent(allocation.batch().partition().topicId(), ignored ->
+                    new GlobalSequenceSparseIndex(spiBaseIntervalBatches, spiEntriesPerLevel, spiMaxEntriesPerTopic))
+                    .add(new GlobalSequenceLookup.Position(allocation.globalBaseOffset(), allocation.endOffset() - 2));
             } else if (change instanceof Fence fence) {
                 committedFences.put(fence.partition(), fence);
             }

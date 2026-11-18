@@ -29,7 +29,7 @@ import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.utils.{BufferSupplier, KafkaThread, ThreadUtils, Time}
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorRecordSerde, GlobalSequenceLookup}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Request, Result, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Position, Request, Result, Snapshot}
 import org.apache.kafka.coordinator.globalsequence.generated.{BatchIndexKey, BatchIndexValue, IndexerFenceKey, TopicMetadataKey, TopicMetadataValue}
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams}
 import org.apache.kafka.server.util.Scheduler
@@ -50,7 +50,7 @@ private[server] object GlobalSequenceIndexReader {
     new ThreadPoolExecutor.AbortPolicy)
 }
 
-/** Cold historical lookup. No unbounded mapping cache and no disk I/O on coordinator event threads. */
+/** Historical lookup from a committed sparse position, with disk I/O on dedicated workers. */
 class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, scheduler: Scheduler, time: Time,
                                                 workers: ExecutorService = GlobalSequenceIndexReader.workers(),
                                                 resources: GlobalSequenceResources = null)
@@ -60,7 +60,10 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Result]]()
   @volatile private var closed = false
 
-  override def read(request: Request, snapshot: Snapshot, deadlineNs: Long): CompletableFuture[Result] = {
+  override def read(request: Request, snapshot: Snapshot, deadlineNs: Long): CompletableFuture[Result] =
+    read(request, snapshot, Position.START, deadlineNs)
+
+  override def read(request: Request, snapshot: Snapshot, position: Position, deadlineNs: Long): CompletableFuture[Result] = {
     val result = new CompletableFuture[Result]()
     val lease = try Option(resources).map(_.acquire(Scope.INDEX_READ, request.topicId(), GlobalSequenceResources.BATCH_BYTES))
     catch { case NonFatal(error) => return CompletableFuture.failedFuture(error) }
@@ -70,7 +73,7 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
     @volatile var timer: ScheduledFuture[_] = null
     val work: Runnable = () => {
       if (state.compareAndSet(0, 1)) try {
-        if (!result.isDone) try result.complete(scan(request, snapshot, () => {
+        if (!result.isDone) try result.complete(scan(request, snapshot, position, () => {
           if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
             throw new TimeoutException("Global index lookup was cancelled or expired")
         })) catch {
@@ -110,7 +113,7 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
     result
   }
 
-  private def scan(request: Request, snapshot: Snapshot, checkDeadline: () => Unit): Result = {
+  private def scan(request: Request, snapshot: Snapshot, position: Position, checkDeadline: () => Unit): Result = {
     checkDeadline()
     val tp = new TopicIdPartition(snapshot.indexTopicId(), new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, snapshot.indexPartition()))
     val source = replicas.getPartitionOrException(tp)
@@ -143,8 +146,13 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
       val serde = new GlobalSequenceCoordinatorRecordSerde
       var scannedBytes = 0L
       val scanLimit = Option(resources).map(_.config().lookupScanMaxBytes().toLong).getOrElse(Long.MaxValue)
-      var cursor = 0L
-      var globalCursor = 0L
+      val start = if (position.globalBaseOffset() <= request.startOffset() &&
+        position.globalBaseOffset() < snapshot.committedGlobalEnd() && position.indexOffset() <= snapshot.indexHighWatermark() - 2)
+        position else Position.START
+      var cursor = start.indexOffset()
+      var globalCursor = start.globalBaseOffset()
+      var firstBatch = true
+      var verifyPosition = start != Position.START
       var staged: Option[Mapping] = None
       var stagedOffset = -1L
       var done = request.startOffset() == end
@@ -163,16 +171,35 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
           while (!done && cursor < snapshot.indexHighWatermark() && batches.hasNext) {
             val batch = batches.next()
             batch.ensureValid()
-            if (batch.magic() != RecordBatch.MAGIC_VALUE_V2 || batch.isControlBatch || batch.isTransactional || batch.baseOffset() != cursor)
+            val containsStart = firstBatch && batch.baseOffset() < cursor && batch.lastOffset() >= cursor
+            if (batch.magic() != RecordBatch.MAGIC_VALUE_V2 || batch.isControlBatch || batch.isTransactional ||
+              (batch.baseOffset() != cursor && !containsStart))
               throw new CorruptRecordException("Invalid global index batch or missing index offsets")
+            firstBatch = false
             val iterator = batch.streamingIterator(buffers)
             try {
+              // Fetch returns the enclosing Kafka batch, even when the position is a record inside it.
+              var prefixOffset = batch.baseOffset()
+              while (prefixOffset < cursor && iterator.hasNext) {
+                checkDeadline()
+                if (iterator.next().offset() != prefixOffset)
+                  throw new CorruptRecordException("Non-contiguous global index batch prefix")
+                prefixOffset += 1
+              }
+              if (prefixOffset != cursor) throw new CorruptRecordException("Sparse position is missing from its index batch")
               while (!done && cursor < snapshot.indexHighWatermark() && iterator.hasNext) {
                 checkDeadline()
                 val record = iterator.next()
                 if (record.offset() != cursor) throw new CorruptRecordException("Non-contiguous global index records")
                 val decoded = serde.deserialize(record.key(), record.value())
                 if (decoded.value() == null) throw new CorruptRecordException("Global index tombstone is not supported")
+                if (verifyPosition) {
+                  decoded.key() match {
+                    case key: BatchIndexKey if key.topicId() == request.topicId() && key.globalBaseOffset() == globalCursor =>
+                    case _ => throw new CorruptRecordException("Sparse position contradicts its allocation record")
+                  }
+                  verifyPosition = false
+                }
                 decoded.key() match {
                   case key: BatchIndexKey =>
                     if (staged.nonEmpty) throw new CorruptRecordException("Incomplete global allocation pair")

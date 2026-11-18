@@ -123,6 +123,18 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int LOOKUP_SCAN_MAX_BYTES_DEFAULT = 268435456;
     public static final String LOOKUP_SCAN_MAX_BYTES_DOC = "Maximum index bytes scanned per lookup. Exceeding the limit returns THROTTLING_QUOTA_EXCEEDED without advancing the cursor.";
 
+    public static final String SPI_BASE_INTERVAL_BATCHES_CONFIG = "global.sequence.spi.base.interval.batches";
+    public static final int SPI_BASE_INTERVAL_BATCHES_DEFAULT = 8;
+    public static final String SPI_BASE_INTERVAL_BATCHES_DOC = "Committed source batches per sparse position in the newest level, counted independently per topic. Older levels double this interval.";
+
+    public static final String SPI_ENTRIES_PER_LEVEL_CONFIG = "global.sequence.spi.entries.per.level";
+    public static final int SPI_ENTRIES_PER_LEVEL_DEFAULT = 256;
+    public static final String SPI_ENTRIES_PER_LEVEL_DOC = "Maximum sparse positions in each level. Older positions are sampled in pairs into the next level.";
+
+    public static final String SPI_MAX_ENTRIES_PER_TOPIC_CONFIG = "global.sequence.spi.max.entries.per.topic";
+    public static final int SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT = 4096;
+    public static final String SPI_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum sparse positions per topic across all levels. The oldest positions are discarded when the last level fills. Missing positions use a full index scan.";
+
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
         .define(INDEX_TOPIC_NUM_PARTITIONS_CONFIG, INT, INDEX_TOPIC_NUM_PARTITIONS_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_NUM_PARTITIONS_DOC)
         .define(INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, SHORT, INDEX_TOPIC_REPLICATION_FACTOR_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_REPLICATION_FACTOR_DOC)
@@ -143,7 +155,10 @@ public class GlobalSequenceCoordinatorConfig {
         .define(READ_RESPONSE_BUFFER_BYTES_CONFIG, INT, READ_RESPONSE_BUFFER_BYTES_DEFAULT, atLeast(8388608), MEDIUM, READ_RESPONSE_BUFFER_BYTES_DOC)
         .define(WORKER_QUEUE_SIZE_CONFIG, INT, WORKER_QUEUE_SIZE_DEFAULT, atLeast(1), MEDIUM, WORKER_QUEUE_SIZE_DOC)
         .define(READER_NUM_THREADS_CONFIG, INT, READER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, READER_NUM_THREADS_DOC)
-        .define(LOOKUP_SCAN_MAX_BYTES_CONFIG, INT, LOOKUP_SCAN_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, LOOKUP_SCAN_MAX_BYTES_DOC);
+        .define(LOOKUP_SCAN_MAX_BYTES_CONFIG, INT, LOOKUP_SCAN_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, LOOKUP_SCAN_MAX_BYTES_DOC)
+        .define(SPI_BASE_INTERVAL_BATCHES_CONFIG, INT, SPI_BASE_INTERVAL_BATCHES_DEFAULT, atLeast(1), MEDIUM, SPI_BASE_INTERVAL_BATCHES_DOC)
+        .define(SPI_ENTRIES_PER_LEVEL_CONFIG, INT, SPI_ENTRIES_PER_LEVEL_DEFAULT, atLeast(1), MEDIUM, SPI_ENTRIES_PER_LEVEL_DOC)
+        .define(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, SPI_MAX_ENTRIES_PER_TOPIC_DOC);
 
     private final AbstractConfig config;
 
@@ -236,6 +251,18 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int lookupScanMaxBytes() {
         return config.getInt(LOOKUP_SCAN_MAX_BYTES_CONFIG);
+    }
+
+    public int spiBaseIntervalBatches() {
+        return config.getInt(SPI_BASE_INTERVAL_BATCHES_CONFIG);
+    }
+
+    public int spiEntriesPerLevel() {
+        return config.getInt(SPI_ENTRIES_PER_LEVEL_CONFIG);
+    }
+
+    public int spiMaxEntriesPerTopic() {
+        return config.getInt(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG);
     }
 
     /**
