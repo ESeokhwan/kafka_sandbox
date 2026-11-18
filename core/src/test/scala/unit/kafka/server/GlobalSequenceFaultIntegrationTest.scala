@@ -382,6 +382,12 @@ class GlobalSequenceFaultIntegrationTest {
       val owner = c.live.head.indexRoutingManager.describePartition(old.key(1), 5000).get(6, TimeUnit.SECONDS).value.currentIndexer().get()
       val delayed = new AppendRequest(new PhysicalBatch(old.key(1), 0, 0, 1), -1, 1, owner)
       val indexes = c.verify(old, Map(0 -> Seq(10, 11, 12), 1 -> Seq(20)))
+      val cacheMetrics = c.leader(c.indexTp(old)).metrics
+      def cacheHits: Long = cacheMetrics.metric(cacheMetrics.metricName("hits-total", "global-sequence-index-cache"))
+        .metricValue().asInstanceOf[java.lang.Number].longValue()
+      val beforeWarm = cacheHits
+      assertEquals(Errors.NONE.code(), c.fetch(old, c.live.head, 0, 3).errorCode())
+      assertTrue(cacheHits > beforeWarm, "Repeated global fetch must reuse committed mappings")
       c.await("Deletion pins cover the indexed data") {
         c.live.forall(_.replicaManager.localLog(old.tp(1)).get.globalSequenceDeletionLimit() == 1)
       }
@@ -389,9 +395,11 @@ class GlobalSequenceFaultIntegrationTest {
       c.live.foreach { broker =>
         val first = c.fetch(old, broker)
         assertEquals(3L, first.nextGlobalOffset())
+        val beforeMissingData = cacheHits
         val unavailable = c.fetch(old, broker, first.nextGlobalOffset())
         assertEquals(Errors.OFFSET_OUT_OF_RANGE.code(), unavailable.errorCode())
         assertEquals(3L, unavailable.nextGlobalOffset())
+        assertTrue(cacheHits > beforeMissingData, "A mapping cache hit must still detect retained source data loss")
       }
       val bytes = new ByteArrayOutputStream
       val output = new PrintStream(bytes, true, UTF_8)

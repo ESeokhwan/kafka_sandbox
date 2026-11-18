@@ -27,7 +27,7 @@ import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.record.{FileRecords, MemoryRecords, RecordBatch, Records}
 import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.utils.{BufferSupplier, KafkaThread, ThreadUtils, Time}
-import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorRecordSerde, GlobalSequenceLookup}
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorConfig, GlobalSequenceCoordinatorRecordSerde, GlobalSequenceLookup}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Position, Request, Result, Snapshot}
 import org.apache.kafka.coordinator.globalsequence.generated.{BatchIndexKey, BatchIndexValue, IndexerFenceKey, TopicMetadataKey, TopicMetadataValue}
@@ -53,17 +53,25 @@ private[server] object GlobalSequenceIndexReader {
 /** Historical lookup from a committed sparse position, with disk I/O on dedicated workers. */
 class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, scheduler: Scheduler, time: Time,
                                                 workers: ExecutorService = GlobalSequenceIndexReader.workers(),
-                                                resources: GlobalSequenceResources = null)
+                                                resources: GlobalSequenceResources = null,
+                                                cache: GlobalSequenceIndexCache = null)
   extends GlobalSequenceLookup.Reader {
   import GlobalSequenceIndexReader._
+  import GlobalSequenceIndexCache.{Entry, Identity, Scope => CacheScope}
 
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Result]]()
+  private val mappingCache = Option(cache).getOrElse(new GlobalSequenceIndexCache(
+    Option(resources).map(_.config().indexCacheMaxEntries()).getOrElse(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_DEFAULT),
+    Option(resources).map(_.config().indexCacheMaxEntriesPerTopic()).getOrElse(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT)))
   @volatile private var closed = false
 
   override def read(request: Request, snapshot: Snapshot, deadlineNs: Long): CompletableFuture[Result] =
     read(request, snapshot, Position.START, deadlineNs)
 
-  override def read(request: Request, snapshot: Snapshot, position: Position, deadlineNs: Long): CompletableFuture[Result] = {
+  override def read(request: Request, snapshot: Snapshot, position: Position, deadlineNs: Long): CompletableFuture[Result] =
+    read(request, snapshot, position, this, deadlineNs)
+
+  override def read(request: Request, snapshot: Snapshot, position: Position, generation: AnyRef, deadlineNs: Long): CompletableFuture[Result] = {
     val result = new CompletableFuture[Result]()
     val lease = try Option(resources).map(_.acquire(Scope.INDEX_READ, request.topicId(), GlobalSequenceResources.BATCH_BYTES))
     catch { case NonFatal(error) => return CompletableFuture.failedFuture(error) }
@@ -73,7 +81,7 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
     @volatile var timer: ScheduledFuture[_] = null
     val work: Runnable = () => {
       if (state.compareAndSet(0, 1)) try {
-        if (!result.isDone) try result.complete(scan(request, snapshot, position, () => {
+        if (!result.isDone) try result.complete(scan(request, snapshot, position, generation, () => {
           if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
             throw new TimeoutException("Global index lookup was cancelled or expired")
         })) catch {
@@ -113,12 +121,14 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
     result
   }
 
-  private def scan(request: Request, snapshot: Snapshot, position: Position, checkDeadline: () => Unit): Result = {
+  private def scan(request: Request, snapshot: Snapshot, position: Position, generation: AnyRef, checkDeadline: () => Unit): Result = {
     checkDeadline()
     val tp = new TopicIdPartition(snapshot.indexTopicId(), new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, snapshot.indexPartition()))
     val source = replicas.getPartitionOrException(tp)
     val epoch = Optional.of(Int.box(snapshot.leaderEpoch()))
     val log = source.localLogWithEpochOrThrow(epoch, requireLeader = true)
+    val cacheScope = CacheScope(snapshot.indexTopicId(), snapshot.indexPartition(), snapshot.leaderEpoch(),
+      new Identity(generation), new Identity(source), new Identity(log))
     def fetch(offset: Long, bytes: Int): LogReadInfo = {
       val params = new FetchParams(FetchRequest.CONSUMER_REPLICA_ID, -1L, 0L, 1, bytes, FetchIsolation.LOG_END, Optional.empty())
       val data = new FetchRequest.PartitionData(tp.topicId(), offset, FetchRequest.INVALID_LOG_START_OFFSET,
@@ -143,19 +153,33 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
       validate()
       val end = math.min(request.endOffset(), snapshot.committedGlobalEnd())
       val selected = mutable.ArrayBuffer.empty[Mapping]
+      val additions = mutable.ArrayBuffer.empty[Entry]
+      var cachedEnd: Option[Entry] = None
+      var scanFrom = request.startOffset()
+      var cacheMiss = false
+      while (!cacheMiss && scanFrom < end && selected.size < request.maxBatches()) {
+        checkDeadline()
+        mappingCache.get(cacheScope, request.topicId(), scanFrom, snapshot) match {
+          case Some(entry) =>
+            selected += entry.mapping
+            cachedEnd = Some(entry)
+            scanFrom = entry.mapping.globalEndOffset()
+          case None => cacheMiss = true
+        }
+      }
       val serde = new GlobalSequenceCoordinatorRecordSerde
       var scannedBytes = 0L
       val scanLimit = Option(resources).map(_.config().lookupScanMaxBytes().toLong).getOrElse(Long.MaxValue)
       val start = if (position.globalBaseOffset() <= request.startOffset() &&
         position.globalBaseOffset() < snapshot.committedGlobalEnd() && position.indexOffset() <= snapshot.indexHighWatermark() - 2)
         position else Position.START
-      var cursor = start.indexOffset()
-      var globalCursor = start.globalBaseOffset()
+      var cursor = cachedEnd.map(_.indexEndOffset).getOrElse(start.indexOffset())
+      var globalCursor = cachedEnd.map(_.mapping.globalEndOffset()).getOrElse(start.globalBaseOffset())
       var firstBatch = true
-      var verifyPosition = start != Position.START
+      var verifyPosition = cachedEnd.isEmpty && start != Position.START
       var staged: Option[Mapping] = None
       var stagedOffset = -1L
-      var done = request.startOffset() == end
+      var done = scanFrom >= end || selected.size >= request.maxBatches()
       val buffers = BufferSupplier.create()
       try {
         while (!done && cursor < snapshot.indexHighWatermark()) {
@@ -216,7 +240,10 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
                       if (mapping.globalBaseOffset() != globalCursor || mapping.globalEndOffset() > snapshot.committedGlobalEnd())
                         throw new CorruptRecordException("Global index range contradicts the committed snapshot")
                       globalCursor = mapping.globalEndOffset()
-                      if (mapping.globalEndOffset() > request.startOffset() && mapping.globalBaseOffset() < end) selected += mapping
+                      if (mapping.globalEndOffset() > scanFrom && mapping.globalBaseOffset() < end) {
+                        selected += mapping
+                        additions += Entry(mapping, cursor + 1)
+                      }
                       done = globalCursor >= end || selected.size >= request.maxBatches()
                     }
                     staged = None
@@ -235,6 +262,7 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
         if (!done || staged.nonEmpty) throw new CorruptRecordException("Committed global range is missing its allocation records")
       } finally buffers.close()
       validate()
+      mappingCache.putAll(cacheScope, additions.toSeq)
       new Result(snapshot, selected.toList.asJava,
         if (selected.isEmpty) request.startOffset() else math.min(end, selected.last.globalEndOffset()))
     } catch {
@@ -267,5 +295,6 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
     pending.asScala.foreach(_.completeExceptionally(new CoordinatorNotAvailableException("Global index reader is closed")))
     workers.shutdownNow()
     ThreadUtils.shutdownExecutorServiceQuietly(workers, 5, TimeUnit.SECONDS)
+    mappingCache.close()
   }
 }

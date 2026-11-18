@@ -135,6 +135,14 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT = 4096;
     public static final String SPI_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum sparse positions per topic across all levels. The oldest positions are discarded when the last level fills. Missing positions use a full index scan.";
 
+    public static final String INDEX_CACHE_MAX_ENTRIES_CONFIG = "global.sequence.index.cache.max.entries";
+    public static final int INDEX_CACHE_MAX_ENTRIES_DEFAULT = 100000;
+    public static final String INDEX_CACHE_MAX_ENTRIES_DOC = "Maximum committed mapping entries in the broker-wide lookup LRU cache. Zero disables the cache. Entries are populated by successful index lookups.";
+
+    public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG = "global.sequence.index.cache.max.entries.per.topic";
+    public static final int INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT = 10000;
+    public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum lookup cache entries per source topic UUID across index generations. The least recently used entries are evicted first.";
+
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
         .define(INDEX_TOPIC_NUM_PARTITIONS_CONFIG, INT, INDEX_TOPIC_NUM_PARTITIONS_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_NUM_PARTITIONS_DOC)
         .define(INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, SHORT, INDEX_TOPIC_REPLICATION_FACTOR_DEFAULT, atLeast(1), MEDIUM, INDEX_TOPIC_REPLICATION_FACTOR_DOC)
@@ -158,7 +166,9 @@ public class GlobalSequenceCoordinatorConfig {
         .define(LOOKUP_SCAN_MAX_BYTES_CONFIG, INT, LOOKUP_SCAN_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, LOOKUP_SCAN_MAX_BYTES_DOC)
         .define(SPI_BASE_INTERVAL_BATCHES_CONFIG, INT, SPI_BASE_INTERVAL_BATCHES_DEFAULT, atLeast(1), MEDIUM, SPI_BASE_INTERVAL_BATCHES_DOC)
         .define(SPI_ENTRIES_PER_LEVEL_CONFIG, INT, SPI_ENTRIES_PER_LEVEL_DEFAULT, atLeast(1), MEDIUM, SPI_ENTRIES_PER_LEVEL_DOC)
-        .define(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, SPI_MAX_ENTRIES_PER_TOPIC_DOC);
+        .define(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, SPI_MAX_ENTRIES_PER_TOPIC_DOC)
+        .define(INDEX_CACHE_MAX_ENTRIES_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_DEFAULT, atLeast(0), MEDIUM, INDEX_CACHE_MAX_ENTRIES_DOC)
+        .define(INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC);
 
     private final AbstractConfig config;
 
@@ -263,6 +273,14 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int spiMaxEntriesPerTopic() {
         return config.getInt(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG);
+    }
+
+    public int indexCacheMaxEntries() {
+        return config.getInt(INDEX_CACHE_MAX_ENTRIES_CONFIG);
+    }
+
+    public int indexCacheMaxEntriesPerTopic() {
+        return config.getInt(INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG);
     }
 
     /**

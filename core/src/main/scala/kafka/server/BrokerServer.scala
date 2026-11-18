@@ -713,7 +713,8 @@ class BrokerServer(
       .withWriter(new CoordinatorPartitionWriter(replicaManager))
       .withIndexReader(new GlobalSequenceIndexReader(replicaManager, kafkaScheduler, coordinatorTime,
         GlobalSequenceIndexReader.workers(config.globalSequenceCoordinatorConfig.readerNumThreads(), config.globalSequenceCoordinatorConfig.workerQueueSize()),
-        globalSequenceResources))
+        globalSequenceResources, new GlobalSequenceIndexCache(config.globalSequenceCoordinatorConfig.indexCacheMaxEntries(),
+          config.globalSequenceCoordinatorConfig.indexCacheMaxEntriesPerTopic(), metrics)))
       .withResources(globalSequenceResources)
       .withMetrics(metrics)
       .withTopicCreation(() => {

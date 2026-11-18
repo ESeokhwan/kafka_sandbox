@@ -66,6 +66,8 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(8, config.spiBaseIntervalBatches());
         assertEquals(256, config.spiEntriesPerLevel());
         assertEquals(4096, config.spiMaxEntriesPerTopic());
+        assertEquals(100000, config.indexCacheMaxEntries());
+        assertEquals(10000, config.indexCacheMaxEntriesPerTopic());
 
         Properties props = config.indexTopicConfigs();
         assertEquals("delete", props.getProperty(TopicConfig.CLEANUP_POLICY_CONFIG));
@@ -107,7 +109,8 @@ class GlobalSequenceCoordinatorConfigTest {
     void testRejectInvalidBounds() {
         for (String name : GlobalSequenceCoordinatorConfig.CONFIG_DEF.names()) {
             assertThrows(ConfigException.class, () -> config(Map.of(name, -1)), name);
-            if (!name.equals(GlobalSequenceCoordinatorConfig.APPEND_LINGER_MS_CONFIG)) {
+            if (!name.equals(GlobalSequenceCoordinatorConfig.APPEND_LINGER_MS_CONFIG) &&
+                !name.equals(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_CONFIG)) {
                 assertThrows(ConfigException.class, () -> config(Map.of(name, 0)), name);
             }
         }
@@ -118,6 +121,15 @@ class GlobalSequenceCoordinatorConfigTest {
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, 4)));
         assertThrows(ConfigException.class, () -> config(Map.of(
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_SEGMENT_BYTES_CONFIG, 1024)));
+    }
+
+    @Test
+    void testCacheCapacityOverridesAndDisable() {
+        assertEquals(0, config(Map.of(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_CONFIG, 0)).indexCacheMaxEntries());
+        var cache = config(Map.of(GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_CONFIG, 12,
+            GlobalSequenceCoordinatorConfig.INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG, 3));
+        assertEquals(12, cache.indexCacheMaxEntries());
+        assertEquals(3, cache.indexCacheMaxEntriesPerTopic());
     }
 
     @Test
