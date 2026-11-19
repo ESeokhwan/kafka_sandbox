@@ -23,6 +23,7 @@ import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.ByteBufferAccessor;
+import org.apache.kafka.common.protocol.SendBuilder;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.security.auth.KafkaPrincipalSerde;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
@@ -31,6 +32,7 @@ import org.apache.kafka.server.authorizer.AuthorizableRequestContext;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.Optional;
+import java.util.function.IntPredicate;
 
 import static org.apache.kafka.common.protocol.ApiKeys.API_VERSIONS;
 
@@ -149,6 +151,10 @@ public class RequestContext implements AuthorizableRequestContext {
      */
     public ByteBuffer buildResponseEnvelopePayload(AbstractResponse body) {
         return body.serializeWithHeader(header.toResponseHeader(), apiVersion());
+    }
+
+    public Send buildCoalescedResponseSend(AbstractResponse body, IntPredicate reserveBytes) {
+        return SendBuilder.buildCoalescedResponseSend(header.toResponseHeader(), body.data(), apiVersion(), reserveBytes);
     }
 
     private boolean isUnsupportedApiVersionsRequest() {

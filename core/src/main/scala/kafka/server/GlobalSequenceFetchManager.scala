@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.network.RequestChannel.{FetchTiming, ResourceResponse}
+import kafka.network.RequestChannel.{CoalescibleResponse, FetchTiming, ResourceResponse}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
 
@@ -38,7 +38,7 @@ import scala.util.control.NonFatal
 /** Bounds physical reads and emits only a contiguous prefix of the committed global order. */
 class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSequenceDataRouter,
                                  scheduler: Scheduler, time: Time, resources: GlobalSequenceResources = null,
-                                 readWindowMaxBatches: Int = 1) extends AutoCloseable {
+                                 readWindowMaxBatches: Int = 1, coalesceResponse: Boolean = false) extends AutoCloseable {
   import GlobalSequenceFetch._
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[FetchGlobalSequenceResponse]]()
   @volatile private var closed = false
@@ -134,10 +134,19 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
     }
 
     private def complete(page: FetchGlobalSequenceResponse): Unit = {
-      val owned = new FetchGlobalSequenceResponse(page.data()) with ResourceResponse {
+      class OwnedPage extends FetchGlobalSequenceResponse(page.data()) with ResourceResponse {
         override def release(): Unit = lease.foreach(_.finish(
           org.apache.kafka.common.protocol.Errors.forCode(page.data().errorCode()).exception()))
       }
+      val owned = if (coalesceResponse && !page.data().batches().isEmpty) {
+        new OwnedPage with CoalescibleResponse {
+          override def tryReserveFrameBytes(size: Int): Boolean = {
+            val reserved = lease.exists(_.tryReserveAdditionalBytes(size))
+            if (!reserved && resources != null) resources.recordFetchCoalesceFallback()
+            reserved
+          }
+        }
+      } else new OwnedPage
       if (timing != null && page.data().errorCode() == 0 && !page.data().batches().isEmpty)
         timing.pageReadyNs = time.nanoseconds()
       if (!result.complete(owned)) owned.release()

@@ -62,6 +62,7 @@ public final class GlobalSequenceResources implements AutoCloseable {
     private final Sensor fetchWindows;
     private final Sensor fetchRanges;
     private final Sensor fetchDiscardedBytes;
+    private final Sensor fetchCoalesceFallback;
     private final Sensor sourceRead;
     private final Sensor sourceReadDuration;
     private final List<MetricName> names = new ArrayList<>();
@@ -90,6 +91,8 @@ public final class GlobalSequenceResources implements AutoCloseable {
         fetchRanges.add(name("read-ranges-total", Scope.FETCH.name()), new CumulativeSum());
         fetchDiscardedBytes = sensor("fetch-discarded-bytes");
         fetchDiscardedBytes.add(name("discarded-read-bytes-total", Scope.FETCH.name()), new CumulativeSum());
+        fetchCoalesceFallback = sensor("fetch-coalesce-fallback");
+        fetchCoalesceFallback.add(name("coalesce-budget-fallback-total", Scope.FETCH.name()), new CumulativeCount());
         sourceRead = sensor("source-read");
         sourceRead.add(name("reads-total", "SOURCE_READ"), new CumulativeCount());
         sourceRead.add(name("batches-total", "SOURCE_READ"), new CumulativeSum());
@@ -128,6 +131,10 @@ public final class GlobalSequenceResources implements AutoCloseable {
         if (windows > 0) fetchWindows.record(windows);
         if (ranges > 0) fetchRanges.record(ranges);
         if (discardedBytes > 0) fetchDiscardedBytes.record(discardedBytes);
+    }
+
+    public void recordFetchCoalesceFallback() {
+        fetchCoalesceFallback.record();
     }
 
     public void recordSourceRead(int batches, double durationMs) {
@@ -199,7 +206,7 @@ public final class GlobalSequenceResources implements AutoCloseable {
     public final class Lease implements AutoCloseable {
         private final Budget budget;
         private final Object key;
-        private final long size;
+        private long size;
         private final long started = time.nanoseconds();
         private boolean released;
 
@@ -207,6 +214,17 @@ public final class GlobalSequenceResources implements AutoCloseable {
             this.budget = budget;
             this.key = key;
             this.size = size;
+        }
+
+        /** Extend this reservation without admitting a second operation. */
+        public boolean tryReserveAdditionalBytes(long extraBytes) {
+            if (extraBytes < 0) throw new IllegalArgumentException("Negative byte reservation");
+            synchronized (budget) {
+                if (released || closed || extraBytes > budget.byteLimit - budget.bytes) return false;
+                budget.bytes += extraBytes;
+                size += extraBytes;
+                return true;
+            }
         }
 
         public void finish(Throwable error) {

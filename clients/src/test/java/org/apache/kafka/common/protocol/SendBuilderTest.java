@@ -17,22 +17,56 @@
 package org.apache.kafka.common.protocol;
 
 import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.message.FetchGlobalSequenceResponseData;
+import org.apache.kafka.common.network.ByteBufferSend;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.UnalignedMemoryRecords;
+import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class SendBuilderTest {
+
+    @Test
+    public void testCoalescedGlobalFetchMatchesExistingFrame() {
+        MemoryRecords compressed = MemoryRecords.withRecords(Compression.gzip().build(), new SimpleRecord(Utils.utf8("first")));
+        MemoryRecords plain = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Utils.utf8("second")));
+        for (short version = 0; version <= 1; version++) {
+            FetchGlobalSequenceResponseData response = new FetchGlobalSequenceResponseData()
+                .setNextGlobalOffset(2)
+                .setThrottleTimeMs(5)
+                .setBatches(List.of(
+                    new FetchGlobalSequenceResponseData.FetchedBatch().setPhysicalPartition(0).setRecords(compressed),
+                    new FetchGlobalSequenceResponseData.FetchedBatch().setPhysicalPartition(1).setGlobalBaseOffset(1).setRecords(plain)));
+            ResponseHeader header = new ResponseHeader(42, ApiKeys.FETCH_GLOBAL_SEQUENCE.responseHeaderVersion(version));
+            for (Errors error : List.of(Errors.NONE, Errors.NOT_LEADER_OR_FOLLOWER)) {
+                response.setErrorCode(error.code());
+                ByteBuffer expected = TestUtils.toBuffer(SendBuilder.buildResponseSend(header, response, version));
+                ByteBufferSend send = (ByteBufferSend) SendBuilder.buildCoalescedResponseSend(header, response, version, size -> {
+                    assertEquals(expected.remaining(), size);
+                    return true;
+                });
+                assertEquals(1, send.bufferCount());
+                assertEquals(expected, TestUtils.toBuffer(send));
+                ByteBufferSend fallback = (ByteBufferSend) SendBuilder.buildCoalescedResponseSend(header, response, version, size -> false);
+                assertEquals(5, fallback.bufferCount());
+                assertEquals(expected, TestUtils.toBuffer(fallback));
+                assertEquals(0, compressed.buffer().position());
+                assertEquals(0, plain.buffer().position());
+            }
+        }
+    }
 
     @Test
     public void testZeroCopyByteBuffer() {

@@ -31,6 +31,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.function.IntPredicate;
 
 /**
  * This class provides a way to build {@link Send} objects for network transmission
@@ -205,17 +206,46 @@ public class SendBuilder implements Writable {
         );
     }
 
+    public static Send buildCoalescedResponseSend(
+        ResponseHeader header,
+        Message apiResponse,
+        short apiVersion,
+        IntPredicate reserveBytes
+    ) {
+        return buildSend(header.data(), header.headerVersion(), apiResponse, apiVersion, reserveBytes);
+    }
+
     private static Send buildSend(
         Message header,
         short headerVersion,
         Message apiMessage,
         short apiVersion
     ) {
+        return buildSend(header, headerVersion, apiMessage, apiVersion, null);
+    }
+
+    private static Send buildSend(
+        Message header,
+        short headerVersion,
+        Message apiMessage,
+        short apiVersion,
+        IntPredicate reserveBytes
+    ) {
         ObjectSerializationCache serializationCache = new ObjectSerializationCache();
 
         MessageSizeAccumulator messageSize = new MessageSizeAccumulator();
         header.addSize(messageSize, serializationCache, headerVersion);
         apiMessage.addSize(messageSize, serializationCache, apiVersion);
+
+        if (reserveBytes != null && reserveBytes.test(Math.addExact(messageSize.totalSize(), Integer.BYTES))) {
+            ByteBuffer frame = ByteBuffer.allocate(messageSize.totalSize() + Integer.BYTES);
+            ByteBufferAccessor writable = new ByteBufferAccessor(frame);
+            writable.writeInt(messageSize.totalSize());
+            header.write(writable, serializationCache, headerVersion);
+            apiMessage.write(writable, serializationCache, apiVersion);
+            frame.flip();
+            return new ByteBufferSend(frame);
+        }
 
         SendBuilder builder = new SendBuilder(messageSize.sizeExcludingZeroCopy() + 4);
         builder.writeInt(messageSize.totalSize());

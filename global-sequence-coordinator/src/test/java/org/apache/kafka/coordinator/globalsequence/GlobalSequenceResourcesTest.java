@@ -31,7 +31,9 @@ import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceResource
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.INDEX_ROUTE;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.PRODUCE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GlobalSequenceResourcesTest {
     private GlobalSequenceCoordinatorConfig config() {
@@ -58,6 +60,22 @@ class GlobalSequenceResourcesTest {
             fetch.close();
             assertEquals(0, resources.used(PRODUCE));
             assertEquals(0, resources.bytes(FETCH));
+        }
+    }
+
+    @Test
+    void testExtendFetchReservationWithoutAdmittingAnotherOperation() {
+        try (Metrics metrics = new Metrics(); GlobalSequenceResources resources = new GlobalSequenceResources(config(), metrics, new MockTime())) {
+            var lease = resources.acquire(FETCH, "a", GlobalSequenceResources.FETCH_BYTES - 4);
+            assertTrue(lease.tryReserveAdditionalBytes(3));
+            assertFalse(lease.tryReserveAdditionalBytes(2));
+            assertEquals(1, resources.used(FETCH));
+            assertEquals(GlobalSequenceResources.FETCH_BYTES - 1, resources.bytes(FETCH));
+            lease.close();
+            lease.close();
+            assertFalse(lease.tryReserveAdditionalBytes(1));
+            assertEquals(0, resources.bytes(FETCH));
+            assertEquals(0, resources.used(FETCH));
         }
     }
 
