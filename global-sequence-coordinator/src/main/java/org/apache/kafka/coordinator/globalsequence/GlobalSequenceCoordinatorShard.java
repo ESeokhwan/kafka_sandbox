@@ -34,6 +34,7 @@ import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataKey;
 import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataValue;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
+import org.apache.kafka.server.immutable.ImmutableMap;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 import org.apache.kafka.timeline.TimelineLong;
@@ -55,9 +56,9 @@ import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordina
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.validatePhysicalBatch;
 
 /**
- * Ordered allocator for the topics assigned to one index partition. All access is serialized
- * by CoordinatorRuntime. Only replay changes speculative state; only index HW advancement
- * changes committed state. Historical batch mappings are deliberately not retained here.
+ * Ordered allocator for the topics assigned to one index partition. CoordinatorRuntime
+ * serializes writes. Only replay changes speculative state; only index HW advancement
+ * changes committed state. Lookups share the committed topic map and thread-safe positions.
  *
  * The caller must validate the source leader against cluster metadata and submit batches read
  * without omissions from its committed data log. Predecessors validate submission order, not
@@ -204,11 +205,13 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     private final TimelineHashMap<PartitionKey, Fence> latestFences;
     private final TimelineLong nextReplayOffset;
 
+    record CommittedTopic(long globalEnd, GlobalSequenceSparseIndex positions) { }
+
     // HW never rolls back. These maps contain only the latest committed state per topic/partition.
-    private final Map<Uuid, Long> committedGlobalOffsets = new HashMap<>();
+    private ImmutableMap<Uuid, CommittedTopic> committedTopics = ImmutableMap.empty();
     private final Map<PartitionKey, Allocation> committedAllocations = new HashMap<>();
     private final Map<PartitionKey, Fence> committedFences = new HashMap<>();
-    private final Map<Uuid, GlobalSequenceSparseIndex> sparseIndexes = new HashMap<>();
+    private final Object lookupGeneration = new Object();
     private final int spiBaseIntervalBatches;
     private final int spiEntriesPerLevel;
     private final int spiMaxEntriesPerTopic;
@@ -382,12 +385,21 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     }
 
     public long committedNextGlobalOffset(Uuid topicId) {
-        return committedGlobalOffsets.getOrDefault(topicId, 0L);
+        CommittedTopic topic = committedTopics.get(topicId);
+        return topic == null ? 0L : topic.globalEnd();
     }
 
     public Optional<GlobalSequenceLookup.Position> lookupPosition(Uuid topicId, long globalOffset) {
-        GlobalSequenceSparseIndex index = sparseIndexes.get(topicId);
-        return index == null ? Optional.empty() : index.floor(globalOffset);
+        CommittedTopic topic = committedTopics.get(topicId);
+        return topic == null ? Optional.empty() : topic.positions().floor(globalOffset);
+    }
+
+    ImmutableMap<Uuid, CommittedTopic> committedTopics() {
+        return committedTopics;
+    }
+
+    Object lookupGeneration() {
+        return lookupGeneration;
     }
 
     /** Includes allocations which have not yet committed. Not a public read boundary. */
@@ -484,18 +496,25 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         if (newHighWatermark < highWatermark || newHighWatermark > nextReplayOffset.get()) {
             throw new IllegalStateException("Index HW must advance within the replayed log");
         }
+        Map<Uuid, CommittedTopic> updatedTopics = new HashMap<>();
         while (!pendingChanges.isEmpty() && pendingChanges.firstKey() <= newHighWatermark) {
             PendingChange change = pendingChanges.pollFirstEntry().getValue();
             if (change instanceof Allocation allocation) {
-                committedGlobalOffsets.put(allocation.batch().partition().topicId(), allocation.globalEndOffset());
+                Uuid topicId = allocation.batch().partition().topicId();
+                CommittedTopic topic = updatedTopics.getOrDefault(topicId, committedTopics.get(topicId));
+                GlobalSequenceSparseIndex positions = topic == null
+                    ? new GlobalSequenceSparseIndex(spiBaseIntervalBatches, spiEntriesPerLevel, spiMaxEntriesPerTopic)
+                    : topic.positions();
+                positions.add(new GlobalSequenceLookup.Position(allocation.globalBaseOffset(), allocation.endOffset() - 2));
+                updatedTopics.put(topicId, new CommittedTopic(allocation.globalEndOffset(), positions));
                 committedAllocations.put(allocation.batch().partition(), allocation);
                 pendingAllocations.remove(allocation.batch().id());
-                sparseIndexes.computeIfAbsent(allocation.batch().partition().topicId(), ignored ->
-                    new GlobalSequenceSparseIndex(spiBaseIntervalBatches, spiEntriesPerLevel, spiMaxEntriesPerTopic))
-                    .add(new GlobalSequenceLookup.Position(allocation.globalBaseOffset(), allocation.endOffset() - 2));
             } else if (change instanceof Fence fence) {
                 committedFences.put(fence.partition(), fence);
             }
+        }
+        for (var entry : updatedTopics.entrySet()) {
+            committedTopics = committedTopics.updated(entry.getKey(), entry.getValue());
         }
         highWatermark = newHighWatermark;
     }

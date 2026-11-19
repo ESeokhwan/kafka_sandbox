@@ -20,7 +20,11 @@ package org.apache.kafka.coordinator.globalsequence;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.errors.NotCoordinatorException;
+import org.apache.kafka.common.errors.OffsetOutOfRangeException;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorPlayback;
@@ -31,6 +35,7 @@ import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShardBuilder;
 import org.apache.kafka.coordinator.common.runtime.ManualEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.MockPartitionWriter;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorService.LookupPartitions;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendResponse;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.IndexerIdentity;
@@ -38,6 +43,7 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShar
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.RegistrationResponse;
+import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.server.util.timer.MockTimer;
 
 import org.junit.jupiter.api.Test;
@@ -47,14 +53,18 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newBatchIndexRecord;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newIndexerFenceRecord;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newTopicMetadataRecord;
+import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorServiceTest.image;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendStatus.ALREADY_INDEXED;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendStatus.INDEXED;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendStatus.OUT_OF_ORDER;
@@ -63,6 +73,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -89,6 +100,7 @@ class GlobalSequenceCoordinatorShardRuntimeTest {
         final ManualEventProcessor processor = new ManualEventProcessor();
         final MockPartitionWriter writer;
         final int lingerMs;
+        final LookupPartitions lookupPartitions = new LookupPartitions(1);
         final CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime;
         GlobalSequenceCoordinatorShard shard;
 
@@ -125,6 +137,7 @@ class GlobalSequenceCoordinatorShardRuntimeTest {
                 .withLoader(loader)
                 .withEventProcessor(processor)
                 .withPartitionWriter(writer)
+                .withCoordinatorStateListener(lookupPartitions::onUpdate)
                 .withCoordinatorShardBuilderSupplier(() -> builder)
                 .withCoordinatorRuntimeMetrics(mock(CoordinatorRuntimeMetrics.class))
                 .withCoordinatorMetrics(mock(CoordinatorMetrics.class))
@@ -174,6 +187,52 @@ class GlobalSequenceCoordinatorShardRuntimeTest {
         @Override
         public void close() throws Exception {
             runtime.close();
+        }
+    }
+
+    @Test
+    void testLookupUsesAppliedCommitAndOwnershipWithoutDrainingRuntime() throws Exception {
+        try (Context ctx = new Context(0, new MockPartitionWriter())) {
+            GlobalSequenceCoordinatorConfig config = new GlobalSequenceCoordinatorConfig(new AbstractConfig(
+                GlobalSequenceCoordinatorConfig.CONFIG_DEF,
+                Map.of(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, 1), false));
+            GlobalSequenceLookup.Reader reader = mock(GlobalSequenceLookup.Reader.class);
+            when(reader.read(any(), any(), any(), any(), anyLong())).thenAnswer(invocation ->
+                CompletableFuture.completedFuture(new GlobalSequenceLookup.Result(invocation.getArgument(1), List.of(), 0)));
+            GlobalSequenceCoordinatorService service = new GlobalSequenceCoordinatorService(new LogContext(), config,
+                ctx.runtime, ctx.timer, () -> { }, reader, ctx.timer.time(), 1, ctx.lookupPartitions);
+            service.startup(() -> 1);
+            var metadata = image(1, true, 1, 10);
+            service.onNewMetadataImage(metadata, new MetadataDelta.Builder().setImage(metadata).build());
+            ctx.register(P0);
+
+            var append = ctx.append(A, -1, TIMEOUT);
+            var request = new GlobalSequenceLookup.Request(TOPIC, 0, 3, 1, 1000);
+            var before = service.lookupIndex(request, 10).get(5, TimeUnit.SECONDS).snapshot();
+            assertFalse(append.isDone());
+            assertEquals(0L, before.committedGlobalEnd());
+            assertEquals(1L, before.indexHighWatermark());
+            assertFutureThrows(OffsetOutOfRangeException.class,
+                service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 1, 3, 1, 1000), 10));
+
+            ctx.commit(3);
+            assertEquals(INDEXED, append.join().status());
+            var after = service.lookupIndex(request, 10).get(5, TimeUnit.SECONDS).snapshot();
+            assertEquals(3L, after.committedGlobalEnd());
+            assertEquals(3L, after.indexHighWatermark());
+
+            metadata = image(1, true, 1, 11);
+            service.onNewMetadataImage(metadata, new MetadataDelta.Builder().setImage(metadata).build());
+            assertFutureThrows(NotCoordinatorException.class, service.lookupIndex(request, 10));
+            service.onElection(0, 11);
+            ctx.drain();
+            var afterElection = service.lookupIndex(request, 11).get(5, TimeUnit.SECONDS).snapshot();
+            assertEquals(11, afterElection.leaderEpoch());
+            assertEquals(3L, afterElection.committedGlobalEnd());
+
+            service.onResignation(0, OptionalInt.of(12));
+            ctx.drain();
+            assertFutureThrows(NotCoordinatorException.class, service.lookupIndex(request, 11));
         }
     }
 

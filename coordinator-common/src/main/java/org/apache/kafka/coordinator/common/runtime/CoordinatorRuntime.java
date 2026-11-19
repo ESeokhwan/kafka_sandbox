@@ -121,12 +121,18 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         private Compression compression;
         private int appendLingerMs;
         private ExecutorService executorService;
+        private CoordinatorStateListener<S> stateListener;
 
         private java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission = (tp, write) -> () -> { };
 
         /** Admission for read/write events only. Release follows actual execution/commit, not caller cancellation or timeout. */
         public Builder<S, U> withOperationAdmission(java.util.function.BiFunction<TopicPartition, Boolean, Runnable> admission) {
             this.operationAdmission = java.util.Objects.requireNonNull(admission);
+            return this;
+        }
+
+        public Builder<S, U> withCoordinatorStateListener(CoordinatorStateListener<S> listener) {
+            this.stateListener = listener;
             return this;
         }
 
@@ -251,9 +257,20 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 compression,
                 appendLingerMs,
                 executorService,
-                operationAdmission
+                operationAdmission,
+                stateListener
             );
         }
+    }
+
+    /**
+     * Publishes changes to the state, epoch, or applied high watermark of a coordinator.
+     * Invoked under the context lock. Implementations must be nonblocking and must only
+     * expose committed state. The context and shard arguments are null unless active.
+     */
+    @FunctionalInterface
+    public interface CoordinatorStateListener<S> {
+        void onUpdate(TopicPartition tp, CoordinatorState state, CoordinatorReadContext context, S shard);
     }
 
     /**
@@ -656,6 +673,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             switch (newState) {
                 case LOADING:
                     state = CoordinatorState.LOADING;
+                    publishState();
                     SnapshotRegistry snapshotRegistry = new SnapshotRegistry(logContext);
                     coordinator = new SnapshottableCoordinator<>(
                         logContext,
@@ -680,15 +698,18 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                     highWatermarklistener = new HighWatermarkListener();
                     partitionWriter.registerListener(tp, highWatermarklistener);
                     coordinator.onLoaded(metadataImage);
+                    publishState();
                     break;
 
                 case FAILED:
                     state = CoordinatorState.FAILED;
+                    publishState();
                     unload();
                     break;
 
                 case CLOSED:
                     state = CoordinatorState.CLOSED;
+                    publishState();
                     unload();
                     break;
 
@@ -697,6 +718,16 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             }
 
             runtimeMetrics.recordPartitionStateChange(oldState, state);
+        }
+
+        private void publishState() {
+            if (stateListener == null) return;
+            if (state == CoordinatorState.ACTIVE) {
+                stateListener.onUpdate(tp, state,
+                    new CoordinatorReadContext(coordinator.lastCommittedOffset(), epoch), coordinator.coordinator());
+            } else {
+                stateListener.onUpdate(tp, state, null, null);
+            }
         }
 
         /**
@@ -1984,6 +2015,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                                 log.debug("Updating high watermark of {} to {}.", tp, newHighWatermark);
                                 try {
                                     context.coordinator.updateLastCommittedOffset(newHighWatermark);
+                                    context.publishState();
                                 } catch (Throwable t) {
                                     // Committed bookkeeping must be restored by loading before more writes run.
                                     context.transitionTo(CoordinatorState.FAILED);
@@ -2111,6 +2143,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
     private volatile MetadataImage metadataImage = MetadataImage.EMPTY;
 
     private final java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission;
+    private final CoordinatorStateListener<S> stateListener;
 
     /**
      * Constructor.
@@ -2131,6 +2164,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
      * @param appendLingerMs                    The append linger time in ms.
      * @param executorService                   The executor service.
      * @param operationAdmission                Admission and completion hook for client read/write events.
+     * @param stateListener                     Optional listener for published coordinator state.
      */
     @SuppressWarnings("checkstyle:ParameterNumber")
     private CoordinatorRuntime(
@@ -2149,9 +2183,11 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         Compression compression,
         int appendLingerMs,
         ExecutorService executorService,
-        java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission
+        java.util.function.BiFunction<TopicPartition, Boolean, Runnable> operationAdmission,
+        CoordinatorStateListener<S> stateListener
     ) {
         this.operationAdmission = operationAdmission;
+        this.stateListener = stateListener;
         this.logPrefix = logPrefix;
         this.logContext = logContext;
         this.log = logContext.logger(CoordinatorRuntime.class);
@@ -2539,6 +2575,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                             break;
 
                         case ACTIVE:
+                            context.publishState();
                             log.info("The coordinator {} is already active.", tp);
                             break;
 
