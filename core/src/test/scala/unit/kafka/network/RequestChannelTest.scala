@@ -28,12 +28,12 @@ import org.apache.kafka.common.memory.MemoryPool
 import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic
 import org.apache.kafka.common.message.IncrementalAlterConfigsRequestData._
 import org.apache.kafka.common.message.{CreateTopicsRequestData, CreateTopicsResponseData, IncrementalAlterConfigsRequestData}
-import org.apache.kafka.common.network.{ClientInformation, ListenerName}
+import org.apache.kafka.common.network.{ByteBufferSend, ClientInformation, ListenerName, TransferableChannel}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests.AlterConfigsRequest._
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, KafkaPrincipalSerde, SecurityProtocol}
-import org.apache.kafka.common.utils.{SecurityUtils, Utils}
+import org.apache.kafka.common.utils.{MockTime, SecurityUtils, Utils}
 import org.apache.kafka.network.RequestConvertToJson
 import org.apache.kafka.network.metrics.RequestChannelMetrics
 import org.apache.kafka.test
@@ -41,7 +41,7 @@ import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api._
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
-import org.mockito.Mockito.mock
+import org.mockito.Mockito.{mock, when}
 
 import java.io.IOException
 import java.net.InetAddress
@@ -53,6 +53,35 @@ import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters.RichOption
 
 class RequestChannelTest {
+  @Test
+  def testGlobalFetchSendRecordsPartialAndZeroByteWrites(): Unit = {
+    val time = new MockTime(0, 0, 0)
+    val buffers = Array(ByteBuffer.wrap(Array[Byte](1)), ByteBuffer.wrap(Array[Byte](2)))
+    val channel = mock(classOf[TransferableChannel])
+    when(channel.write(buffers)).thenAnswer { _ =>
+      time.sleep(1)
+      0L
+    }.thenAnswer { _ =>
+      time.sleep(1)
+      1L
+    }
+    val timing = new RequestChannel.GlobalFetchTiming
+    val send = new RequestChannel.TimedGlobalFetchSend(new ByteBufferSend(buffers, 2), timing, time)
+    time.sleep(1)
+    assertEquals(0L, send.writeTo(channel))
+    assertEquals(1L, send.writeTo(channel))
+    assertFalse(send.completed())
+    time.sleep(2)
+    assertEquals(1L, send.writeTo(channel))
+    assertTrue(send.completed())
+    assertEquals(2, timing.sendBuffers)
+    assertEquals(3, timing.writeCalls)
+    assertEquals(1, timing.zeroByteWrites)
+    assertEquals(1000000L, timing.firstWriteNs)
+    assertEquals(6000000L, timing.lastWriteEndNs)
+    assertEquals(3000000L, timing.writeElapsedNs)
+  }
+
   private val requestChannelMetrics: RequestChannelMetrics = mock(classOf[RequestChannelMetrics])
   private val principalSerde = new KafkaPrincipalSerde() {
     override def serialize(principal: KafkaPrincipal): Array[Byte] = Utils.utf8(principal.toString)

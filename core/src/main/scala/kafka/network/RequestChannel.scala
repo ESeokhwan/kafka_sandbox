@@ -28,7 +28,7 @@ import kafka.utils.Logging
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.memory.MemoryPool
 import org.apache.kafka.common.message.EnvelopeResponseData
-import org.apache.kafka.common.network.Send
+import org.apache.kafka.common.network.{ByteBufferSend, Send, TransferableChannel}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.utils.Time
@@ -69,6 +69,31 @@ object RequestChannel extends Logging {
     var lastRangeCallbackNs = 0L
     var pageReadyNs = 0L
     var sendCompleteNs = 0L
+    var sendBuffers = 0
+    var writeCalls = 0
+    var zeroByteWrites = 0
+    var firstWriteNs = 0L
+    var lastWriteEndNs = 0L
+    var writeElapsedNs = 0L
+  }
+
+  private[network] final class TimedGlobalFetchSend(delegate: ByteBufferSend, timing: GlobalFetchTiming, time: Time) extends Send {
+    timing.sendBuffers = delegate.bufferCount()
+
+    override def completed(): Boolean = delegate.completed()
+    override def size(): Long = delegate.size()
+
+    override def writeTo(channel: TransferableChannel): Long = {
+      val start = time.nanoseconds()
+      val written = delegate.writeTo(channel)
+      val end = time.nanoseconds()
+      if (timing.writeCalls == 0) timing.firstWriteNs = start
+      timing.writeCalls += 1
+      if (written == 0) timing.zeroByteWrites += 1
+      timing.lastWriteEndNs = end
+      timing.writeElapsedNs += end - start
+      written
+    }
   }
 
   class Request(val processor: Int,
@@ -434,9 +459,16 @@ class RequestChannel(val queueSize: Int,
         .map { case (error, count) => error -> count.intValue() }
         .toMap
       updateErrorMetrics(request.header.apiKey, response.errorCounts.asScala)
+      val send = request.buildResponseSend(response)
+      val timing = request.globalFetchTiming
+      val responseSend = send match {
+        case buffers: ByteBufferSend if timing != null && timing.pageReadyNs != 0L && onComplete.isDefined =>
+          new TimedGlobalFetchSend(buffers, timing, time)
+        case _ => send
+      }
       sendResponse(new RequestChannel.SendResponse(
         request,
-        request.buildResponseSend(response),
+        responseSend,
         request.responseNode(response),
         onComplete,
         release,

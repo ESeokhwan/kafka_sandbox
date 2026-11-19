@@ -64,6 +64,9 @@ final class GlobalSequenceMonitoringInterceptor(
   private val fetchTimingTotalsNs = new Array[Long](FetchTimingScopes.length)
   private var fetchTimingSamples = 0L
   private var rangeTimingSamples = 0L
+  private var writeTimingSamples = 0L
+  private val writeCountTotals = new Array[Long](WriteCountScopes.length)
+  private val writeTimingTotalsNs = new Array[Long](WriteTimingScopes.length)
 
   private val queue = new MonitorQueue
   private var writer: MonitorLogWriter = _
@@ -156,6 +159,16 @@ final class GlobalSequenceMonitoringInterceptor(
           fetchTimingTotalsNs(7) += timing.lastRangeCallbackNs - timing.lookupCompleteNs
           fetchTimingTotalsNs(8) += timing.pageReadyNs - timing.lastRangeCallbackNs
         }
+        if (timing.writeCalls > 0) {
+          writeTimingSamples += 1
+          writeCountTotals(0) += timing.sendBuffers
+          writeCountTotals(1) += timing.writeCalls
+          writeCountTotals(2) += timing.zeroByteWrites
+          writeTimingTotalsNs(0) += timing.firstWriteNs - sending
+          writeTimingTotalsNs(1) += timing.writeElapsedNs
+          writeTimingTotalsNs(2) += timing.lastWriteEndNs - timing.firstWriteNs - timing.writeElapsedNs
+          writeTimingTotalsNs(3) += timing.sendCompleteNs - timing.lastWriteEndNs
+        }
       }
     }
   }
@@ -196,11 +209,15 @@ final class GlobalSequenceMonitoringInterceptor(
     }
     emit("append-linger-ms", config.appendLingerMs())
 
-    val (pageSamples, rangeSamples, stageTotals) = fetchTimingLock.synchronized {
-      val window = (fetchTimingSamples, rangeTimingSamples, fetchTimingTotalsNs.clone())
+    val (pageSamples, rangeSamples, stageTotals, writeSamples, writeCounts, writeTimes) = fetchTimingLock.synchronized {
+      val window = (fetchTimingSamples, rangeTimingSamples, fetchTimingTotalsNs.clone(),
+        writeTimingSamples, writeCountTotals.clone(), writeTimingTotalsNs.clone())
       fetchTimingSamples = 0L
       rangeTimingSamples = 0L
+      writeTimingSamples = 0L
       java.util.Arrays.fill(fetchTimingTotalsNs, 0L)
+      java.util.Arrays.fill(writeCountTotals, 0L)
+      java.util.Arrays.fill(writeTimingTotalsNs, 0L)
       window
     }
     def emitTiming(name: String, scope: String, value: AnyVal): Unit =
@@ -211,6 +228,15 @@ final class GlobalSequenceMonitoringInterceptor(
       emitTiming("samples", "range-page", rangeSamples)
       FetchTimingScopes.indices.foreach { stage =>
         emitTiming("duration-ms-total", FetchTimingScopes(stage), stageTotals(stage) / 1000000.0)
+      }
+    }
+    if (writeSamples > 0) {
+      emitTiming("samples", "socket-write-page", writeSamples)
+      WriteCountScopes.indices.foreach { metric =>
+        emitTiming("count-total", WriteCountScopes(metric), writeCounts(metric))
+      }
+      WriteTimingScopes.indices.foreach { stage =>
+        emitTiming("duration-ms-total", WriteTimingScopes(stage), writeTimes(stage) / 1000000.0)
       }
     }
 
@@ -274,6 +300,9 @@ private object GlobalSequenceMonitoringInterceptor {
   private val FetchTimingScopes = Vector("request-queue", "handler-to-lookup", "index-lookup",
     "lookup-to-page-ready", "page-ready-to-response-queue", "response-queue", "response-send",
     "lookup-to-last-range-callback", "last-range-callback-to-page-ready")
+  private val WriteCountScopes = Vector("response-send-buffers", "socket-write-calls", "zero-byte-socket-write-calls")
+  private val WriteTimingScopes = Vector("response-dequeue-to-first-write", "socket-write",
+    "between-socket-writes", "last-write-to-send-complete")
 
   private val ResourceScopes = Set("indexing_lag", "coordinator_write", "index_route", "index_rpc",
     "index_read", "lookup_route", "fetch", "data_read", "rpc_retry", "source_read")

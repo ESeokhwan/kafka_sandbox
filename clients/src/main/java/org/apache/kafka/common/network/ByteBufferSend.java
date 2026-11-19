@@ -67,6 +67,10 @@ public class ByteBufferSend implements Send {
         return remaining;
     }
 
+    public int bufferCount() {
+        return buffers.length;
+    }
+
     @Override
     public String toString() {
         return "ByteBufferSend(" +

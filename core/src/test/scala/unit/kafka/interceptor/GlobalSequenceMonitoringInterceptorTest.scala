@@ -125,6 +125,12 @@ class GlobalSequenceMonitoringInterceptorTest {
       val sent = new RequestChannel.SendResponse(measured, mock(classOf[Send]), None, None)
       monitor.afterProcessResponse(sent, "connection")
       timing.sendCompleteNs = 14000000L
+      timing.sendBuffers = 17
+      timing.writeCalls = 3
+      timing.zeroByteWrites = 1
+      timing.firstWriteNs = 12300000L
+      timing.lastWriteEndNs = 13900000L
+      timing.writeElapsedNs = 500000L
       monitor.afterProcessResponse(sent, "connection")
 
       resources.recordSourceRead(3, 2.5)
@@ -164,7 +170,15 @@ class GlobalSequenceMonitoringInterceptorTest {
       "duration-ms-total,response-queue,1.0",
       "duration-ms-total,response-send,2.0",
       "duration-ms-total,lookup-to-last-range-callback,3.0",
-      "duration-ms-total,last-range-callback-to-page-ready,1.0"
+      "duration-ms-total,last-range-callback-to-page-ready,1.0",
+      "samples,socket-write-page,1",
+      "count-total,response-send-buffers,17",
+      "count-total,socket-write-calls,3",
+      "count-total,zero-byte-socket-write-calls,1",
+      "duration-ms-total,response-dequeue-to-first-write,0.3",
+      "duration-ms-total,socket-write,0.5",
+      "duration-ms-total,between-socket-writes,1.1",
+      "duration-ms-total,last-write-to-send-complete,0.1"
     ).map("2000,1000,2,,,global-sequence-fetch-timing," + _), timings.toSeq)
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,physical-offsets,indexing_lag,23"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,reads-total,source_read,2.0"))
