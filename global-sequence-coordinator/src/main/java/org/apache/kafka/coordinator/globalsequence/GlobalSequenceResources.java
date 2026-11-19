@@ -24,6 +24,7 @@ import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.metrics.stats.CumulativeCount;
+import org.apache.kafka.common.metrics.stats.CumulativeSum;
 import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.utils.Time;
 
@@ -58,6 +59,7 @@ public final class GlobalSequenceResources implements AutoCloseable {
     private final Map<Scope, Budget> budgets = new EnumMap<>(Scope.class);
     private final Map<Event, Sensor> events = new EnumMap<>(Event.class);
     private final Map<Progress, AtomicLong> progress = new EnumMap<>(Progress.class);
+    private final Sensor sourceRead;
     private final List<MetricName> names = new ArrayList<>();
     private final List<String> sensors = new ArrayList<>();
 
@@ -78,6 +80,9 @@ public final class GlobalSequenceResources implements AutoCloseable {
             progress.put(value, gauge);
             metrics.addMetric(name("physical-offsets", value.name()), (Gauge<Long>) (c, now) -> gauge.get());
         }
+        sourceRead = sensor("source-read");
+        sourceRead.add(name("reads-total", "SOURCE_READ"), new CumulativeCount());
+        sourceRead.add(name("batches-total", "SOURCE_READ"), new CumulativeSum());
     }
 
     public GlobalSequenceCoordinatorConfig config() {
@@ -106,6 +111,9 @@ public final class GlobalSequenceResources implements AutoCloseable {
     }
     public void progress(Progress kind, long delta) {
         progress.get(kind).addAndGet(delta);
+    }
+    public void recordSourceRead(int batches) {
+        sourceRead.record(batches);
     }
     public long used(Scope scope) {
         return budgets.get(scope).count();

@@ -87,11 +87,11 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     assertEquals(2L, partial.dataHighWatermark)
     assertEquals(2L, log.highWatermark, "Reading must not normalize or mutate the source HW")
     assertEquals(0L, partial.nextPhysicalOffset)
-    assertTrue(partial.batch.isEmpty)
+    assertTrue(partial.batches.isEmpty)
     commit()
     val complete = read(0, maxBytes = 1)
     assertEquals(BATCH, complete.status)
-    assertEquals(Some(new PhysicalBatch(key, 0, 2, 3)), complete.batch)
+    assertEquals(Vector(new PhysicalBatch(key, 0, 2, 3)), complete.batches)
     assertEquals(3L, complete.nextPhysicalOffset)
     assertEquals(3L, complete.dataHighWatermark)
     assertEquals(epoch, complete.sourceLeaderEpoch)
@@ -101,7 +101,7 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
   }
 
   @Test
-  def testOneTargetBatchPerReadAndControlBatchesNeverGetIndexed(): Unit = {
+  def testReadReturnsAllCompleteDataBatchesInOrderAndSkipsControlBatches(): Unit = {
     marker(ControlRecordType.COMMIT) // 0
     append(2) // 1..2
     marker(ControlRecordType.ABORT) // 3
@@ -109,14 +109,13 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     marker(ControlRecordType.COMMIT) // 5
     commit()
     val first = read(0)
-    assertEquals(Some(new PhysicalBatch(key, 1, 2, 2)), first.batch)
-    assertEquals(3L, first.nextPhysicalOffset)
-    val second = read(first.nextPhysicalOffset)
-    assertEquals(Some(new PhysicalBatch(key, 4, 4, 1)), second.batch)
-    val end = read(second.nextPhysicalOffset)
+    assertEquals(BATCH, first.status)
+    assertEquals(Vector(new PhysicalBatch(key, 1, 2, 2), new PhysicalBatch(key, 4, 4, 1)), first.batches)
+    assertEquals(6L, first.nextPhysicalOffset)
+    val end = read(first.nextPhysicalOffset)
     assertEquals(AWAIT_HIGH_WATERMARK, end.status)
     assertEquals(6L, end.nextPhysicalOffset)
-    assertTrue(end.batch.isEmpty)
+    assertTrue(end.batches.isEmpty)
   }
 
   @Test
@@ -129,12 +128,12 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     val first = read(0, controlSize + 10)
     assertEquals(CONTINUE, first.status)
     assertEquals(1L, first.nextPhysicalOffset)
-    assertTrue(first.batch.isEmpty)
+    assertTrue(first.batches.isEmpty)
     val second = read(1, maxBytes = 1)
     assertEquals(CONTINUE, second.status)
     assertEquals(2L, second.nextPhysicalOffset)
     val third = read(2, maxBytes = 1)
-    assertEquals(Some(new PhysicalBatch(key, 2, 4, 3)), third.batch)
+    assertEquals(Vector(new PhysicalBatch(key, 2, 4, 3)), third.batches)
   }
 
   @Test
@@ -159,11 +158,11 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     log.appendAsLeader(records, epoch, AppendOrigin.CLIENT, RequestLocal.noCaching(), guard)
     commit()
     assertEquals(0L, log.lastStableOffset)
-    assertEquals(Some(new PhysicalBatch(key, 0, 1, 2)), read(0).batch)
+    assertEquals(Vector(new PhysicalBatch(key, 0, 1, 2)), read(0).batches)
     log.appendAsLeader(MemoryRecords.withEndTransactionMarker(producerId, 0.toShort, new EndTransactionMarker(ControlRecordType.ABORT, 0)),
       epoch, AppendOrigin.COORDINATOR)
     commit()
-    assertEquals(Some(new PhysicalBatch(key, 0, 1, 2)), read(0).batch)
+    assertEquals(Vector(new PhysicalBatch(key, 0, 1, 2)), read(0).batches)
     assertEquals(3L, read(2).nextPhysicalOffset)
     assertEquals(AWAIT_HIGH_WATERMARK, read(2).status)
   }
@@ -177,7 +176,7 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     val first = read(0)
     assertEquals(CONTINUE, first.status)
     assertEquals(1L, first.nextPhysicalOffset)
-    assertEquals(Some(new PhysicalBatch(key, 1, 2, 2)), read(first.nextPhysicalOffset).batch)
+    assertEquals(Vector(new PhysicalBatch(key, 1, 2, 2)), read(first.nextPhysicalOffset).batches)
   }
 
   @Test
@@ -194,7 +193,7 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     assertEquals(2L, gap.logStartOffset)
     assertEquals(3L, gap.logEndOffset)
     assertThrows(classOf[SourceLogGapException], () => read(4))
-    assertEquals(Some(new PhysicalBatch(key, 2, 2, 1)), read(2).batch)
+    assertEquals(Vector(new PhysicalBatch(key, 2, 2, 1)), read(2).batches)
   }
 
   @Test
@@ -215,7 +214,7 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     partition.makeLeader(state(brokerId, epoch + 2), offsetCheckpoints, topicId)
     assertThrows(classOf[FencedLeaderEpochException], () => read(0))
     // Stored batch leader epochs do not form part of the physical batch identity.
-    assertEquals(Some(new PhysicalBatch(key, 0, 1, 2)), reader.read(key, epoch + 2, 0, 1024).batch)
+    assertEquals(Vector(new PhysicalBatch(key, 0, 1, 2)), reader.read(key, epoch + 2, 0, 1024).batches)
   }
 
   @Test

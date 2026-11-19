@@ -23,7 +23,7 @@ import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.AbstractConfig
 import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.message.{FetchGlobalSequenceRequestData, ProduceRequestData}
-import org.apache.kafka.common.metrics.{Gauge, Metrics}
+import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.Send
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.{MemoryRecords, SimpleRecord}
@@ -68,8 +68,8 @@ class GlobalSequenceMonitoringInterceptorTest {
     ), false))
     val time = new MockTime(0, 1000, 0)
     val metrics = new Metrics(time)
-    val lag = metrics.metricName("physical-offsets", GlobalSequenceResources.GROUP, "", "scope", "indexing_lag")
-    metrics.addMetric(lag, ((_, _) => 23L): Gauge[Long])
+    val resources = new GlobalSequenceResources(config, metrics, time)
+    resources.progress(GlobalSequenceResources.Progress.INDEXING_LAG, 23)
     val coordinator = mock(classOf[GlobalSequenceCoordinator])
     val snapshot = new CompletableFuture[GlobalSequenceLookup.Snapshot]
     when(coordinator.committedSnapshot(topicId, leaderEpoch)).thenReturn(snapshot, new CompletableFuture[GlobalSequenceLookup.Snapshot])
@@ -104,6 +104,8 @@ class GlobalSequenceMonitoringInterceptorTest {
       monitor.beforeSendResponseToQueue(new RequestChannel.SendResponse(fetch, mock(classOf[Send]), None, None,
         errorCounts = Map(Errors.REQUEST_TIMED_OUT -> 1)))
 
+      resources.recordSourceRead(3)
+      resources.recordSourceRead(0)
       time.sleep(997)
       monitor.sample(Some(coordinator))
       time.sleep(1000)
@@ -116,6 +118,7 @@ class GlobalSequenceMonitoringInterceptorTest {
       verify(coordinator, times(2)).committedSnapshot(topicId, leaderEpoch)
     } finally {
       monitor.shutdown()
+      resources.close()
       metrics.close()
     }
 
@@ -127,6 +130,8 @@ class GlobalSequenceMonitoringInterceptorTest {
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-failed-requests,,1"))
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-to-response-queue-ms-avg,,3.0"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,physical-offsets,indexing_lag,23"))
+    assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,reads-total,source_read,2.0"))
+    assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,batches-total,source_read,3.0"))
     assertTrue(csv.contains("3000,1000,2,ordered,,global-sequence-monitor,produce-received-records,,0"))
     assertTrue(csv.contains(s"3000,0,2,ordered,$topicId,global-sequence-monitor,committed-global-end-offset,0,42"))
   }

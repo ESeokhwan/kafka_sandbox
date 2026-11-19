@@ -223,7 +223,7 @@ final class GlobalSequenceMonitoringInterceptor(
 
 private object GlobalSequenceMonitoringInterceptor {
   private val ResourceScopes = Set("indexing_lag", "coordinator_write", "index_route", "index_rpc",
-    "index_read", "lookup_route", "fetch", "data_read", "rpc_retry")
+    "index_read", "lookup_route", "fetch", "data_read", "rpc_retry", "source_read")
 
   def includesMetric(name: MetricName): Boolean = name.group() match {
     case GlobalSequenceResources.GROUP => ResourceScopes.contains(name.tags().get("scope"))

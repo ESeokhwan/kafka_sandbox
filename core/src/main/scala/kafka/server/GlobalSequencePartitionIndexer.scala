@@ -93,6 +93,7 @@ private[server] class GlobalSequencePartitionIndexer(
   private var progress: Option[PhysicalBatch] = None
   private var cursor = 0L
   private var pending: Option[AppendRequest] = None
+  private var bufferedRead: Option[ReadResult] = None
   private var recoveryError: Option[Throwable] = None
   private var recoveryCheckedAt: Option[CoordinatorLocation] = None
 
@@ -201,6 +202,8 @@ private[server] class GlobalSequencePartitionIndexer(
   }
 
   private def register(): Unit = {
+    // Keep the current append for recovery, and reread any later batches from authoritative progress.
+    bufferedRead = None
     if (recoveryStarted < 0) recoveryStarted = time.nanoseconds()
     call(router.registerIndexer(registration, requestTimeoutMs)) { result =>
       if (!result.value.registered() || !result.value.indexer().toScala.contains(owner))
@@ -254,6 +257,7 @@ private[server] class GlobalSequencePartitionIndexer(
     busy = true
     pending match {
       case Some(request) => append(request)
+      case None if bufferedRead.nonEmpty => submitNext(bufferedRead.get)
       case None =>
         val read = try reader.read(partition, sourceLeaderEpoch, cursor, readMaxBytes)
         catch {
@@ -265,13 +269,13 @@ private[server] class GlobalSequencePartitionIndexer(
             if (!isStopped) recover(gap)
             return
         }
+        Option(resources).foreach(_.recordSourceRead(read.batches.size))
         recoveryError = None
         recoveryCheckedAt = None
         if (!isStopped) read.status match {
           case BATCH =>
-            val request = new AppendRequest(read.batch.get, progress.map(_.baseOffset()).getOrElse(-1L), read.dataHighWatermark, owner)
-            pending = Some(request)
-            append(request)
+            bufferedRead = Some(read)
+            submitNext(read)
           case CONTINUE =>
             cursor = read.nextPhysicalOffset
             enqueue { pump() }
@@ -288,6 +292,12 @@ private[server] class GlobalSequencePartitionIndexer(
     }
   }
 
+  private def submitNext(read: ReadResult): Unit = {
+    val request = new AppendRequest(read.batches.head, progress.map(_.baseOffset()).getOrElse(-1L), read.dataHighWatermark, owner)
+    pending = Some(request)
+    append(request)
+  }
+
   private def append(request: AppendRequest): Unit = call(router.appendIndex(request, requestTimeoutMs)) { result =>
     result.value.status() match {
       case AppendStatus.FENCED => fail(new FencedLeaderEpochException("Global sequence append was fenced"))
@@ -300,6 +310,15 @@ private[server] class GlobalSequencePartitionIndexer(
           progress = result.value.indexedThrough().toScala
           publishProgress()
           cursor = progress.get.resumeOffset()
+          bufferedRead = bufferedRead.filter(_ => progress.contains(request.batch())).flatMap { read =>
+            val remaining = read.batches.tail
+            if (remaining.nonEmpty) Some(read.copy(batches = remaining))
+            else {
+              // Any trailing control batches in this read were already validated.
+              cursor = read.nextPhysicalOffset
+              None
+            }
+          }
           pending = None
           recoveryError = None
           recoveryCheckedAt = None

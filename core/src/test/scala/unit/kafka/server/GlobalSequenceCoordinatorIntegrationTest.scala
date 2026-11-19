@@ -159,9 +159,10 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(physicalOffset, recovered.physicalLastOffset())
         assertTrue(recovered.registrationId() != registrationId)
         assertTrue(recovered.indexerGeneration() > 0)
+        val resumedValue = """{"id":"resumed"}""".getBytes(java.nio.charset.StandardCharsets.UTF_8)
         val resumedProducer = new KafkaProducer[Array[Byte], Array[Byte]](props)
         val nextOffset = try {
-          resumedProducer.send(new ProducerRecord[Array[Byte], Array[Byte]]("ordered", 0, null, Array[Byte](4)))
+          resumedProducer.send(new ProducerRecord[Array[Byte], Array[Byte]]("ordered", 0, null, resumedValue))
             .get(30, TimeUnit.SECONDS).offset()
         } finally resumedProducer.close()
         TestUtils.waitUntilTrue(() => Try(describe().data()).toOption.exists(_.physicalLastOffset() == nextOffset),
@@ -182,7 +183,7 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(Errors.NONE.code(), recoveredData.errorCode(), recoveredData.errorMessage())
         assertEquals(2L, recoveredData.nextGlobalOffset())
         val values = recoveredData.batches().asScala.map(_.records().asInstanceOf[MemoryRecords].records().iterator().next().value())
-        assertEquals(Seq(java.nio.ByteBuffer.wrap(Array[Byte](1, 2, 3)), java.nio.ByteBuffer.wrap(Array[Byte](4))), values.toSeq)
+        assertEquals(Seq(java.nio.ByteBuffer.wrap(Array[Byte](1, 2, 3)), java.nio.ByteBuffer.wrap(resumedValue)), values.toSeq)
       } finally {
         admin.close()
       }
@@ -259,13 +260,13 @@ class GlobalSequenceCoordinatorIntegrationTest {
               "Manually appended data did not reach its HW", 30000)
             val read = reader.read(partition, sourceEpoch, offset, maxBytes = 1)
             assertEquals(GlobalSequenceSourceReader.BATCH, read.status)
-            assertEquals(offset, read.batch.get.baseOffset())
+            assertEquals(offset, read.batches.head.baseOffset())
             read
           }
           def request(read: GlobalSequenceSourceReader.ReadResult, predecessor: Long): AppendRequest =
-            new AppendRequest(read.batch.get, predecessor, read.dataHighWatermark, owner)
+            new AppendRequest(read.batches.head, predecessor, read.dataHighWatermark, owner)
           val firstRead = produce()
-          val first = firstRead.batch.get
+          val first = firstRead.batches.head
           val append = request(firstRead, -1)
           val indexed = source.indexRoutingManager.appendIndex(append, 30000).get(35, TimeUnit.SECONDS)
           assertEquals(AppendStatus.INDEXED, indexed.value.status())
@@ -334,10 +335,11 @@ class GlobalSequenceCoordinatorIntegrationTest {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
         props.put(ProducerConfig.ACKS_CONFIG, acks)
         if (acks == "1") props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false")
+        val value = """{"id":"automatic"}""".getBytes(java.nio.charset.StandardCharsets.UTF_8)
         val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
         def produceAndAwait(start: Int): Unit = {
           for (offset <- start until start + 3; partition <- 0 to 1) {
-            val result = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("automatic", partition, null, Array[Byte](1)))
+            val result = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("automatic", partition, null, value))
               .get(30, TimeUnit.SECONDS)
             assertEquals(offset.toLong, result.offset(), "Produce still returns the physical offset")
             val committed = brokers(partition).indexRoutingManager.describePartition(keys(partition), 5000)
@@ -386,7 +388,7 @@ class GlobalSequenceCoordinatorIntegrationTest {
                   val batch = entry.records().asInstanceOf[MemoryRecords].batches().iterator().next()
                   batch.ensureValid()
                   assertEquals(next / 2, batch.baseOffset())
-                  assertEquals(java.nio.ByteBuffer.wrap(Array[Byte](1)), batch.iterator().next().value())
+                  assertEquals(java.nio.ByteBuffer.wrap(value), batch.iterator().next().value())
                   next += 1
                 }
                 assertEquals(next, page.nextGlobalOffset())
