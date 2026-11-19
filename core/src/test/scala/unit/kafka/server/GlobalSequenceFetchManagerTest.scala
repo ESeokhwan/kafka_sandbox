@@ -49,7 +49,7 @@ class GlobalSequenceFetchManagerTest {
   private class Context(entries: Seq[GlobalSequenceLookup.Mapping] = (0L until 6L).map(mapping(_)),
                         maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue,
                         isolation: IsolationLevel = READ_UNCOMMITTED, bounded: Boolean = false,
-                        window: Int = 1, timing: kafka.network.RequestChannel.GlobalFetchTiming = null) extends AutoCloseable {
+                        window: Int = 1, timing: kafka.network.RequestChannel.FetchTiming = null) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val index: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val source: GlobalSequenceDataRouter = mock(classOf[GlobalSequenceDataRouter])
@@ -96,7 +96,7 @@ class GlobalSequenceFetchManagerTest {
       val offset = global / 2
       new GlobalSequenceLookup.Mapping(global, new PhysicalBatch(new PartitionKey(topic, partition), offset, offset, 1))
     }
-    val timing = new kafka.network.RequestChannel.GlobalFetchTiming
+    val timing = new kafka.network.RequestChannel.FetchTiming
     val c = new Context(entries = entries, maxBytes = data(entries.head.batch()).records.sizeInBytes() * 3, window = 4, timing = timing)
     try {
       c.time.sleep(1)

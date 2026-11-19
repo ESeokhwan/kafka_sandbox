@@ -63,13 +63,14 @@ object RequestChannel extends Logging {
   case class CallbackRequest(fun: RequestLocal => Unit,
                              originalRequest: Request) extends BaseRequest
 
-  private[kafka] final class GlobalFetchTiming {
+  private[kafka] final class FetchTiming {
     var lookupStartNs = 0L
     var lookupCompleteNs = 0L
     var lastRangeCallbackNs = 0L
     var pageReadyNs = 0L
     var sendCompleteNs = 0L
-    var sendBuffers = 0
+    var sendBuffers = -1
+    var sendBytes = 0L
     var writeCalls = 0
     var zeroByteWrites = 0
     var firstWriteNs = 0L
@@ -77,8 +78,12 @@ object RequestChannel extends Logging {
     var writeElapsedNs = 0L
   }
 
-  private[network] final class TimedGlobalFetchSend(delegate: ByteBufferSend, timing: GlobalFetchTiming, time: Time) extends Send {
-    timing.sendBuffers = delegate.bufferCount()
+  private[network] final class TimedFetchSend(delegate: Send, timing: FetchTiming, time: Time) extends Send {
+    timing.sendBytes = delegate.size()
+    delegate match {
+      case buffers: ByteBufferSend => timing.sendBuffers = buffers.bufferCount()
+      case _ =>
+    }
 
     override def completed(): Boolean = delegate.completed()
     override def size(): Long = delegate.size()
@@ -104,7 +109,7 @@ object RequestChannel extends Logging {
                 metrics: RequestChannelMetrics,
                 val envelope: Option[RequestChannel.Request] = None) extends BaseRequest {
     // Set by the GST monitor before handling and published through the response queue.
-    private[kafka] var globalFetchTiming: GlobalFetchTiming = _
+    private[kafka] var fetchTiming: FetchTiming = _
     // These need to be volatile because the readers are in the network thread and the writers are in the request
     // handler threads or the purgatory threads
     @volatile var requestDequeueTimeNanos: Long = -1L
@@ -460,17 +465,30 @@ class RequestChannel(val queueSize: Int,
         .toMap
       updateErrorMetrics(request.header.apiKey, response.errorCounts.asScala)
       val send = request.buildResponseSend(response)
-      val timing = request.globalFetchTiming
-      val responseSend = send match {
-        case buffers: ByteBufferSend if timing != null && timing.pageReadyNs != 0L && onComplete.isDefined =>
-          new TimedGlobalFetchSend(buffers, timing, time)
-        case _ => send
+      val timing = request.fetchTiming
+      val timedConsumerFetch = timing != null && (response match {
+        case fetch: FetchResponse =>
+          responseErrorCounts.size == 1 && responseErrorCounts.contains(Errors.NONE) && fetch.data().responses().asScala.exists { topic =>
+            topic.partitions().asScala.exists(partition => FetchResponse.recordsSize(partition) > 0)
+          }
+        case _ => false
+      })
+      val responseSend = if (timedConsumerFetch || (timing != null && timing.pageReadyNs != 0L && onComplete.isDefined))
+        new TimedFetchSend(send, timing, time)
+      else send
+      val completion = if (timedConsumerFetch) {
+        Some((sent: Send) => {
+          timing.sendCompleteNs = time.nanoseconds()
+          onComplete.foreach(_(sent))
+        })
+      } else {
+        onComplete
       }
       sendResponse(new RequestChannel.SendResponse(
         request,
         responseSend,
         request.responseNode(response),
-        onComplete,
+        completion,
         release,
         responseErrorCounts
       ))

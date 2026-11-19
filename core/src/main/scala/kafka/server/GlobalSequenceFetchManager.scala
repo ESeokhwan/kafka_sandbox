@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.network.RequestChannel.{GlobalFetchTiming, ResourceResponse}
+import kafka.network.RequestChannel.{FetchTiming, ResourceResponse}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
 
@@ -54,10 +54,10 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
 
   def fetch(request: Request): CompletableFuture[FetchGlobalSequenceResponse] = fetch(request, null)
 
-  private[server] def fetch(request: Request, timing: GlobalFetchTiming): CompletableFuture[FetchGlobalSequenceResponse] =
+  private[server] def fetch(request: Request, timing: FetchTiming): CompletableFuture[FetchGlobalSequenceResponse] =
     new Session(request, timing).start()
 
-  private class Session(request: Request, timing: GlobalFetchTiming) {
+  private class Session(request: Request, timing: FetchTiming) {
     private var lease: Option[GlobalSequenceResources#Lease] = None
     private val result = new CompletableFuture[FetchGlobalSequenceResponse]()
     private val deadlineNs = time.nanoseconds() + request.lookup.timeoutMs().toLong * 1000000L

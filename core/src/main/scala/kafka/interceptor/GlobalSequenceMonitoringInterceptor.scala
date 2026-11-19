@@ -26,7 +26,7 @@ import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.Records
-import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, ProduceRequest}
+import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, FetchRequest, ProduceRequest}
 import org.apache.kafka.common.utils.{KafkaThread, LogContext, Time}
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorConfig, GlobalSequenceCoordinatorService, GlobalSequenceLookup, GlobalSequenceResources}
 import org.apache.kafka.image.MetadataImage
@@ -64,9 +64,8 @@ final class GlobalSequenceMonitoringInterceptor(
   private val fetchTimingTotalsNs = new Array[Long](FetchTimingScopes.length)
   private var fetchTimingSamples = 0L
   private var rangeTimingSamples = 0L
-  private var writeTimingSamples = 0L
-  private val writeCountTotals = new Array[Long](WriteCountScopes.length)
-  private val writeTimingTotalsNs = new Array[Long](WriteTimingScopes.length)
+  private val gstWrites = new WriteTotals
+  private val consumerWrites = new WriteTotals
 
   private val queue = new MonitorQueue
   private var writer: MonitorLogWriter = _
@@ -114,8 +113,10 @@ final class GlobalSequenceMonitoringInterceptor(
       }
     case ApiKeys.FETCH_GLOBAL_SEQUENCE =>
       // Keep this broker-wide so dynamically named experiment topics are included.
-      request.globalFetchTiming = new RequestChannel.GlobalFetchTiming
+      request.fetchTiming = new RequestChannel.FetchTiming
       if (monitorsFetch(request)) receivedFetches.incrementAndGet()
+    case ApiKeys.FETCH if !request.body[FetchRequest].isFromFollower =>
+      request.fetchTiming = new RequestChannel.FetchTiming
     case _ =>
   }
 
@@ -140,34 +141,29 @@ final class GlobalSequenceMonitoringInterceptor(
 
   override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {
     val request = response.request
-    val timing = request.globalFetchTiming
+    val timing = request.fetchTiming
     if (timing != null && timing.sendCompleteNs != 0L) {
       val dequeued = request.requestDequeueTimeNanos
       val queued = request.responseCompleteTimeNanos
       val sending = request.responseDequeueTimeNanos
       fetchTimingLock.synchronized {
-        fetchTimingSamples += 1
-        fetchTimingTotalsNs(0) += dequeued - request.startTimeNanos
-        fetchTimingTotalsNs(1) += timing.lookupStartNs - dequeued
-        fetchTimingTotalsNs(2) += timing.lookupCompleteNs - timing.lookupStartNs
-        fetchTimingTotalsNs(3) += timing.pageReadyNs - timing.lookupCompleteNs
-        fetchTimingTotalsNs(4) += queued - timing.pageReadyNs
-        fetchTimingTotalsNs(5) += sending - queued
-        fetchTimingTotalsNs(6) += timing.sendCompleteNs - sending
-        if (timing.lastRangeCallbackNs != 0L) {
-          rangeTimingSamples += 1
-          fetchTimingTotalsNs(7) += timing.lastRangeCallbackNs - timing.lookupCompleteNs
-          fetchTimingTotalsNs(8) += timing.pageReadyNs - timing.lastRangeCallbackNs
-        }
-        if (timing.writeCalls > 0) {
-          writeTimingSamples += 1
-          writeCountTotals(0) += timing.sendBuffers
-          writeCountTotals(1) += timing.writeCalls
-          writeCountTotals(2) += timing.zeroByteWrites
-          writeTimingTotalsNs(0) += timing.firstWriteNs - sending
-          writeTimingTotalsNs(1) += timing.writeElapsedNs
-          writeTimingTotalsNs(2) += timing.lastWriteEndNs - timing.firstWriteNs - timing.writeElapsedNs
-          writeTimingTotalsNs(3) += timing.sendCompleteNs - timing.lastWriteEndNs
+        if (request.header.apiKey() == ApiKeys.FETCH_GLOBAL_SEQUENCE) {
+          fetchTimingSamples += 1
+          fetchTimingTotalsNs(0) += dequeued - request.startTimeNanos
+          fetchTimingTotalsNs(1) += timing.lookupStartNs - dequeued
+          fetchTimingTotalsNs(2) += timing.lookupCompleteNs - timing.lookupStartNs
+          fetchTimingTotalsNs(3) += timing.pageReadyNs - timing.lookupCompleteNs
+          fetchTimingTotalsNs(4) += queued - timing.pageReadyNs
+          fetchTimingTotalsNs(5) += sending - queued
+          fetchTimingTotalsNs(6) += timing.sendCompleteNs - sending
+          if (timing.lastRangeCallbackNs != 0L) {
+            rangeTimingSamples += 1
+            fetchTimingTotalsNs(7) += timing.lastRangeCallbackNs - timing.lookupCompleteNs
+            fetchTimingTotalsNs(8) += timing.pageReadyNs - timing.lastRangeCallbackNs
+          }
+          if (timing.writeCalls > 0) gstWrites.record(request, timing)
+        } else if (timing.writeCalls > 0) {
+          consumerWrites.record(request, timing)
         }
       }
     }
@@ -209,36 +205,42 @@ final class GlobalSequenceMonitoringInterceptor(
     }
     emit("append-linger-ms", config.appendLingerMs())
 
-    val (pageSamples, rangeSamples, stageTotals, writeSamples, writeCounts, writeTimes) = fetchTimingLock.synchronized {
+    val (pageSamples, rangeSamples, stageTotals, gst, consumer) = fetchTimingLock.synchronized {
       val window = (fetchTimingSamples, rangeTimingSamples, fetchTimingTotalsNs.clone(),
-        writeTimingSamples, writeCountTotals.clone(), writeTimingTotalsNs.clone())
+        gstWrites.snapshotAndReset(), consumerWrites.snapshotAndReset())
       fetchTimingSamples = 0L
       rangeTimingSamples = 0L
-      writeTimingSamples = 0L
       java.util.Arrays.fill(fetchTimingTotalsNs, 0L)
-      java.util.Arrays.fill(writeCountTotals, 0L)
-      java.util.Arrays.fill(writeTimingTotalsNs, 0L)
       window
     }
-    def emitTiming(name: String, scope: String, value: AnyVal): Unit =
-      writer.submit(Sample(nowMs, durationMs, brokerId, "", "", "global-sequence-fetch-timing", name, scope, value.toString))
+    def emitTiming(group: String, name: String, scope: String, value: AnyVal): Unit =
+      writer.submit(Sample(nowMs, durationMs, brokerId, "", "", group, name, scope, value.toString))
 
     if (pageSamples > 0) {
-      emitTiming("samples", "page", pageSamples)
-      emitTiming("samples", "range-page", rangeSamples)
+      emitTiming(GstTimingGroup, "samples", "page", pageSamples)
+      emitTiming(GstTimingGroup, "samples", "range-page", rangeSamples)
       FetchTimingScopes.indices.foreach { stage =>
-        emitTiming("duration-ms-total", FetchTimingScopes(stage), stageTotals(stage) / 1000000.0)
+        emitTiming(GstTimingGroup, "duration-ms-total", FetchTimingScopes(stage), stageTotals(stage) / 1000000.0)
       }
     }
-    if (writeSamples > 0) {
-      emitTiming("samples", "socket-write-page", writeSamples)
-      WriteCountScopes.indices.foreach { metric =>
-        emitTiming("count-total", WriteCountScopes(metric), writeCounts(metric))
-      }
-      WriteTimingScopes.indices.foreach { stage =>
-        emitTiming("duration-ms-total", WriteTimingScopes(stage), writeTimes(stage) / 1000000.0)
+    def emitWrites(group: String, writes: WriteSample, includeQueues: Boolean): Unit = {
+      if (writes.pages > 0) {
+        emitTiming(group, "samples", "socket-write-page", writes.pages)
+        if (writes.bufferPages > 0) {
+          emitTiming(group, "samples", "response-send-buffer-page", writes.bufferPages)
+          emitTiming(group, "count-total", "response-send-buffers", writes.buffers)
+        }
+        emitTiming(group, "count-total", "socket-write-calls", writes.calls)
+        emitTiming(group, "count-total", "zero-byte-socket-write-calls", writes.zeroByteCalls)
+        emitTiming(group, "bytes-total", "response-send", writes.bytes)
+        val scopes = if (includeQueues) WriteTimingScopes ++ ConsumerTimingScopes else WriteTimingScopes
+        scopes.indices.foreach { stage =>
+          emitTiming(group, "duration-ms-total", scopes(stage), writes.timesNs(stage) / 1000000.0)
+        }
       }
     }
+    emitWrites(GstTimingGroup, gst, includeQueues = false)
+    emitWrites("consumer-fetch-timing", consumer, includeQueues = true)
 
     metrics.metrics().asScala.iterator.filter { case (name, _) => includesMetric(name) }.foreach { case (name, metric) =>
       writer.submit(Sample(nowMs, durationMs, brokerId, "", "", name.group(), name.name(),
@@ -300,9 +302,56 @@ private object GlobalSequenceMonitoringInterceptor {
   private val FetchTimingScopes = Vector("request-queue", "handler-to-lookup", "index-lookup",
     "lookup-to-page-ready", "page-ready-to-response-queue", "response-queue", "response-send",
     "lookup-to-last-range-callback", "last-range-callback-to-page-ready")
-  private val WriteCountScopes = Vector("response-send-buffers", "socket-write-calls", "zero-byte-socket-write-calls")
+  private val GstTimingGroup = "global-sequence-fetch-timing"
   private val WriteTimingScopes = Vector("response-dequeue-to-first-write", "socket-write",
     "between-socket-writes", "last-write-to-send-complete")
+
+  private val ConsumerTimingScopes = Vector("request-queue", "handler-to-response-queue", "response-queue", "response-send")
+
+  private final case class WriteSample(pages: Long, bufferPages: Long, buffers: Long,
+                                      calls: Long, zeroByteCalls: Long, bytes: Long, timesNs: Array[Long])
+
+  private final class WriteTotals {
+    private var pages = 0L
+    private var bufferPages = 0L
+    private var buffers = 0L
+    private var calls = 0L
+    private var zeroByteCalls = 0L
+    private var bytes = 0L
+    private val timesNs = new Array[Long](WriteTimingScopes.length + ConsumerTimingScopes.length)
+
+    def record(request: RequestChannel.Request, timing: RequestChannel.FetchTiming): Unit = {
+      pages += 1
+      if (timing.sendBuffers >= 0) {
+        bufferPages += 1
+        buffers += timing.sendBuffers
+      }
+      calls += timing.writeCalls
+      zeroByteCalls += timing.zeroByteWrites
+      bytes += timing.sendBytes
+      val dequeue = request.responseDequeueTimeNanos
+      timesNs(0) += timing.firstWriteNs - dequeue
+      timesNs(1) += timing.writeElapsedNs
+      timesNs(2) += timing.lastWriteEndNs - timing.firstWriteNs - timing.writeElapsedNs
+      timesNs(3) += timing.sendCompleteNs - timing.lastWriteEndNs
+      timesNs(4) += request.requestDequeueTimeNanos - request.startTimeNanos
+      timesNs(5) += request.responseCompleteTimeNanos - request.requestDequeueTimeNanos
+      timesNs(6) += dequeue - request.responseCompleteTimeNanos
+      timesNs(7) += timing.sendCompleteNs - dequeue
+    }
+
+    def snapshotAndReset(): WriteSample = {
+      val sample = WriteSample(pages, bufferPages, buffers, calls, zeroByteCalls, bytes, timesNs.clone())
+      pages = 0L
+      bufferPages = 0L
+      buffers = 0L
+      calls = 0L
+      zeroByteCalls = 0L
+      bytes = 0L
+      java.util.Arrays.fill(timesNs, 0L)
+      sample
+    }
+  }
 
   private val ResourceScopes = Set("indexing_lag", "coordinator_write", "index_route", "index_rpc",
     "index_read", "lookup_route", "fetch", "data_read", "rpc_retry", "source_read")

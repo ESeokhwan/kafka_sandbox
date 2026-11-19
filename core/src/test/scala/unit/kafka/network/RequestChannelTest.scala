@@ -18,24 +18,27 @@
 package kafka.network
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import kafka.interceptor.{BrokerInterceptor, BrokerInterceptors}
 import kafka.network
 import kafka.server.EnvelopeUtils
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.admin.AlterConfigOp.OpType
+import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.types.Password
 import org.apache.kafka.common.config.{ConfigResource, SaslConfigs, SslConfigs, TopicConfig}
 import org.apache.kafka.common.memory.MemoryPool
 import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic
 import org.apache.kafka.common.message.IncrementalAlterConfigsRequestData._
-import org.apache.kafka.common.message.{CreateTopicsRequestData, CreateTopicsResponseData, IncrementalAlterConfigsRequestData}
+import org.apache.kafka.common.message.{CreateTopicsRequestData, CreateTopicsResponseData, FetchResponseData, IncrementalAlterConfigsRequestData}
 import org.apache.kafka.common.network.{ByteBufferSend, ClientInformation, ListenerName, TransferableChannel}
-import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.common.protocol.{ApiKeys, Errors}
+import org.apache.kafka.common.record.{MemoryRecords, MultiRecordsSend, SimpleRecord}
 import org.apache.kafka.common.requests.AlterConfigsRequest._
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, KafkaPrincipalSerde, SecurityProtocol}
 import org.apache.kafka.common.utils.{MockTime, SecurityUtils, Utils}
 import org.apache.kafka.network.RequestConvertToJson
-import org.apache.kafka.network.metrics.RequestChannelMetrics
+import org.apache.kafka.network.metrics.{RequestChannelMetrics, RequestMetrics}
 import org.apache.kafka.test
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api._
@@ -54,6 +57,47 @@ import scala.jdk.OptionConverters.RichOption
 
 class RequestChannelTest {
   @Test
+  def testConsumerFetchTimesCompositeSendWithRecords(): Unit = {
+    val time = new MockTime(0, 0, 0)
+    val metrics = mock(classOf[RequestChannelMetrics])
+    when(metrics(ApiKeys.FETCH.name)).thenReturn(mock(classOf[RequestMetrics]))
+    val captured = new AtomicReference[RequestChannel.SendResponse]
+    val interceptor = new BrokerInterceptor {
+      override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit =
+        captured.set(response.asInstanceOf[RequestChannel.SendResponse])
+    }
+    val channel = new RequestChannel(1, time, metrics, new BrokerInterceptors(Vector(interceptor)))
+    try {
+      val request = mock(classOf[RequestChannel.Request])
+      when(request.header).thenReturn(new RequestHeader(ApiKeys.FETCH, 12.toShort, "consumer", 1))
+      when(request.callbackRequestDequeueTimeNanos).thenReturn(None)
+      val timing = new RequestChannel.FetchTiming
+      when(request.fetchTiming).thenReturn(timing)
+      val partition = new FetchResponseData.PartitionData()
+      val response = FetchResponse.of(new FetchResponseData().setResponses(util.List.of(
+        new FetchResponseData.FetchableTopicResponse().setPartitions(util.List.of(partition)))))
+      val delegate = mock(classOf[MultiRecordsSend])
+      when(delegate.size()).thenReturn(128L)
+      when(request.buildResponseSend(response)).thenReturn(delegate)
+      when(request.responseNode(response)).thenReturn(None)
+
+      channel.sendResponse(request, response, None)
+      assertSame(delegate, captured.get().responseSend)
+      assertTrue(captured.get().onComplete.isEmpty)
+
+      partition.setRecords(MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Array[Byte](1))))
+      channel.sendResponse(request, response, None)
+      val sent = captured.get()
+      assertInstanceOf(classOf[RequestChannel.TimedFetchSend], sent.responseSend)
+      time.sleep(1)
+      sent.onComplete.get(sent.responseSend)
+      assertEquals(time.nanoseconds(), timing.sendCompleteNs)
+      assertEquals(128L, timing.sendBytes)
+      assertEquals(-1, timing.sendBuffers)
+    } finally channel.shutdown()
+  }
+
+  @Test
   def testGlobalFetchSendRecordsPartialAndZeroByteWrites(): Unit = {
     val time = new MockTime(0, 0, 0)
     val buffers = Array(ByteBuffer.wrap(Array[Byte](1)), ByteBuffer.wrap(Array[Byte](2)))
@@ -65,8 +109,8 @@ class RequestChannelTest {
       time.sleep(1)
       1L
     }
-    val timing = new RequestChannel.GlobalFetchTiming
-    val send = new RequestChannel.TimedGlobalFetchSend(new ByteBufferSend(buffers, 2), timing, time)
+    val timing = new RequestChannel.FetchTiming
+    val send = new RequestChannel.TimedFetchSend(new ByteBufferSend(buffers, 2), timing, time)
     time.sleep(1)
     assertEquals(0L, send.writeTo(channel))
     assertEquals(1L, send.writeTo(channel))

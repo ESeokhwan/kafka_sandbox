@@ -35,7 +35,7 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
                               quotas: QuotaManagers, time: Time) {
   def fetch(request: RequestChannel.Request): CompletableFuture[Unit] = {
     val body = request.body[FetchGlobalSequenceRequest]
-    val timing = request.globalFetchTiming
+    val timing = request.fetchTiming
     def send(response: FetchGlobalSequenceResponse): Unit = try {
       val size = response.data().size(new ObjectSerializationCache(), request.header.apiVersion())
       if (size > GlobalSequenceFetch.MaxResponseBytes) {

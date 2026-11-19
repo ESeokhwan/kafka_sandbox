@@ -27,7 +27,7 @@ import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.Send
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.{MemoryRecords, SimpleRecord}
-import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, ProduceRequest, RequestHeader}
+import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, FetchRequest, ProduceRequest, RequestHeader}
 import org.apache.kafka.common.utils.{LogContext, MockTime}
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorConfig, GlobalSequenceLookup, GlobalSequenceResources}
 import org.apache.kafka.image.{MetadataImage, TopicImage, TopicsImage}
@@ -111,13 +111,13 @@ class GlobalSequenceMonitoringInterceptorTest {
       when(measured.body[FetchGlobalSequenceRequest]).thenReturn(new FetchGlobalSequenceRequest.Builder(
         new FetchGlobalSequenceRequestData().setTopicId(otherTopicId)).build())
       monitor.beforeHandleRequest(measured)
-      verify(measured).globalFetchTiming_=(any(classOf[RequestChannel.GlobalFetchTiming]))
-      val timing = new RequestChannel.GlobalFetchTiming
+      verify(measured).fetchTiming_=(any(classOf[RequestChannel.FetchTiming]))
+      val timing = new RequestChannel.FetchTiming
       timing.lookupStartNs = 3000000L
       timing.lookupCompleteNs = 5000000L
       timing.lastRangeCallbackNs = 8000000L
       timing.pageReadyNs = 9000000L
-      when(measured.globalFetchTiming).thenReturn(timing)
+      when(measured.fetchTiming).thenReturn(timing)
       when(measured.startTimeNanos).thenReturn(1000000L)
       when(measured.requestDequeueTimeNanos).thenReturn(2000000L)
       when(measured.responseCompleteTimeNanos).thenReturn(11000000L)
@@ -126,12 +126,36 @@ class GlobalSequenceMonitoringInterceptorTest {
       monitor.afterProcessResponse(sent, "connection")
       timing.sendCompleteNs = 14000000L
       timing.sendBuffers = 17
+      timing.sendBytes = 1024L
       timing.writeCalls = 3
       timing.zeroByteWrites = 1
       timing.firstWriteNs = 12300000L
       timing.lastWriteEndNs = 13900000L
       timing.writeElapsedNs = 500000L
       monitor.afterProcessResponse(sent, "connection")
+
+      val consumer = mock(classOf[RequestChannel.Request])
+      when(consumer.header).thenReturn(new RequestHeader(ApiKeys.FETCH, 12.toShort, "consumer", 4))
+      val body = mock(classOf[FetchRequest])
+      when(consumer.body[FetchRequest]).thenReturn(body)
+      monitor.beforeHandleRequest(consumer)
+      verify(consumer).fetchTiming_=(any(classOf[RequestChannel.FetchTiming]))
+      when(body.isFromFollower).thenReturn(true)
+      monitor.beforeHandleRequest(consumer)
+      verify(consumer, times(1)).fetchTiming_=(any(classOf[RequestChannel.FetchTiming]))
+      val consumerTiming = new RequestChannel.FetchTiming
+      consumerTiming.sendBytes = 2048L
+      consumerTiming.writeCalls = 2
+      consumerTiming.firstWriteNs = 12300000L
+      consumerTiming.lastWriteEndNs = 13900000L
+      consumerTiming.writeElapsedNs = 500000L
+      consumerTiming.sendCompleteNs = 14000000L
+      when(consumer.fetchTiming).thenReturn(consumerTiming)
+      when(consumer.startTimeNanos).thenReturn(1000000L)
+      when(consumer.requestDequeueTimeNanos).thenReturn(2000000L)
+      when(consumer.responseCompleteTimeNanos).thenReturn(11000000L)
+      when(consumer.responseDequeueTimeNanos).thenReturn(12000000L)
+      monitor.afterProcessResponse(new RequestChannel.SendResponse(consumer, mock(classOf[Send]), None, None), "connection")
 
       resources.recordSourceRead(3, 2.5)
       resources.recordSourceRead(0, 0.25)
@@ -172,14 +196,31 @@ class GlobalSequenceMonitoringInterceptorTest {
       "duration-ms-total,lookup-to-last-range-callback,3.0",
       "duration-ms-total,last-range-callback-to-page-ready,1.0",
       "samples,socket-write-page,1",
+      "samples,response-send-buffer-page,1",
       "count-total,response-send-buffers,17",
       "count-total,socket-write-calls,3",
       "count-total,zero-byte-socket-write-calls,1",
+      "bytes-total,response-send,1024",
       "duration-ms-total,response-dequeue-to-first-write,0.3",
       "duration-ms-total,socket-write,0.5",
       "duration-ms-total,between-socket-writes,1.1",
       "duration-ms-total,last-write-to-send-complete,0.1"
     ).map("2000,1000,2,,,global-sequence-fetch-timing," + _), timings.toSeq)
+    val consumerTimings = csv.filter(_.contains(",consumer-fetch-timing,"))
+    assertEquals(Seq(
+      "samples,socket-write-page,1",
+      "count-total,socket-write-calls,2",
+      "count-total,zero-byte-socket-write-calls,0",
+      "bytes-total,response-send,2048",
+      "duration-ms-total,response-dequeue-to-first-write,0.3",
+      "duration-ms-total,socket-write,0.5",
+      "duration-ms-total,between-socket-writes,1.1",
+      "duration-ms-total,last-write-to-send-complete,0.1",
+      "duration-ms-total,request-queue,1.0",
+      "duration-ms-total,handler-to-response-queue,9.0",
+      "duration-ms-total,response-queue,1.0",
+      "duration-ms-total,response-send,2.0"
+    ).map("2000,1000,2,,,consumer-fetch-timing," + _), consumerTimings.toSeq)
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,physical-offsets,indexing_lag,23"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,reads-total,source_read,2.0"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,batches-total,source_read,3.0"))
