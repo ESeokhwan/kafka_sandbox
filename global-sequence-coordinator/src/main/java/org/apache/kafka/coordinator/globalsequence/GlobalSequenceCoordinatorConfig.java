@@ -31,6 +31,7 @@ import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
 import static org.apache.kafka.common.config.ConfigDef.Type.INT;
 import static org.apache.kafka.common.config.ConfigDef.Type.SHORT;
 import static org.apache.kafka.common.config.ConfigDef.Type.STRING;
+import static org.apache.kafka.common.config.ConfigDef.ValidString.in;
 
 /**
  * Static broker settings for the global sequence coordinator.
@@ -71,6 +72,11 @@ public class GlobalSequenceCoordinatorConfig {
     public static final String INDEXER_READ_MAX_BYTES_CONFIG = "global.sequence.indexer.read.max.bytes";
     public static final int INDEXER_READ_MAX_BYTES_DEFAULT = 1024 * 1024;
     public static final String INDEXER_READ_MAX_BYTES_DOC = "Soft byte limit for each source log read. The first complete batch may exceed this limit.";
+
+    public static final String INDEXER_VALIDATION_MODE_CONFIG = "global.sequence.indexer.validation.mode";
+    public static final String INDEXER_VALIDATION_MODE_DEFAULT = "full";
+    public static final String INDEXER_VALIDATION_MODE_DOC = "Source batch validation before indexing: full checks the batch CRC and record offsets; "
+        + "header reads only batch headers and checks their structure and offsets.";
 
     public static final String RETENTION_REFRESH_INTERVAL_MS_CONFIG = "global.sequence.retention.refresh.interval.ms";
     public static final int RETENTION_REFRESH_INTERVAL_MS_DEFAULT = 1000;
@@ -156,6 +162,7 @@ public class GlobalSequenceCoordinatorConfig {
         .define(NUM_THREADS_CONFIG, INT, NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, NUM_THREADS_DOC)
         .define(INDEXER_NUM_THREADS_CONFIG, INT, INDEXER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, INDEXER_NUM_THREADS_DOC)
         .define(INDEXER_READ_MAX_BYTES_CONFIG, INT, INDEXER_READ_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, INDEXER_READ_MAX_BYTES_DOC)
+        .define(INDEXER_VALIDATION_MODE_CONFIG, STRING, INDEXER_VALIDATION_MODE_DEFAULT, in("full", "header"), MEDIUM, INDEXER_VALIDATION_MODE_DOC)
         .define(RETENTION_REFRESH_INTERVAL_MS_CONFIG, INT, RETENTION_REFRESH_INTERVAL_MS_DEFAULT, atLeast(1), MEDIUM, RETENTION_REFRESH_INTERVAL_MS_DOC)
         .define(LOAD_BUFFER_SIZE_CONFIG, INT, LOAD_BUFFER_SIZE_DEFAULT, atLeast(1), MEDIUM, LOAD_BUFFER_SIZE_DOC)
         .define(WRITE_TIMEOUT_MS_CONFIG, INT, WRITE_TIMEOUT_MS_DEFAULT, atLeast(1), MEDIUM, WRITE_TIMEOUT_MS_DOC)
@@ -221,6 +228,10 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int indexerReadMaxBytes() {
         return config.getInt(INDEXER_READ_MAX_BYTES_CONFIG);
+    }
+
+    public boolean indexerHeaderOnly() {
+        return config.getString(INDEXER_VALIDATION_MODE_CONFIG).equals("header");
     }
 
     public int retentionRefreshIntervalMs() {

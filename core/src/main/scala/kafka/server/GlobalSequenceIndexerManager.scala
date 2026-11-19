@@ -42,7 +42,8 @@ object GlobalSequenceIndexerManager {
     val workers = new ThreadPoolExecutor(config.indexerNumThreads(), config.indexerNumThreads(), 0L, TimeUnit.MILLISECONDS,
       new ArrayBlockingQueue[Runnable](config.workerQueueSize()), runnable =>
       KafkaThread.daemon(s"global-sequence-indexer-$brokerId-${threadId.getAndIncrement()}", runnable))
-    new GlobalSequenceIndexerManager(brokerId, replicaManager, new GlobalSequenceSourceReader(replicaManager, time, config.writeTimeoutMs()),
+    val reader = new GlobalSequenceSourceReader(replicaManager, time, config.writeTimeoutMs(), headerOnly = config.indexerHeaderOnly())
+    new GlobalSequenceIndexerManager(brokerId, replicaManager, reader,
       router, workers, scheduler, config.writeTimeoutMs(), config.indexerReadMaxBytes(),
       new GlobalSequenceRetentionManager(replicaManager, router, workers, scheduler, config.writeTimeoutMs(), config.retentionRefreshIntervalMs(), resources), time, resources)
   }

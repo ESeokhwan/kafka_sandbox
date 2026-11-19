@@ -104,8 +104,8 @@ class GlobalSequenceMonitoringInterceptorTest {
       monitor.beforeSendResponseToQueue(new RequestChannel.SendResponse(fetch, mock(classOf[Send]), None, None,
         errorCounts = Map(Errors.REQUEST_TIMED_OUT -> 1)))
 
-      resources.recordSourceRead(3)
-      resources.recordSourceRead(0)
+      resources.recordSourceRead(3, 2.5)
+      resources.recordSourceRead(0, 0.25)
       time.sleep(997)
       monitor.sample(Some(coordinator))
       time.sleep(1000)
@@ -132,6 +132,7 @@ class GlobalSequenceMonitoringInterceptorTest {
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,physical-offsets,indexing_lag,23"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,reads-total,source_read,2.0"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,batches-total,source_read,3.0"))
+    assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,duration-ms-total,source_read,2.75"))
     assertTrue(csv.contains("3000,1000,2,ordered,,global-sequence-monitor,produce-received-records,,0"))
     assertTrue(csv.contains(s"3000,0,2,ordered,$topicId,global-sequence-monitor,committed-global-end-offset,0,42"))
   }

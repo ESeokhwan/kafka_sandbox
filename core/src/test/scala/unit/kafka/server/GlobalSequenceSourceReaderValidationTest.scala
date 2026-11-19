@@ -32,10 +32,12 @@ import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams}
 import org.apache.kafka.storage.internals.log.{FetchDataInfo, LogConfig, LogOffsetMetadata, LogReadInfo, UnifiedLog}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import org.mockito.ArgumentMatchers.{any, anyBoolean, anyInt, anyLong}
-import org.mockito.Mockito.{doAnswer, mock, never, verify, when}
+import org.mockito.Mockito.{doAnswer, mock, never, spy, verify, when}
 
 import java.nio.ByteBuffer
+import java.nio.file.Path
 import java.util.{Map => JMap, Optional}
 
 class GlobalSequenceSourceReaderValidationTest {
@@ -84,6 +86,8 @@ class GlobalSequenceSourceReaderValidationTest {
     val time = new MockTime()
     val reader = new GlobalSequenceSourceReader(replicaManager, time, 10)
     def read(offset: Long = 0L): GlobalSequenceSourceReader.ReadResult = reader.read(key, 3, offset, 1024)
+    def readHeaders(): GlobalSequenceSourceReader.ReadResult =
+      new GlobalSequenceSourceReader(replicaManager, time, 10, headerOnly = true).read(key, 3, 0L, 1024)
   }
 
   @Test
@@ -194,6 +198,37 @@ class GlobalSequenceSourceReaderValidationTest {
     data.batches().iterator().next().ensureValid()
     val ctx = new Context(data)
     assertThrows(classOf[CorruptRecordException], () => ctx.read())
+    assertEquals(3, ctx.readHeaders().batches.head.recordCount())
+  }
+
+  @Test
+  def testHeaderModeRejectsInconsistentRecordCount(): Unit = {
+    val data = records()
+    data.buffer().putInt(DefaultRecordBatch.RECORDS_COUNT_OFFSET, 2)
+    val ctx = new Context(data)
+    assertThrows(classOf[CorruptRecordException], () => ctx.readHeaders())
+  }
+
+  @Test
+  def testHeaderModeRejectsBatchWithNoSpaceForDeclaredRecords(): Unit = {
+    val header = records().buffer().duplicate()
+    header.limit(DefaultRecordBatch.RECORD_BATCH_OVERHEAD)
+    header.putInt(Records.SIZE_OFFSET, header.limit() - Records.LOG_OVERHEAD)
+    val ctx = new Context(MemoryRecords.readableRecords(header))
+    assertThrows(classOf[CorruptRecordException], () => ctx.readHeaders())
+  }
+
+  @Test
+  def testHeaderModeScansFileRecordsWithoutCopyingTheSlice(@TempDir dir: Path): Unit = {
+    val original = FileRecords.open(dir.resolve("source.log").toFile)
+    try {
+      original.append(records())
+      val file = spy(original)
+      val ctx = new Context(file)
+      assertEquals(3, ctx.readHeaders().batches.head.recordCount())
+      verify(file, never()).readInto(any[ByteBuffer](), anyInt())
+      verify(file, never()).close()
+    } finally original.close()
   }
 
   @Test

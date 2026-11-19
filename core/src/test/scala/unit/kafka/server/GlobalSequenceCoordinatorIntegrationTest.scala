@@ -452,13 +452,15 @@ class GlobalSequenceCoordinatorIntegrationTest {
     } finally cluster.close()
   }
 
-  @Test
-  def testSourceLeaderRoundTripRecoversCommittedButUnindexedBatches(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("full", "header"))
+  def testSourceLeaderRoundTripRecoversCommittedButUnindexedBatches(validationMode: String): Unit = {
     val cluster = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder()
       .setNumBrokerNodes(3).setNumControllerNodes(1).build())
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "2")
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_REPLICATION_FACTOR_CONFIG, "3")
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, "2")
+      .setConfigProp(GlobalSequenceCoordinatorConfig.INDEXER_VALIDATION_MODE_CONFIG, validationMode)
       .build()
     try {
       cluster.format()
