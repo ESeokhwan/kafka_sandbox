@@ -20,7 +20,7 @@ package kafka.server
 import org.apache.kafka.common.Uuid
 import org.apache.kafka.common.errors.CorruptRecordException
 import org.apache.kafka.common.metrics.{Gauge, MetricConfig, Metrics}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Position, Snapshot}
 
 import java.util.{LinkedHashMap, TreeMap}
 import java.lang.ref.WeakReference
@@ -41,7 +41,7 @@ private[server] object GlobalSequenceIndexCache {
   // Identity-bearing objects keep late reads in their original shard/log namespace.
   case class Scope(indexTopicId: Uuid, indexPartition: Int, leaderEpoch: Int,
                    generation: AnyRef, partition: AnyRef, log: AnyRef)
-  case class Entry(mapping: Mapping, indexEndOffset: Long)
+  case class Entry(mapping: Mapping, indexEndOffset: Long, rangeStart: Option[Position] = None)
   private case class Key(scope: Scope, topicId: Uuid, globalBaseOffset: Long)
 }
 

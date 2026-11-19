@@ -100,7 +100,8 @@ class GlobalSequenceApis(
       val batch = new PhysicalBatch(new PartitionKey(data.topicId(), data.partition()),
         data.physicalBaseOffset(), data.physicalLastOffset(), data.recordCount())
       val indexer = new IndexerIdentity(data.sourceBrokerId(), data.sourceLeaderEpoch(), data.indexerGeneration(), data.registrationId())
-      coordinator.appendIndex(new AppendRequest(batch, data.predecessorBaseOffset(), data.dataHighWatermark(), indexer),
+      coordinator.appendIndex(new AppendRequest(batch, data.predecessorBaseOffset(), data.dataHighWatermark(), indexer,
+        data.batchRecordCounts()),
         data.coordinatorLeaderEpoch())
     } { result =>
       val response = new AppendGlobalSequenceIndexResponseData().setTopicId(data.topicId()).setPartition(data.partition())

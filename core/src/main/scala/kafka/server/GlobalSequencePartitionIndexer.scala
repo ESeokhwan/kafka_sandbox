@@ -26,11 +26,13 @@ import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.errors.{FencedLeaderEpochException, InvalidRequestException}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.utils.Time
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.MAX_BATCHES_PER_INDEX_ENTRY
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard._
 import org.apache.kafka.server.util.Scheduler
 
 import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, Executor, RejectedExecutionException, ScheduledFuture}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters._
 import scala.util.control.NonFatal
 
@@ -293,7 +295,22 @@ private[server] class GlobalSequencePartitionIndexer(
   }
 
   private def submitNext(read: ReadResult): Unit = {
-    val request = new AppendRequest(read.batches.head, progress.map(_.baseOffset()).getOrElse(-1L), read.dataHighWatermark, owner)
+    val first = read.batches.head
+    var last = first
+    var size = 1
+    val limit = math.min(read.batches.size, MAX_BATCHES_PER_INDEX_ENTRY)
+    while (size < limit && read.batches(size).baseOffset() == last.resumeOffset() &&
+      read.batches(size).lastOffset() - first.baseOffset() < Int.MaxValue) {
+      last = read.batches(size)
+      size += 1
+    }
+    val predecessor = progress.map(_.baseOffset()).getOrElse(-1L)
+    val request = if (size == 1) new AppendRequest(first, predecessor, read.dataHighWatermark, owner)
+    else {
+      val batch = new PhysicalBatch(partition, first.baseOffset(), last.lastOffset(), (last.resumeOffset() - first.baseOffset()).toInt)
+      val counts = read.batches.take(size).map(batch => Int.box(batch.recordCount())).asJava
+      new AppendRequest(batch, predecessor, read.dataHighWatermark, owner, counts)
+    }
     pending = Some(request)
     append(request)
   }
@@ -311,7 +328,7 @@ private[server] class GlobalSequencePartitionIndexer(
           publishProgress()
           cursor = progress.get.resumeOffset()
           bufferedRead = bufferedRead.filter(_ => progress.contains(request.batch())).flatMap { read =>
-            val remaining = read.batches.tail
+            val remaining = read.batches.drop(math.max(1, request.batchRecordCounts().size()))
             if (remaining.nonEmpty) Some(read.copy(batches = remaining))
             else {
               // Any trailing control batches in this read were already validated.

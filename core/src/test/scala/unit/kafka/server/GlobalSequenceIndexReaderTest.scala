@@ -54,6 +54,27 @@ class GlobalSequenceIndexReaderTest {
     MemoryRecords.withRecords(offset, compression,
       entries.map(record => new SimpleRecord(serde.serializeKey(record), serde.serializeValue(record))): _*)
 
+  @Test
+  def testMergedEntryPagesAcrossACachedBatchAndAnOlderEntry(): Unit = {
+    val merged = Seq(newBatchIndexRecord(topic, 0, 10, 15, 6, 0,
+      java.util.List.of(Int.box(2), Int.box(3), Int.box(1))), newTopicMetadataRecord(topic, 6))
+    val c = new Context(records(merged ++ allocation(topic, 6, 1, 20, 2)), snapshotHw = 4, globalEnd = 8)
+    try {
+      val first = c.finish(c.read(startOffset = 1, maxBatches = 1))
+      assertEquals(2L, first.nextGlobalOffset())
+      assertEquals(10L, first.mappings().get(0).batch().baseOffset())
+      // The first batch hits in cache, then the lookup must reread the same index entry.
+      val rest = c.finish(c.read(startOffset = 1, maxBatches = 4))
+      assertEquals(8L, rest.nextGlobalOffset())
+      assertEquals(Seq(0L, 2L, 5L, 6L), rest.mappings().asScala.map(_.globalBaseOffset()).toSeq)
+      assertEquals(Seq(10L, 12L, 15L, 20L), rest.mappings().asScala.map(_.batch().baseOffset()).toSeq)
+      assertEquals(Seq(2, 3, 1, 2), rest.mappings().asScala.map(_.batch().recordCount()).toSeq)
+      val reads = c.reads
+      assertEquals(rest.mappings(), c.finish(c.read(startOffset = 1, maxBatches = 4)).mappings())
+      assertEquals(reads, c.reads)
+    } finally c.close()
+  }
+
   private def combine(records: MemoryRecords*): MemoryRecords = {
     val buffer = ByteBuffer.allocate(records.map(_.sizeInBytes()).sum)
     records.foreach(data => buffer.put(data.buffer().duplicate()))

@@ -267,34 +267,34 @@ class GlobalSequencePartitionIndexerTest {
   }
 
   @Test
-  def testOneReadSuppliesThreeSeparateAppendsAndRetryDoesNotAdvanceProgress(): Unit = {
+  def testOneReadMergesContiguousBatchesAndSplitsAtControlOffsets(): Unit = {
     val c = new Context
     val third = new PhysicalBatch(key, 6, 7, 2)
+    val merged = new PhysicalBatch(key, 0, 4, 5)
     try {
       c.read = offset => if (offset == 0) ReadResult(key, 3, 20, 9, Vector(a, b, third), BATCH)
         else ReadResult(key, 3, 20, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
       c.start()
       val waitingForA = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(5))
       val waitingForB = c.indexer.awaitIndexed(b.lastOffset(), TimeUnit.SECONDS.toNanos(5))
-      assertEquals(Seq(a), c.appends.map(_._1.batch()).toSeq)
+      val pending = c.appends.head._1
+      assertEquals(merged, pending.batch())
+      assertEquals(java.util.List.of(Int.box(3), Int.box(2)), pending.batchRecordCounts())
       assertFalse(waitingForA.isDone)
-      c.completeAppend()
-      assertTrue(waitingForA.isDone)
       assertFalse(waitingForB.isDone)
-      assertEquals(Seq(a, b), c.appends.map(_._1.batch()).toSeq)
-      val pendingB = c.appends.last._1
-      c.appends.last._2.completeExceptionally(new TimeoutException("response lost"))
+      c.appends.head._2.completeExceptionally(new TimeoutException("response lost"))
       c.executor.runAll()
-      assertEquals(2, c.appends.size)
+      assertEquals(1, c.appends.size)
       c.time.sleep(100)
       c.executor.runAll()
-      assertSame(pendingB, c.appends.last._1)
+      assertSame(pending, c.appends.last._1)
       assertFalse(waitingForB.isDone)
       assertEquals(Seq(0L), c.reads.toSeq)
       c.completeAppend(AppendStatus.ALREADY_INDEXED)
+      assertTrue(waitingForA.isDone)
       assertTrue(waitingForB.isDone)
-      assertEquals(Seq(a, b, b, third), c.appends.map(_._1.batch()).toSeq)
-      assertEquals(Seq(-1L, 0L, 0L, 3L), c.appends.map(_._1.predecessorBaseOffset()).toSeq)
+      assertEquals(Seq(merged, merged, third), c.appends.map(_._1.batch()).toSeq)
+      assertEquals(Seq(-1L, -1L, 0L), c.appends.map(_._1.predecessorBaseOffset()).toSeq)
       assertEquals(Seq(0L), c.reads.toSeq)
       c.completeAppend()
       assertEquals(Seq(0L, 9L), c.reads.toSeq)
@@ -550,18 +550,21 @@ class GlobalSequencePartitionIndexerTest {
   @Test
   def testObsoleteQueuedAppendSuccessUsesBarrierProgressBeforeReadingNextBatch(): Unit = {
     val c = new Context
+    val merged = new PhysicalBatch(key, 0, 4, 5)
+    val next = new PhysicalBatch(key, 6, 7, 2)
     try {
-      c.read = offset => if (offset == 0) ReadResult(key, 3, 20, 5, Vector(a, b), BATCH) else c.batch(b)
+      c.read = offset => if (offset == 0) ReadResult(key, 3, 20, 8, Vector(a, b, next), BATCH) else c.batch(next)
       c.start()
-      c.appends.last._2.complete(RoutedResult(new AppendResponse(AppendStatus.INDEXED, a, OptionalLong.of(0), Optional.of(a), 10), route))
+      c.appends.last._2.complete(RoutedResult(
+        new AppendResponse(AppendStatus.INDEXED, merged, OptionalLong.of(0), Optional.of(merged), 10), route))
       c.currentRoute = route.copy(leaderEpoch = 11)
       c.executor.runAll()
       assertEquals(Seq(0L), c.reads.toSeq)
       assertSame(c.registrations.head._1, c.registrations.last._1)
       c.registered()
-      c.describe(Some(a), Some(c.owner))
-      assertEquals(Seq(0L, 3L), c.reads.toSeq)
-      assertEquals(b, c.appends.last._1.batch())
+      c.describe(Some(merged), Some(c.owner))
+      assertEquals(Seq(0L, 5L), c.reads.toSeq)
+      assertEquals(next, c.appends.last._1.batch())
       assertEquals(0L, c.appends.last._1.predecessorBaseOffset())
     } finally c.close()
   }

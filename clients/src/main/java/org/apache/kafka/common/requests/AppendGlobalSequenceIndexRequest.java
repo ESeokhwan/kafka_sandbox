@@ -17,6 +17,7 @@
 
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.AppendGlobalSequenceIndexRequestData;
 import org.apache.kafka.common.message.AppendGlobalSequenceIndexResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -28,12 +29,16 @@ public class AppendGlobalSequenceIndexRequest extends AbstractRequest {
         private final AppendGlobalSequenceIndexRequestData data;
 
         public Builder(AppendGlobalSequenceIndexRequestData data) {
-            super(ApiKeys.APPEND_GLOBAL_SEQUENCE_INDEX);
+            super(ApiKeys.APPEND_GLOBAL_SEQUENCE_INDEX, (short) (data.batchRecordCounts().isEmpty() ? 0 : 1),
+                ApiKeys.APPEND_GLOBAL_SEQUENCE_INDEX.latestVersion());
             this.data = data;
         }
 
         @Override
         public AppendGlobalSequenceIndexRequest build(short version) {
+            if (version == 0 && !data.batchRecordCounts().isEmpty()) {
+                throw new UnsupportedVersionException("Merged global sequence index entries require append version 1");
+            }
             return new AppendGlobalSequenceIndexRequest(data, version);
         }
 

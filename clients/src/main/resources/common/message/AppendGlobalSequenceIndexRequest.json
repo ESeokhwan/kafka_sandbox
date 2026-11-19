@@ -20,7 +20,7 @@
     "broker"
   ],
   "name": "AppendGlobalSequenceIndexRequest",
-  "validVersions": "0",
+  "validVersions": "0-1",
   "flexibleVersions": "0+",
   "fields": [
     {
@@ -39,25 +39,25 @@
       "name": "PhysicalBaseOffset",
       "type": "int64",
       "versions": "0+",
-      "about": "The requested physical batch base offset."
+      "about": "The first physical offset of the indexed range."
     },
     {
       "name": "PhysicalLastOffset",
       "type": "int64",
       "versions": "0+",
-      "about": "The requested physical batch last offset."
+      "about": "The inclusive last physical offset of the indexed range."
     },
     {
       "name": "RecordCount",
       "type": "int32",
       "versions": "0+",
-      "about": "The number of records in the physical batch."
+      "about": "The number of records in the indexed range."
     },
     {
       "name": "PredecessorBaseOffset",
       "type": "int64",
       "versions": "0+",
-      "about": "The preceding non-control batch base offset, or -1.",
+      "about": "The base offset of the preceding index entry in this partition, or -1.",
       "default": -1
     },
     {
@@ -96,6 +96,14 @@
       "versions": "0+",
       "about": "The expected index leader epoch, or -1 if not supplied.",
       "default": -1
+    },
+    {
+      "name": "BatchRecordCounts",
+      "type": "[]int32",
+      "versions": "1+",
+      "taggedVersions": "1+",
+      "tag": 0,
+      "about": "The record counts of consecutive source batches, or empty for a single batch."
     }
   ]
 }

@@ -27,12 +27,15 @@ import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataKey;
 import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataValue;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
- * Creates version 0 index records. Ownership, ordering and deduplication are checked by the shard.
+ * Creates index records. Ownership, ordering and deduplication are checked by the shard.
  */
 public final class GlobalSequenceCoordinatorRecordHelpers {
+    // Keep the boundary list comfortably below the index log's usual message size.
+    public static final int MAX_BATCHES_PER_INDEX_ENTRY = 32 * 1024;
     private static final short VALUE_VERSION = 0;
 
     private GlobalSequenceCoordinatorRecordHelpers() {
@@ -46,7 +49,21 @@ public final class GlobalSequenceCoordinatorRecordHelpers {
         int recordCount,
         long globalBaseOffset
     ) {
+        return newBatchIndexRecord(topicId, physicalPartition, physicalBaseOffset, physicalLastOffset, recordCount,
+            globalBaseOffset, List.of());
+    }
+
+    public static CoordinatorRecord newBatchIndexRecord(
+        Uuid topicId,
+        int physicalPartition,
+        long physicalBaseOffset,
+        long physicalLastOffset,
+        int recordCount,
+        long globalBaseOffset,
+        List<Integer> batchRecordCounts
+    ) {
         validatePhysicalBatch(topicId, physicalPartition, physicalBaseOffset, physicalLastOffset, recordCount);
+        validateBatchRecordCounts(recordCount, batchRecordCounts);
         requireNonNegative(globalBaseOffset, "globalBaseOffset");
         if (globalBaseOffset > Long.MAX_VALUE - recordCount) {
             throw new IllegalArgumentException("The global end offset must not overflow");
@@ -57,7 +74,27 @@ public final class GlobalSequenceCoordinatorRecordHelpers {
                 .setPhysicalPartition(physicalPartition)
                 .setPhysicalBaseOffset(physicalBaseOffset)
                 .setPhysicalLastOffset(physicalLastOffset)
-                .setRecordCount(recordCount), VALUE_VERSION));
+                .setRecordCount(recordCount)
+                .setBatchRecordCounts(List.copyOf(batchRecordCounts)), batchRecordCounts.isEmpty() ? VALUE_VERSION : 1));
+    }
+
+    public static void validateBatchRecordCounts(int recordCount, List<Integer> batchRecordCounts) {
+        if (batchRecordCounts.isEmpty()) {
+            return;
+        }
+        if (batchRecordCounts.size() < 2 || batchRecordCounts.size() > MAX_BATCHES_PER_INDEX_ENTRY) {
+            throw new IllegalArgumentException("Invalid number of source batches in a merged index entry");
+        }
+        long total = 0;
+        for (int count : batchRecordCounts) {
+            if (count <= 0) {
+                throw new IllegalArgumentException("Source batch record counts must be positive");
+            }
+            total += count;
+        }
+        if (total != recordCount) {
+            throw new IllegalArgumentException("Source batch counts do not cover the indexed range");
+        }
     }
 
     public static CoordinatorRecord newTopicMetadataRecord(Uuid topicId, long nextGlobalOffset) {
