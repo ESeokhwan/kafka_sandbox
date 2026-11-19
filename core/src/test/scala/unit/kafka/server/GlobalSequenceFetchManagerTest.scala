@@ -48,7 +48,8 @@ class GlobalSequenceFetchManagerTest {
   private case class Work(batch: PhysicalBatch, deadline: Long, future: CompletableFuture[Data])
   private class Context(entries: Seq[GlobalSequenceLookup.Mapping] = (0L until 6L).map(mapping(_)),
                         maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue,
-                        isolation: IsolationLevel = READ_UNCOMMITTED, bounded: Boolean = false) extends AutoCloseable {
+                        isolation: IsolationLevel = READ_UNCOMMITTED, bounded: Boolean = false,
+                        window: Int = 1) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val index: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val source: GlobalSequenceDataRouter = mock(classOf[GlobalSequenceDataRouter])
@@ -63,8 +64,14 @@ class GlobalSequenceFetchManagerTest {
       work += item
       item.future
     }
+    val rangeWork = ArrayBuffer.empty[(ReadRange, CompletableFuture[RangeResult])]
+    when(source.readRange(any(), anyLong(), any())).thenAnswer { call =>
+      val future = new CompletableFuture[RangeResult]()
+      rangeWork += ((call.getArgument[ReadRange](0), future))
+      future
+    }
     val limits = new GlobalSequenceTestResources(time)
-    val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time, if (bounded) limits.resources else null)
+    val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time, if (bounded) limits.resources else null, window)
     val future = manager.fetch(request)
     def loaded(): Unit = {
       val end = entries.lastOption.map(_.globalEndOffset()).getOrElse(startOffset)
@@ -80,6 +87,46 @@ class GlobalSequenceFetchManagerTest {
       limits.close()
       time.scheduler.clear()
     }
+  }
+
+  @Test
+  def testWindowGroupsInterleavedPartitionsAndPreservesGlobalOrder(): Unit = {
+    val entries = (0L until 5L).map { global =>
+      val partition = (global % 2).toInt
+      val offset = global / 2
+      new GlobalSequenceLookup.Mapping(global, new PhysicalBatch(new PartitionKey(topic, partition), offset, offset, 1))
+    }
+    val c = new Context(entries = entries, maxBytes = data(entries.head.batch()).records.sizeInBytes() * 3, window = 4)
+    try {
+      c.loaded()
+      assertEquals(2, c.rangeWork.size)
+      val (left, leftFuture) = c.rangeWork(0)
+      val (right, rightFuture) = c.rangeWork(1)
+      assertEquals(Vector(entries(0).batch(), entries(2).batch()), left.batches)
+      assertEquals(Vector(entries(1).batch(), entries(3).batch()), right.batches)
+      rightFuture.complete(RangeResult(right.batches.map(data(_))))
+      assertFalse(c.future.isDone)
+      leftFuture.complete(RangeResult(left.batches.map(data(_))))
+      assertEquals(3L, c.response.data().nextGlobalOffset())
+      assertEquals(Vector(0L, 1L, 2L), c.response.data().batches().asScala.map(_.globalBaseOffset()).toVector)
+      assertEquals(2, c.rangeWork.size)
+    } finally c.close()
+  }
+
+  @Test
+  def testWindowResumesAfterShortReadAndReducesNextWindowForByteBudget(): Unit = {
+    val entries = (0L until 5L).map(i => new GlobalSequenceLookup.Mapping(i,
+      new PhysicalBatch(new PartitionKey(topic, 0), i, i, 1)))
+    val size = data(entries.head.batch()).records.sizeInBytes()
+    val c = new Context(entries = entries, maxBytes = size * 3, window = 4)
+    try {
+      c.loaded()
+      assertEquals(4, c.rangeWork.head._1.batches.size)
+      c.rangeWork.head._2.complete(RangeResult(Vector(data(entries.head.batch()))))
+      assertEquals(Vector(entries(1).batch(), entries(2).batch()), c.rangeWork(1)._1.batches)
+      c.rangeWork(1)._2.complete(RangeResult(c.rangeWork(1)._1.batches.map(data(_))))
+      assertEquals(3L, c.response.data().nextGlobalOffset())
+    } finally c.close()
   }
 
   @Test

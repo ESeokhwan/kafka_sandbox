@@ -17,7 +17,7 @@
   "apiKey": 99,
   "type": "response",
   "name": "ReadGlobalSequenceDataResponse",
-  "validVersions": "0-1",
+  "validVersions": "0-2",
   "flexibleVersions": "0+",
   "fields": [
     {
@@ -114,6 +114,14 @@
       "about": "The requested whole batch record count.",
       "default": 0,
       "ignorable": true
+    },
+    { "name": "RangeErrorCode", "type": "int16", "versions": "2+",
+      "about": "Error at the first unprocessed batch, or zero for a partial read at a byte or segment boundary." },
+    { "name": "Batches", "type": "[]RangeBatch", "versions": "2+",
+      "about": "Prefix of the requested physical range, in request order.", "fields": [
+        { "name": "Status", "type": "int8", "versions": "2+" },
+        { "name": "Records", "type": "records", "versions": "2+", "nullableVersions": "2+" }
+      ]
     }
   ]
 }

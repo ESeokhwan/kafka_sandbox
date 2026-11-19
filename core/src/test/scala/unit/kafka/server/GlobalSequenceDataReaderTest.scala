@@ -84,6 +84,25 @@ class GlobalSequenceDataReaderTest extends AbstractPartitionTest {
   }
 
   @Test
+  def testRangeReturnsCompleteOriginalBatchesAndStopsAtRequestedBoundary(): Unit = {
+    append(2, Compression.gzip().build())
+    append()
+    append()
+    commit()
+    val range = GlobalSequenceFetch.ReadRange(Vector(
+      new PhysicalBatch(key, 0, 1, 2), new PhysicalBatch(key, 2, 2, 1)), 4096, minOneBatch = true)
+    val future = reader.readRange(range, epoch, time.nanoseconds() + 100000000L, READ_UNCOMMITTED)
+    workers.runAll()
+    val result = future.join()
+    assertTrue(result.error.isEmpty)
+    val batches = result.data.map(_.records.batches().iterator().next())
+    assertEquals(Vector(0L, 2L), batches.map(_.baseOffset()))
+    assertEquals(Vector(1L, 2L), batches.map(_.lastOffset()))
+    assertEquals(CompressionType.GZIP, batches.head.compressionType())
+    batches.foreach(_.ensureValid())
+  }
+
+  @Test
   def testHeaderIndexingDefersPayloadCorruptionDetectionToFetch(): Unit = {
     append(3, Compression.gzip().build())
     commit()

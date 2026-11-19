@@ -106,6 +106,38 @@ class GlobalSequenceDataRouterTest {
   }
 
   @Test
+  def testRangeWireResponseAndFallbackToSingleBatchOnAnOlderBroker(): Unit = {
+    import GlobalSequenceFetch._
+    import org.apache.kafka.common.errors.UnsupportedVersionException
+    import org.apache.kafka.common.message.ReadGlobalSequenceDataResponseData
+    import org.apache.kafka.common.protocol.MessageUtil
+
+    val next = new PhysicalBatch(batch.partition(), 12, 12, 1)
+    val range = ReadRange(Vector(batch, next), 4096, minOneBatch = true)
+    val c = new Context
+    try {
+      val result = c.router.readRange(range, 1000000000L, READ_UNCOMMITTED)
+      val sent = c.transport.sent.head.request.asInstanceOf[ReadGlobalSequenceDataRequest]
+      assertEquals(2.toShort, sent.version())
+      assertEquals(range, physicalRange(sent.data()))
+      val second = MemoryRecords.withRecords(12L, Compression.NONE, new SimpleRecord(Array[Byte](3)))
+      val items = Vector(data().copy(dataHighWatermark = 13), Data(second, 3, 13))
+      val wire = rangeResponse(range, 3, RangeResult(items))
+      val parsed = new ReadGlobalSequenceDataResponseData(MessageUtil.toByteBufferAccessor(wire.data(), 2.toShort), 2.toShort)
+      c.transport.sent.head.future.complete(new ReadGlobalSequenceDataResponse(parsed))
+      assertEquals(items, result.join().data)
+
+      val legacyResult = c.router.readRange(range, 1000000000L, READ_UNCOMMITTED)
+      c.transport.sent(1).future.completeExceptionally(new UnsupportedVersionException("Old broker"))
+      val legacyRequest = c.transport.sent(2).request.asInstanceOf[ReadGlobalSequenceDataRequest]
+      assertEquals(batch, physical(legacyRequest.data()))
+      assertTrue(legacyRequest.data().batches().isEmpty)
+      c.transport.sent(2).future.complete(dataResponse(batch, data()))
+      assertEquals(Vector(data()), legacyResult.join().data)
+    } finally c.close()
+  }
+
+  @Test
   def testSourceLeaderMoveRetriesWithRemainingDeadline(): Unit = {
     val c = new Context
     try {

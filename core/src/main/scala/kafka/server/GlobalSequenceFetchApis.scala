@@ -90,11 +90,20 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
     try {
       auth.authorizeClusterOperation(request, CLUSTER_ACTION)
       val isolation = GlobalSequenceFetch.isolation(body.data().isolationLevel(), body.version())
-      val batch = GlobalSequenceFetch.physical(body.data())
-      lease = Option(manager.reserveDataResponse(batch.partition())).flatten
       val deadline = time.nanoseconds() + body.data().timeoutMs().toLong * 1000000L
-      manager.readLocal(batch, body.data().sourceLeaderEpoch(), deadline, isolation).handle[Unit] { (data, error) =>
-        send(if (error == null) GlobalSequenceFetch.dataResponse(batch, data) else body.getErrorResponse(0, error))
+      if (body.version() >= 2 && (body.data().rangeMaxBytes() != 0 || body.data().minOneBatch() || !body.data().batches().isEmpty())) {
+        val range = GlobalSequenceFetch.physicalRange(body.data())
+        lease = manager.reserveDataResponse(range.partition)
+        val epoch = body.data().sourceLeaderEpoch()
+        manager.readLocalRange(range, epoch, deadline, isolation).handle[Unit] { (data, error) =>
+          send(if (error == null) GlobalSequenceFetch.rangeResponse(range, epoch, data) else body.getErrorResponse(0, error))
+        }
+      } else {
+        val batch = GlobalSequenceFetch.physical(body.data())
+        lease = manager.reserveDataResponse(batch.partition())
+        manager.readLocal(batch, body.data().sourceLeaderEpoch(), deadline, isolation).handle[Unit] { (data, error) =>
+          send(if (error == null) GlobalSequenceFetch.dataResponse(batch, data) else body.getErrorResponse(0, error))
+        }
       }
     } catch {
       case error: Exception =>

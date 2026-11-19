@@ -441,7 +441,8 @@ class BrokerServer(
         () => metadataCache.getImage(), new GlobalSequenceDataReader(replicaManager, kafkaScheduler, time,
           GlobalSequenceDataReader.workers(globalConfig.readerNumThreads(), globalConfig.workerQueueSize()), globalSequenceResources),
         globalSequenceDataTransport, kafkaScheduler, time, globalSequenceResources, ownsTransport = true)
-      globalSequenceFetchManager = new GlobalSequenceFetchManager(indexRoutingManager, globalSequenceDataRouter, kafkaScheduler, time, globalSequenceResources)
+      globalSequenceFetchManager = new GlobalSequenceFetchManager(indexRoutingManager, globalSequenceDataRouter, kafkaScheduler, time,
+        globalSequenceResources, globalConfig.fetchReadWindowMaxBatches())
       globalSequenceIndexerManager = GlobalSequenceIndexerManager(config.brokerId, config.globalSequenceCoordinatorConfig,
         replicaManager, indexRoutingManager, kafkaScheduler, time, globalSequenceResources)
       replicaManager.setGlobalSequenceIndexerManager(globalSequenceIndexerManager)

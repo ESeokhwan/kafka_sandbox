@@ -27,6 +27,8 @@ import org.apache.kafka.common.requests.{AbstractResponse, FetchGlobalSequenceRe
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup
 
+import scala.jdk.CollectionConverters._
+
 /** Wire contract: complete original batches, with a separate global selection and continuation. */
 object GlobalSequenceFetch {
   val MaxBatchBytes: Int = 8 * 1024 * 1024
@@ -46,6 +48,73 @@ object GlobalSequenceFetch {
 
   case class Data(records: MemoryRecords, sourceLeaderEpoch: Int, dataHighWatermark: Long,
                   lastStableOffset: Long = -1L, status: Byte = Visible)
+
+  // Leave room in the reader reservation for both a file slice copy and its individual batches.
+  val MaxRangeReadBytes: Int = MaxBatchBytes / 2
+
+  case class ReadRange(batches: Vector[PhysicalBatch], maxBytes: Int, minOneBatch: Boolean) {
+    require(batches.nonEmpty && batches.size <= GlobalSequenceLookup.MAX_BATCHES, "Invalid physical batch count")
+    require(maxBytes > 0 && maxBytes <= MaxRangeReadBytes, "Invalid physical range byte limit")
+    val partition: PartitionKey = batches.head.partition()
+    require(batches.forall(_.partition() == partition) &&
+      batches.iterator.zip(batches.iterator.drop(1)).forall { case (a, b) => a.lastOffset() + 1 == b.baseOffset() },
+      "Physical range must contain consecutive batches of one partition")
+  }
+
+  case class RangeResult(data: Vector[Data], error: Option[Throwable] = None)
+
+  def physicalRange(data: ReadGlobalSequenceDataRequestData): ReadRange = {
+    require(data.sourceLeaderEpoch() >= 0, "Invalid source epoch")
+    require(data.timeoutMs() > 0 && data.timeoutMs() <= GlobalSequenceLookup.MAX_TIMEOUT_MS, "Invalid physical read timeout")
+    val key = new PartitionKey(data.topicId(), data.partition())
+    ReadRange(data.batches().asScala.iterator.map(b => new PhysicalBatch(key, b.baseOffset(), b.lastOffset(), b.recordCount())).toVector,
+      data.rangeMaxBytes(), data.minOneBatch())
+  }
+
+  def rangeRequest(range: ReadRange, epoch: Int, timeoutMs: Int, isolation: IsolationLevel): ReadGlobalSequenceDataRequest.Builder = {
+    val boundaries = range.batches.map { batch =>
+      new ReadGlobalSequenceDataRequestData.BatchBoundary().setBaseOffset(batch.baseOffset())
+        .setLastOffset(batch.lastOffset()).setRecordCount(batch.recordCount())
+    }
+    new ReadGlobalSequenceDataRequest.Builder(new ReadGlobalSequenceDataRequestData()
+      .setTopicId(range.partition.topicId()).setPartition(range.partition.partition()).setSourceLeaderEpoch(epoch)
+      .setTimeoutMs(timeoutMs).setIsolationLevel(isolation.id()).setRangeMaxBytes(range.maxBytes)
+      .setMinOneBatch(range.minOneBatch).setBatches(boundaries.asJava))
+  }
+
+  def rangeResponse(range: ReadRange, epoch: Int, result: RangeResult): ReadGlobalSequenceDataResponse = {
+    val data = new ReadGlobalSequenceDataResponseData().setTopicId(range.partition.topicId())
+      .setPartition(range.partition.partition()).setSourceLeaderEpoch(epoch)
+      .setRangeErrorCode(result.error.fold(Errors.NONE)(Errors.forException).code())
+    result.data.headOption.foreach(first => data.setDataHighWatermark(first.dataHighWatermark).setLastStableOffset(first.lastStableOffset))
+    data.setBatches(result.data.map(batch => new ReadGlobalSequenceDataResponseData.RangeBatch()
+      .setRecords(batch.records).setStatus(batch.status)).asJava)
+    new ReadGlobalSequenceDataResponse(data)
+  }
+
+  def decodeRange(range: ReadRange, epoch: Int, reply: AbstractResponse, isolation: IsolationLevel): RangeResult = {
+    val data = reply.asInstanceOf[ReadGlobalSequenceDataResponse].data()
+    val error = Errors.forCode(data.errorCode())
+    if (error != Errors.NONE) throw error.exception()
+    if (data.topicId() != range.partition.topicId() || data.partition() != range.partition.partition() ||
+      data.sourceLeaderEpoch() != epoch || data.batches().size() > range.batches.size)
+      throw new InvalidRequestException("Physical range response does not match its request")
+    val rangeError = Option(Errors.forCode(data.rangeErrorCode()).exception())
+    val batches = data.batches().asScala.iterator.map { batch =>
+      val records = batch.records() match {
+        case memory: MemoryRecords => memory
+        case _ => throw new CorruptRecordException("Physical range must return in-memory records")
+      }
+      Data(records, epoch, data.dataHighWatermark(), data.lastStableOffset(), batch.status())
+    }.toVector
+    val bytes = batches.iterator.map(_.records.sizeInBytes().toLong).sum
+    val firstBytes = batches.headOption.filter(_ => range.minOneBatch).fold(0)(_.records.sizeInBytes())
+    if (bytes > math.max(range.maxBytes, firstBytes) || (rangeError.nonEmpty && batches.size == range.batches.size) ||
+      (range.minOneBatch && batches.isEmpty && rangeError.isEmpty))
+      throw new InvalidRequestException("Invalid physical range prefix")
+    range.batches.zip(batches).foreach { case (batch, value) => validateData(batch, value, isolation) }
+    RangeResult(batches, rangeError)
+  }
 
   def isolation(level: Byte, version: Short): IsolationLevel = {
     if (level != 0 && (level != 1 || version < 1))
