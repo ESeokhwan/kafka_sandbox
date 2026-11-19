@@ -60,6 +60,10 @@ final class GlobalSequenceMonitoringInterceptor(
   private var failedFetches = 0L
   private var fetchLatencyNs = 0L
   private var maxFetchLatencyNs = 0L
+  private val fetchTimingLock = new Object
+  private val fetchTimingTotalsNs = new Array[Long](FetchTimingScopes.length)
+  private var fetchTimingSamples = 0L
+  private var rangeTimingSamples = 0L
 
   private val queue = new MonitorQueue
   private var writer: MonitorLogWriter = _
@@ -105,8 +109,10 @@ final class GlobalSequenceMonitoringInterceptor(
         // The request handler owns validation and error handling for malformed batches.
         case NonFatal(error) => logger.debug("Could not read Produce batch headers for monitoring", error)
       }
-    case ApiKeys.FETCH_GLOBAL_SEQUENCE if monitorsFetch(request) =>
-      receivedFetches.incrementAndGet()
+    case ApiKeys.FETCH_GLOBAL_SEQUENCE =>
+      // Keep this broker-wide so dynamically named experiment topics are included.
+      request.globalFetchTiming = new RequestChannel.GlobalFetchTiming
+      if (monitorsFetch(request)) receivedFetches.incrementAndGet()
     case _ =>
   }
 
@@ -127,6 +133,31 @@ final class GlobalSequenceMonitoringInterceptor(
         maxFetchLatencyNs = math.max(maxFetchLatencyNs, elapsedNs)
       }
     case _ =>
+  }
+
+  override def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit = {
+    val request = response.request
+    val timing = request.globalFetchTiming
+    if (timing != null && timing.sendCompleteNs != 0L) {
+      val dequeued = request.requestDequeueTimeNanos
+      val queued = request.responseCompleteTimeNanos
+      val sending = request.responseDequeueTimeNanos
+      fetchTimingLock.synchronized {
+        fetchTimingSamples += 1
+        fetchTimingTotalsNs(0) += dequeued - request.startTimeNanos
+        fetchTimingTotalsNs(1) += timing.lookupStartNs - dequeued
+        fetchTimingTotalsNs(2) += timing.lookupCompleteNs - timing.lookupStartNs
+        fetchTimingTotalsNs(3) += timing.pageReadyNs - timing.lookupCompleteNs
+        fetchTimingTotalsNs(4) += queued - timing.pageReadyNs
+        fetchTimingTotalsNs(5) += sending - queued
+        fetchTimingTotalsNs(6) += timing.sendCompleteNs - sending
+        if (timing.lastRangeCallbackNs != 0L) {
+          rangeTimingSamples += 1
+          fetchTimingTotalsNs(7) += timing.lastRangeCallbackNs - timing.lookupCompleteNs
+          fetchTimingTotalsNs(8) += timing.pageReadyNs - timing.lastRangeCallbackNs
+        }
+      }
+    }
   }
 
   private def runSample(coordinator: Option[GlobalSequenceCoordinator]): Unit = {
@@ -164,6 +195,24 @@ final class GlobalSequenceMonitoringInterceptor(
       emit("fetch-to-response-queue-ms-max", maxLatencyNs.toDouble / 1000000)
     }
     emit("append-linger-ms", config.appendLingerMs())
+
+    val (pageSamples, rangeSamples, stageTotals) = fetchTimingLock.synchronized {
+      val window = (fetchTimingSamples, rangeTimingSamples, fetchTimingTotalsNs.clone())
+      fetchTimingSamples = 0L
+      rangeTimingSamples = 0L
+      java.util.Arrays.fill(fetchTimingTotalsNs, 0L)
+      window
+    }
+    def emitTiming(name: String, scope: String, value: AnyVal): Unit =
+      writer.submit(Sample(nowMs, durationMs, brokerId, "", "", "global-sequence-fetch-timing", name, scope, value.toString))
+
+    if (pageSamples > 0) {
+      emitTiming("samples", "page", pageSamples)
+      emitTiming("samples", "range-page", rangeSamples)
+      FetchTimingScopes.indices.foreach { stage =>
+        emitTiming("duration-ms-total", FetchTimingScopes(stage), stageTotals(stage) / 1000000.0)
+      }
+    }
 
     metrics.metrics().asScala.iterator.filter { case (name, _) => includesMetric(name) }.foreach { case (name, metric) =>
       writer.submit(Sample(nowMs, durationMs, brokerId, "", "", name.group(), name.name(),
@@ -222,6 +271,10 @@ final class GlobalSequenceMonitoringInterceptor(
 }
 
 private object GlobalSequenceMonitoringInterceptor {
+  private val FetchTimingScopes = Vector("request-queue", "handler-to-lookup", "index-lookup",
+    "lookup-to-page-ready", "page-ready-to-response-queue", "response-queue", "response-send",
+    "lookup-to-last-range-callback", "last-range-callback-to-page-ready")
+
   private val ResourceScopes = Set("indexing_lag", "coordinator_write", "index_route", "index_rpc",
     "index_read", "lookup_route", "fetch", "data_read", "rpc_retry", "source_read")
 

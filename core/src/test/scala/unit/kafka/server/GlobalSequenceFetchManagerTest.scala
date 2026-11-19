@@ -49,7 +49,7 @@ class GlobalSequenceFetchManagerTest {
   private class Context(entries: Seq[GlobalSequenceLookup.Mapping] = (0L until 6L).map(mapping(_)),
                         maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue,
                         isolation: IsolationLevel = READ_UNCOMMITTED, bounded: Boolean = false,
-                        window: Int = 1) extends AutoCloseable {
+                        window: Int = 1, timing: kafka.network.RequestChannel.GlobalFetchTiming = null) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val index: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val source: GlobalSequenceDataRouter = mock(classOf[GlobalSequenceDataRouter])
@@ -72,7 +72,7 @@ class GlobalSequenceFetchManagerTest {
     }
     val limits = new GlobalSequenceTestResources(time)
     val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time, if (bounded) limits.resources else null, window)
-    val future = manager.fetch(request)
+    val future = if (timing == null) manager.fetch(request) else manager.fetch(request, timing)
     def loaded(): Unit = {
       val end = entries.lastOption.map(_.globalEndOffset()).getOrElse(startOffset)
       lookup.complete(IndexRoutingManager.RoutedResult(new GlobalSequenceLookup.Result(
@@ -96,17 +96,25 @@ class GlobalSequenceFetchManagerTest {
       val offset = global / 2
       new GlobalSequenceLookup.Mapping(global, new PhysicalBatch(new PartitionKey(topic, partition), offset, offset, 1))
     }
-    val c = new Context(entries = entries, maxBytes = data(entries.head.batch()).records.sizeInBytes() * 3, window = 4)
+    val timing = new kafka.network.RequestChannel.GlobalFetchTiming
+    val c = new Context(entries = entries, maxBytes = data(entries.head.batch()).records.sizeInBytes() * 3, window = 4, timing = timing)
     try {
+      c.time.sleep(1)
       c.loaded()
+      assertEquals(c.time.nanoseconds(), timing.lookupCompleteNs)
       assertEquals(2, c.rangeWork.size)
       val (left, leftFuture) = c.rangeWork(0)
       val (right, rightFuture) = c.rangeWork(1)
       assertEquals(Vector(entries(0).batch(), entries(2).batch()), left.batches)
       assertEquals(Vector(entries(1).batch(), entries(3).batch()), right.batches)
+      c.time.sleep(1)
       rightFuture.complete(RangeResult(right.batches.map(data(_))))
       assertFalse(c.future.isDone)
+      assertEquals(0L, timing.pageReadyNs)
+      c.time.sleep(1)
       leftFuture.complete(RangeResult(left.batches.map(data(_))))
+      assertEquals(c.time.nanoseconds(), timing.lastRangeCallbackNs)
+      assertEquals(c.time.nanoseconds(), timing.pageReadyNs)
       assertEquals(3L, c.response.data().nextGlobalOffset())
       assertEquals(Vector(0L, 1L, 2L), c.response.data().batches().asScala.map(_.globalBaseOffset()).toVector)
       assertEquals(2, c.rangeWork.size)

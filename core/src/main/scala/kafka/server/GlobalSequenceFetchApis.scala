@@ -21,6 +21,7 @@ import kafka.network.RequestChannel
 import kafka.server.QuotaFactory.QuotaManagers
 import org.apache.kafka.common.acl.AclOperation.{CLUSTER_ACTION, READ}
 import org.apache.kafka.common.errors.{RecordTooLargeException, TopicAuthorizationException, UnknownTopicIdException}
+import org.apache.kafka.common.network.Send
 import org.apache.kafka.common.protocol.{Errors, ObjectSerializationCache}
 import org.apache.kafka.common.requests.{AbstractResponse, FetchGlobalSequenceRequest, FetchGlobalSequenceResponse, ReadGlobalSequenceDataRequest, ReadGlobalSequenceDataResponse}
 import org.apache.kafka.common.resource.ResourceType.TOPIC
@@ -34,6 +35,7 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
                               quotas: QuotaManagers, time: Time) {
   def fetch(request: RequestChannel.Request): CompletableFuture[Unit] = {
     val body = request.body[FetchGlobalSequenceRequest]
+    val timing = request.globalFetchTiming
     def send(response: FetchGlobalSequenceResponse): Unit = try {
       val size = response.data().size(new ObjectSerializationCache(), request.header.apiVersion())
       if (size > GlobalSequenceFetch.MaxResponseBytes) {
@@ -49,7 +51,10 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
       if (throttle > 0) helper.throttle(if (bandwidthThrottle > requestThrottle) quotas.fetch else quotas.request, request, throttle)
       // Send this bounded page and charge its bytes even when muting the channel. Its cursor remains usable.
       response.maybeSetThrottleTimeMs(throttle)
-      channel.sendResponse(request, response, None)
+      val onComplete = Option.when(timing != null && timing.pageReadyNs != 0L && response.data().errorCode() == Errors.NONE.code()) {
+        (_: Send) => timing.sendCompleteNs = time.nanoseconds()
+      }
+      channel.sendResponse(request, response, onComplete)
     } catch {
       case error: Exception =>
         release(response)
@@ -60,7 +65,8 @@ class GlobalSequenceFetchApis(manager: GlobalSequenceFetchManager, metadata: Met
       if (name.isEmpty) throw new UnknownTopicIdException("Unknown global sequence topic UUID")
       if (!auth.authorize(request.context, READ, TOPIC, name.get())) throw new TopicAuthorizationException(name.get())
       val fetch = GlobalSequenceFetch.request(body.data(), body.version())
-      manager.fetch(fetch).handle[Unit] { (response, error) =>
+      val result = if (timing == null) manager.fetch(fetch) else manager.fetch(fetch, timing)
+      result.handle[Unit] { (response, error) =>
         send(if (error == null) response else body.getErrorResponse(0, error))
       }
     } catch {

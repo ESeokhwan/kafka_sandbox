@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.network.RequestChannel.ResourceResponse
+import kafka.network.RequestChannel.{GlobalFetchTiming, ResourceResponse}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
 
@@ -52,9 +52,12 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
   private[server] def reserveDataResponse(key: PartitionKey): Option[GlobalSequenceResources#Lease] =
     Option(resources).map(_.acquire(Scope.DATA_RESPONSE, key, GlobalSequenceResources.BATCH_BYTES))
 
-  def fetch(request: Request): CompletableFuture[FetchGlobalSequenceResponse] = new Session(request).start()
+  def fetch(request: Request): CompletableFuture[FetchGlobalSequenceResponse] = fetch(request, null)
 
-  private class Session(request: Request) {
+  private[server] def fetch(request: Request, timing: GlobalFetchTiming): CompletableFuture[FetchGlobalSequenceResponse] =
+    new Session(request, timing).start()
+
+  private class Session(request: Request, timing: GlobalFetchTiming) {
     private var lease: Option[GlobalSequenceResources#Lease] = None
     private val result = new CompletableFuture[FetchGlobalSequenceResponse]()
     private val deadlineNs = time.nanoseconds() + request.lookup.timeoutMs().toLong * 1000000L
@@ -99,11 +102,13 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
         }, request.lookup.timeoutMs())
         if (result.isDone) timer.cancel(false)
         else {
+          if (timing != null) timing.lookupStartNs = time.nanoseconds()
           lookup = index.lookupIndex(request.lookup)
           lookup.whenComplete { (page, error) => synchronized {
             if (!result.isDone) {
               if (error != null) finish(Some(error))
               else {
+                if (timing != null) timing.lookupCompleteNs = time.nanoseconds()
                 route = page.coordinator
                 response = GlobalSequenceFetch.response(request, page.value.snapshot())
                 mappings = page.value.mappings().asScala.toVector
@@ -133,6 +138,8 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
         override def release(): Unit = lease.foreach(_.finish(
           org.apache.kafka.common.protocol.Errors.forCode(page.data().errorCode()).exception()))
       }
+      if (timing != null && page.data().errorCode() == 0 && !page.data().batches().isEmpty)
+        timing.pageReadyNs = time.nanoseconds()
       if (!result.complete(owned)) owned.release()
     }
 
@@ -176,6 +183,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
         read.whenComplete { (value, error) => synchronized {
           running -= start
           if (!result.isDone) {
+            if (timing != null) timing.lastRangeCallbackNs = time.nanoseconds()
             if (error != null) completed += start -> Left(error)
             else {
               positions.zip(value.data).foreach { case (position, data) => completed += position -> Right(data) }

@@ -63,6 +63,14 @@ object RequestChannel extends Logging {
   case class CallbackRequest(fun: RequestLocal => Unit,
                              originalRequest: Request) extends BaseRequest
 
+  private[kafka] final class GlobalFetchTiming {
+    var lookupStartNs = 0L
+    var lookupCompleteNs = 0L
+    var lastRangeCallbackNs = 0L
+    var pageReadyNs = 0L
+    var sendCompleteNs = 0L
+  }
+
   class Request(val processor: Int,
                 val context: RequestContext,
                 val startTimeNanos: Long,
@@ -70,6 +78,8 @@ object RequestChannel extends Logging {
                 @volatile var buffer: ByteBuffer,
                 metrics: RequestChannelMetrics,
                 val envelope: Option[RequestChannel.Request] = None) extends BaseRequest {
+    // Set by the GST monitor before handling and published through the response queue.
+    private[kafka] var globalFetchTiming: GlobalFetchTiming = _
     // These need to be volatile because the readers are in the network thread and the writers are in the request
     // handler threads or the purgatory threads
     @volatile var requestDequeueTimeNanos: Long = -1L

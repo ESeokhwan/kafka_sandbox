@@ -35,6 +35,7 @@ import org.apache.kafka.metadata.{LeaderRecoveryState, PartitionRegistration}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 
 import java.nio.file.{Files, Path}
@@ -104,6 +105,28 @@ class GlobalSequenceMonitoringInterceptorTest {
       monitor.beforeSendResponseToQueue(new RequestChannel.SendResponse(fetch, mock(classOf[Send]), None, None,
         errorCounts = Map(Errors.REQUEST_TIMED_OUT -> 1)))
 
+      val measured = mock(classOf[RequestChannel.Request])
+      when(measured.header).thenReturn(new RequestHeader(ApiKeys.FETCH_GLOBAL_SEQUENCE, 0.toShort, "consumer", 3))
+      val otherTopicId = Uuid.randomUuid()
+      when(measured.body[FetchGlobalSequenceRequest]).thenReturn(new FetchGlobalSequenceRequest.Builder(
+        new FetchGlobalSequenceRequestData().setTopicId(otherTopicId)).build())
+      monitor.beforeHandleRequest(measured)
+      verify(measured).globalFetchTiming_=(any(classOf[RequestChannel.GlobalFetchTiming]))
+      val timing = new RequestChannel.GlobalFetchTiming
+      timing.lookupStartNs = 3000000L
+      timing.lookupCompleteNs = 5000000L
+      timing.lastRangeCallbackNs = 8000000L
+      timing.pageReadyNs = 9000000L
+      when(measured.globalFetchTiming).thenReturn(timing)
+      when(measured.startTimeNanos).thenReturn(1000000L)
+      when(measured.requestDequeueTimeNanos).thenReturn(2000000L)
+      when(measured.responseCompleteTimeNanos).thenReturn(11000000L)
+      when(measured.responseDequeueTimeNanos).thenReturn(12000000L)
+      val sent = new RequestChannel.SendResponse(measured, mock(classOf[Send]), None, None)
+      monitor.afterProcessResponse(sent, "connection")
+      timing.sendCompleteNs = 14000000L
+      monitor.afterProcessResponse(sent, "connection")
+
       resources.recordSourceRead(3, 2.5)
       resources.recordSourceRead(0, 0.25)
       time.sleep(997)
@@ -129,6 +152,20 @@ class GlobalSequenceMonitoringInterceptorTest {
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-completed-requests,,1"))
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-failed-requests,,1"))
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-to-response-queue-ms-avg,,3.0"))
+    val timings = csv.filter(_.contains(",global-sequence-fetch-timing,"))
+    assertEquals(Seq(
+      "samples,page,1",
+      "samples,range-page,1",
+      "duration-ms-total,request-queue,1.0",
+      "duration-ms-total,handler-to-lookup,1.0",
+      "duration-ms-total,index-lookup,2.0",
+      "duration-ms-total,lookup-to-page-ready,4.0",
+      "duration-ms-total,page-ready-to-response-queue,2.0",
+      "duration-ms-total,response-queue,1.0",
+      "duration-ms-total,response-send,2.0",
+      "duration-ms-total,lookup-to-last-range-callback,3.0",
+      "duration-ms-total,last-range-callback-to-page-ready,1.0"
+    ).map("2000,1000,2,,,global-sequence-fetch-timing," + _), timings.toSeq)
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,physical-offsets,indexing_lag,23"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,reads-total,source_read,2.0"))
     assertTrue(csv.contains("2000,1000,2,,,global-sequence-resources,batches-total,source_read,3.0"))
