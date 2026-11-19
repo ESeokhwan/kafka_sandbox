@@ -46,10 +46,13 @@ object GlobalSequenceFetch {
     require(isolation != null, "isolation must be supplied")
   }
 
-  case class Data(records: MemoryRecords, sourceLeaderEpoch: Int, dataHighWatermark: Long,
-                  lastStableOffset: Long = -1L, status: Byte = Visible)
+  // An identity shared by views of the same range. It carries the allocation size without retaining the bytes.
+  final class SharedRange(val sizeInBytes: Int)
 
-  // Leave room in the reader reservation for both a file slice copy and its individual batches.
+  case class Data(records: MemoryRecords, sourceLeaderEpoch: Int, dataHighWatermark: Long,
+                  lastStableOffset: Long = -1L, status: Byte = Visible, sharedRange: Option[SharedRange] = None)
+
+  // Bound the backing allocation for each range; the first batch can still exceed the soft read limit.
   val MaxRangeReadBytes: Int = MaxBatchBytes / 2
 
   case class ReadRange(batches: Vector[PhysicalBatch], maxBytes: Int, minOneBatch: Boolean) {

@@ -25,13 +25,16 @@ import org.apache.kafka.common.IsolationLevel
 import org.apache.kafka.common.IsolationLevel.READ_UNCOMMITTED
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, NotCoordinatorException, TimeoutException}
 import org.apache.kafka.common.message.FetchGlobalSequenceResponseData
+import org.apache.kafka.common.record.MemoryRecords
 import org.apache.kafka.common.requests.FetchGlobalSequenceResponse
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup
 import org.apache.kafka.server.util.Scheduler
 
+import java.nio.ByteBuffer
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ScheduledFuture}
+import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
@@ -69,6 +72,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
       .setNextGlobalOffset(request.lookup.startOffset())
     private var running = Map.empty[Int, CompletableFuture[_]]
     private var completed = Map.empty[Int, Either[Throwable, Data]]
+    private val retainedRanges = mutable.HashMap.empty[SharedRange, Boolean]
     private var queuedRanges = Vector.empty[Vector[Int]]
     private var windowStart = 0
     private var windowCount = 0
@@ -158,6 +162,22 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
       Option(resources).foreach(_.recordFetchRead(0, 0, discarded))
     }
 
+    private def retainBatch(data: Data): Data = data.sharedRange match {
+      case Some(range) =>
+        val size = data.records.sizeInBytes()
+        // Admission already covers the first selected batch. Reserve the remaining backing bytes once
+        // per range so a page can retain a small prefix without pinning unaccounted memory.
+        val retained = retainedRanges.getOrElseUpdate(range,
+          lease.forall(_.tryReserveAdditionalBytes(range.sizeInBytes.toLong - size)))
+        if (retained) data
+        else {
+          val buffer = ByteBuffer.allocate(size)
+          buffer.put(data.records.buffer()).flip()
+          data.copy(records = MemoryRecords.readableRecords(buffer), sharedRange = None)
+        }
+      case None => data
+    }
+
     private def selectWindow(): Unit = {
       val remaining = request.maxBytes - bytes
       val estimated = if (sampledBatches == 0) readWindowMaxBatches
@@ -234,7 +254,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
                   finish(None)
                 }
                 else {
-                  val entry = GlobalSequenceFetch.fetched(request, mappings(consumed), data)
+                  val entry = GlobalSequenceFetch.fetched(request, mappings(consumed), retainBatch(data))
                   response.batches().add(entry)
                   response.setNextGlobalOffset(entry.selectedGlobalEndOffset())
                   bytes += size
