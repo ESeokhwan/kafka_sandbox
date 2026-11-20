@@ -150,11 +150,11 @@ public class GlobalSequenceCoordinatorConfig {
 
     public static final String INDEX_CACHE_MAX_ENTRIES_CONFIG = "global.sequence.index.cache.max.entries";
     public static final int INDEX_CACHE_MAX_ENTRIES_DEFAULT = 100000;
-    public static final String INDEX_CACHE_MAX_ENTRIES_DOC = "Maximum committed mapping entries in the broker-wide lookup LRU cache. Zero disables the cache. Entries are populated by successful index lookups.";
+    public static final String INDEX_CACHE_MAX_ENTRIES_DOC = "Maximum committed BatchIndex ranges in the broker-wide lookup LRU cache. Zero disables the cache. Entries are populated by index commits and successful index lookups.";
 
     public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG = "global.sequence.index.cache.max.entries.per.topic";
     public static final int INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT = 10000;
-    public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum lookup cache entries per source topic UUID across index generations. The least recently used entries are evicted first.";
+    public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum cached BatchIndex ranges per source topic UUID across index generations. The least recently used entries are evicted first.";
 
     public static final String MONITOR_TOPIC_CONFIG = "global.sequence.monitor.topic";
     public static final String MONITOR_INTERVAL_MS_CONFIG = "global.sequence.monitor.interval.ms";

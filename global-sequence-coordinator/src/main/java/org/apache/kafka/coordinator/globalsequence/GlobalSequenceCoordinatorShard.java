@@ -17,6 +17,7 @@
 
 package org.apache.kafka.coordinator.globalsequence;
 
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.record.RecordBatch;
@@ -39,6 +40,7 @@ import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 import org.apache.kafka.timeline.TimelineLong;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -212,6 +214,9 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     private final Map<PartitionKey, Allocation> committedAllocations = new HashMap<>();
     private final Map<PartitionKey, Fence> committedFences = new HashMap<>();
     private final Object lookupGeneration = new Object();
+    private Object loadSource;
+    private List<GlobalSequenceLookup.CommittedRange> newlyCommitted;
+
     private final int spiBaseIntervalBatches;
     private final int spiEntriesPerLevel;
     private final int spiMaxEntriesPerTopic;
@@ -492,6 +497,19 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
     }
 
     @Override
+    public void onLoadSource(Object source) {
+        loadSource = source;
+    }
+
+    void cacheNewlyCommitted(GlobalSequenceLookup.Reader reader, TopicPartition partition, int leaderEpoch) {
+        if (newlyCommitted != null) {
+            var ranges = newlyCommitted;
+            newlyCommitted = null;
+            reader.cacheCommitted(partition, leaderEpoch, lookupGeneration, loadSource, ranges);
+        }
+    }
+
+    @Override
     public void onHighWatermarkUpdated(long newHighWatermark) {
         if (newHighWatermark < highWatermark || newHighWatermark > nextReplayOffset.get()) {
             throw new IllegalStateException("Index HW must advance within the replayed log");
@@ -509,6 +527,12 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
                 updatedTopics.put(topicId, new CommittedTopic(allocation.globalEndOffset(), positions));
                 committedAllocations.put(allocation.batch().partition(), allocation);
                 pendingAllocations.remove(allocation.batch().id());
+                if (loadSource != null) {
+                    if (newlyCommitted == null) newlyCommitted = new ArrayList<>();
+                    newlyCommitted.add(new GlobalSequenceLookup.CommittedRange(
+                        new GlobalSequenceLookup.Mapping(allocation.globalBaseOffset(), allocation.batch()),
+                        allocation.endOffset(), allocation.batchRecordCounts()));
+                }
             } else if (change instanceof Fence fence) {
                 committedFences.put(fence.partition(), fence);
             }

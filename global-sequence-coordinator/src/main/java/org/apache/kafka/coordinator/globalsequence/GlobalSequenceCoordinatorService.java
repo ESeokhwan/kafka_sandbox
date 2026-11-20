@@ -154,6 +154,8 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
             ExecutorService executor = Executors.newSingleThreadExecutor(runnable ->
                 new KafkaThread("global-sequence-coordinator-executor-" + nodeId, runnable, true));
             LookupPartitions lookupPartitions = new LookupPartitions(config.indexTopicNumPartitions());
+            Logger log = logContext.logger(GlobalSequenceCoordinatorService.class);
+            GlobalSequenceLookup.Reader reader = indexReader;
             try {
                 CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime =
                     new CoordinatorRuntime.Builder<GlobalSequenceCoordinatorShard, CoordinatorRecord>()
@@ -164,7 +166,16 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                         .withOperationAdmission((tp, write) -> resources == null ? () -> { } : resources.acquire(
                             write ? GlobalSequenceResources.Scope.COORDINATOR_WRITE : GlobalSequenceResources.Scope.COORDINATOR_READ,
                             tp, 0)::close)
-                        .withCoordinatorStateListener(lookupPartitions::onUpdate)
+                        .withCoordinatorStateListener((tp, state, context, shard) -> {
+                            if (state == CoordinatorState.ACTIVE) {
+                                try {
+                                    shard.cacheNewlyCommitted(reader, tp, context.leaderEpoch());
+                                } catch (RuntimeException e) {
+                                    log.warn("Failed to cache committed ranges for {}", tp, e);
+                                }
+                            }
+                            lookupPartitions.onUpdate(tp, state, context, shard);
+                        })
                         .withPartitionWriter(writer)
                         .withLoader(loader)
                         .withCoordinatorShardBuilderSupplier(() -> new GlobalSequenceCoordinatorShardBuilder().withConfig(config))
@@ -175,10 +186,10 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                         .withAppendLingerMs(config.appendLingerMs())
                         .withExecutorService(executor)
                         .build();
-                return new GlobalSequenceCoordinatorService(logContext, config, runtime, timer, createIndexTopic, indexReader,
+                return new GlobalSequenceCoordinatorService(logContext, config, runtime, timer, createIndexTopic, reader,
                     time, nodeId, lookupPartitions);
             } catch (RuntimeException e) {
-                Utils.closeQuietly(indexReader, "global sequence index reader");
+                Utils.closeQuietly(reader, "global sequence index reader");
                 Utils.closeQuietly(processor, "global sequence event processor");
                 executor.shutdown();
                 Utils.closeQuietly(runtimeMetrics, "global sequence runtime metrics");

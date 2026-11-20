@@ -127,7 +127,7 @@ class GlobalSequenceIndexCacheTest {
     try {
       cache.putAll(original, Seq(entry(topic, 0)))
       assertTrue(first.equals(second))
-      assertEquals(Some(entry(topic, 0)), cache.get(scope.copy(log = new Identity(first)), topic, 1, snapshot))
+      assertTrue(cache.get(scope.copy(log = new Identity(first)), topic, 1, snapshot).exists(_.sameRange(entry(topic, 0))))
       assertEquals(None, cache.get(scope.copy(log = new Identity(second)), topic, 1, snapshot))
       original.log.asInstanceOf[Identity].clear()
       cache.putAll(scope, Seq(entry(topic, 3)))
@@ -144,9 +144,10 @@ class GlobalSequenceIndexCacheTest {
     disabled.close()
     val metrics = new Metrics
     val cache = new GlobalSequenceIndexCache(1, 1, metrics)
-    val names = Seq("hits-total", "misses-total", "evictions-total", "entries")
+    val names = Seq("hits-total", "misses-total", "evictions-total", "scan-lookups-total", "entries")
       .map(metrics.metricName(_, "global-sequence-index-cache"))
     try {
+      cache.recordScan()
       cache.putAll(scope, Seq(entry(topic, 0)))
       cache.get(scope, topic, 1, snapshot)
       cache.get(scope, topic, 4, snapshot)

@@ -703,23 +703,26 @@ class BrokerServer(
       "global-sequence-coordinator-reaper",
       new SystemTimer("global-sequence-coordinator")
     )
+    val indexCache = new GlobalSequenceIndexCache(config.globalSequenceCoordinatorConfig.indexCacheMaxEntries(),
+      config.globalSequenceCoordinatorConfig.indexCacheMaxEntriesPerTopic(), metrics)
+    val indexReader = new GlobalSequenceIndexReader(replicaManager, kafkaScheduler, coordinatorTime,
+      GlobalSequenceIndexReader.workers(config.globalSequenceCoordinatorConfig.readerNumThreads(), config.globalSequenceCoordinatorConfig.workerQueueSize()),
+      globalSequenceResources, indexCache)
     val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
       coordinatorTime,
       replicaManager,
       new GlobalSequenceCoordinatorRecordSerde,
       config.globalSequenceCoordinatorConfig.loadBufferSize(),
       CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS,
-      requireFullLog = true
+      requireFullLog = true,
+      captureLoadSource = indexReader.captureLoadSource
     )
     new GlobalSequenceCoordinatorService.Builder(config.brokerId, config.globalSequenceCoordinatorConfig)
       .withTime(coordinatorTime)
       .withTimer(timer)
       .withLoader(loader)
       .withWriter(new CoordinatorPartitionWriter(replicaManager))
-      .withIndexReader(new GlobalSequenceIndexReader(replicaManager, kafkaScheduler, coordinatorTime,
-        GlobalSequenceIndexReader.workers(config.globalSequenceCoordinatorConfig.readerNumThreads(), config.globalSequenceCoordinatorConfig.workerQueueSize()),
-        globalSequenceResources, new GlobalSequenceIndexCache(config.globalSequenceCoordinatorConfig.indexCacheMaxEntries(),
-          config.globalSequenceCoordinatorConfig.indexCacheMaxEntriesPerTopic(), metrics)))
+      .withIndexReader(indexReader)
       .withResources(globalSequenceResources)
       .withMetrics(metrics)
       .withTopicCreation(() => {

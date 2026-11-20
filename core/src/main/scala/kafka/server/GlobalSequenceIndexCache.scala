@@ -20,10 +20,12 @@ package kafka.server
 import org.apache.kafka.common.Uuid
 import org.apache.kafka.common.errors.CorruptRecordException
 import org.apache.kafka.common.metrics.{Gauge, MetricConfig, Metrics}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Position, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch
 
-import java.util.{LinkedHashMap, TreeMap}
+import java.util.{Arrays, LinkedHashMap, List => JList, TreeMap}
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.LongAdder
 import scala.collection.mutable
 
 private[server] object GlobalSequenceIndexCache {
@@ -41,7 +43,51 @@ private[server] object GlobalSequenceIndexCache {
   // Identity-bearing objects keep late reads in their original shard/log namespace.
   case class Scope(indexTopicId: Uuid, indexPartition: Int, leaderEpoch: Int,
                    generation: AnyRef, partition: AnyRef, log: AnyRef)
-  case class Entry(mapping: Mapping, indexEndOffset: Long, rangeStart: Option[Position] = None)
+  final class Entry private (val mapping: Mapping, val indexEndOffset: Long, private val batchEnds: Array[Int]) {
+    def appendBatches(from: Long, end: Long, limit: Int, selected: mutable.ArrayBuffer[Mapping],
+                      checkDeadline: () => Unit): Unit = {
+      if (batchEnds.length == 0) selected += mapping
+      else {
+        val range = mapping.batch()
+        val relative = (from - mapping.globalBaseOffset()).toInt
+        val found = Arrays.binarySearch(batchEnds, relative + 1)
+        var i = if (found >= 0) found else -found - 1
+        var start = if (i == 0) 0 else batchEnds(i - 1)
+        while (i < batchEnds.length && mapping.globalBaseOffset() + start < end && selected.size < limit) {
+          checkDeadline()
+          val count = batchEnds(i) - start
+          val base = range.baseOffset() + start
+          selected += new Mapping(mapping.globalBaseOffset() + start,
+            new PhysicalBatch(range.partition(), base, base + count - 1, count))
+          start = batchEnds(i)
+          i += 1
+        }
+      }
+    }
+
+    def sameRange(other: Entry): Boolean =
+      mapping == other.mapping && indexEndOffset == other.indexEndOffset && Arrays.equals(batchEnds, other.batchEnds)
+  }
+
+  object Entry {
+    private val SingleBatch = Array.emptyIntArray
+
+    def apply(mapping: Mapping, indexEndOffset: Long, counts: JList[Integer] = JList.of[Integer]()): Entry = {
+      val ends = if (counts.isEmpty) SingleBatch else {
+        val values = new Array[Int](counts.size())
+        val iterator = counts.iterator()
+        var end = 0
+        var i = 0
+        while (iterator.hasNext) {
+          end += iterator.next().intValue()
+          values(i) = end
+          i += 1
+        }
+        values
+      }
+      new Entry(mapping, indexEndOffset, ends)
+    }
+  }
   private case class Key(scope: Scope, topicId: Uuid, globalBaseOffset: Long)
 }
 
@@ -54,6 +100,7 @@ private[server] class GlobalSequenceIndexCache(maxEntries: Int, maxEntriesPerTop
   private val lru = new LinkedHashMap[Key, Entry](16, 0.75f, true)
   private val topics = mutable.HashMap.empty[Uuid, LinkedHashMap[Key, Entry]]
   private val ranges = mutable.HashMap.empty[(Scope, Uuid), TreeMap[java.lang.Long, Entry]]
+  private val scans = new LongAdder
   private var hits = 0L
   private var misses = 0L
   private var evictions = 0L
@@ -61,7 +108,8 @@ private[server] class GlobalSequenceIndexCache(maxEntries: Int, maxEntriesPerTop
 
   private val metricNames = Option(metrics).toSeq.flatMap { registry =>
     Seq[(String, () => Long)]("hits-total" -> (() => hitCount), "misses-total" -> (() => missCount),
-      "evictions-total" -> (() => evictionCount), "entries" -> (() => size.toLong)).map { case (name, read) =>
+      "evictions-total" -> (() => evictionCount), "scan-lookups-total" -> (() => scans.sum()),
+      "entries" -> (() => size.toLong)).map { case (name, read) =>
       val metric = registry.metricName(name, "global-sequence-index-cache", "Global sequence mapping cache " + name)
       registry.addMetric(metric, new Gauge[Long] {
         override def value(config: MetricConfig, now: Long): Long = read()
@@ -92,7 +140,7 @@ private[server] class GlobalSequenceIndexCache(maxEntries: Int, maxEntriesPerTop
       val topicId = entry.mapping.batch().partition().topicId()
       val key = Key(scope, topicId, entry.mapping.globalBaseOffset())
       val previous = lru.get(key)
-      if (previous != null && previous != entry)
+      if (previous != null && !previous.sameRange(entry))
         throw new CorruptRecordException("Committed mapping changed within one index cache generation")
       lru.put(key, entry)
       val topic = topics.getOrElseUpdate(topicId, new LinkedHashMap[Key, Entry](16, 0.75f, true))
@@ -113,6 +161,10 @@ private[server] class GlobalSequenceIndexCache(maxEntries: Int, maxEntriesPerTop
     if (index.isEmpty) ranges.remove((key.scope, key.topicId))
     evictions += 1
   }
+
+  def recordScan(): Unit = scans.increment()
+
+  def enabled: Boolean = maxEntries > 0
 
   def size: Int = synchronized { lru.size() }
   def hitCount: Long = synchronized { hits }

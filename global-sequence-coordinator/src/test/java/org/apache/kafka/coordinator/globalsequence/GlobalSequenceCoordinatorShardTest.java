@@ -17,6 +17,7 @@
 
 package org.apache.kafka.coordinator.globalsequence;
 
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.record.RecordBatch;
@@ -59,6 +60,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 class GlobalSequenceCoordinatorShardTest {
     private static final Uuid TOPIC = new Uuid(1, 2);
@@ -139,6 +144,27 @@ class GlobalSequenceCoordinatorShardTest {
             shard.onRollback(offset);
             endOffset = offset;
         }
+    }
+
+    @Test
+    void testCommittedRangesArePublishedOnceAfterHighWatermarkAdvances() {
+        var ctx = new Context(P0);
+        var source = new Object();
+        var reader = mock(GlobalSequenceLookup.Reader.class);
+        var partition = new TopicPartition("index", 0);
+        ctx.shard.onLoadSource(source);
+        ctx.replay(allocation(A, 0));
+
+        ctx.shard.cacheNewlyCommitted(reader, partition, 10);
+        verifyNoInteractions(reader);
+
+        ctx.commit(ctx.endOffset);
+        ctx.shard.cacheNewlyCommitted(reader, partition, 10);
+        verify(reader).cacheCommitted(partition, 10, ctx.shard.lookupGeneration(), source,
+            List.of(new GlobalSequenceLookup.CommittedRange(new GlobalSequenceLookup.Mapping(0, A), ctx.endOffset, List.of())));
+
+        ctx.shard.cacheNewlyCommitted(reader, partition, 10);
+        verifyNoMoreInteractions(reader);
     }
 
     @Test

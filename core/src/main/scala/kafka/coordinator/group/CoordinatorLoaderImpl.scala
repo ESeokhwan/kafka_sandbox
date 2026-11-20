@@ -28,6 +28,7 @@ import org.apache.kafka.coordinator.common.runtime.Deserializer.UnknownRecordTyp
 import org.apache.kafka.coordinator.common.runtime.{CoordinatorLoader, CoordinatorPlayback, Deserializer}
 import org.apache.kafka.server.storage.log.FetchIsolation
 import org.apache.kafka.server.util.KafkaScheduler
+import org.apache.kafka.storage.internals.log.UnifiedLog
 
 import java.nio.ByteBuffer
 import java.util.concurrent.CompletableFuture
@@ -59,6 +60,7 @@ object CoordinatorLoaderImpl {
  * @param loadBufferSize        The load buffer size.
  * @param commitIntervalOffsets The interval between updating the last committed offset during loading, in offsets.
  * @param requireFullLog        Reject missing history, skipped records and control batches. Used by the global index.
+ * @param captureLoadSource     Capture an optional identity for the local source of a successful load.
  * @tparam T The record type.
  */
 class CoordinatorLoaderImpl[T](
@@ -67,7 +69,8 @@ class CoordinatorLoaderImpl[T](
   deserializer: Deserializer[T],
   loadBufferSize: Int,
   commitIntervalOffsets: Long = CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS,
-  requireFullLog: Boolean = false
+  requireFullLog: Boolean = false,
+  captureLoadSource: (TopicPartition, UnifiedLog) => AnyRef = (_, _) => null
 ) extends CoordinatorLoader[T] with Logging {
   private val isRunning = new AtomicBoolean(true)
   private val scheduler = new KafkaScheduler(1)
@@ -108,6 +111,7 @@ class CoordinatorLoaderImpl[T](
             s"Could not load records from $tp because the log does not exist."))
 
         case Some(log) =>
+          val loadSource = captureLoadSource(tp, log)
           def logEndOffset: Long = replicaManager.getLogEndOffset(tp).getOrElse(-1L)
 
           // Buffer may not be needed if records are read from memory.
@@ -265,7 +269,7 @@ class CoordinatorLoaderImpl[T](
               s"Incomplete index history in $tp: loaded through $currentOffset, log ends at $logEndOffset"
             ))
           } else if (isRunning.get) {
-            future.complete(new LoadSummary(startTimeMs, endTimeMs, schedulerQueueTimeMs, numRecords, numBytes))
+            future.complete(new LoadSummary(startTimeMs, endTimeMs, schedulerQueueTimeMs, numRecords, numBytes, loadSource))
           } else {
             future.completeExceptionally(new RuntimeException("Coordinator loader is closed."))
           }

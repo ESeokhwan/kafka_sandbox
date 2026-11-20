@@ -750,6 +750,9 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                         }
                         try {
                             if (exception != null) throw exception;
+                            if (summary != null && summary.source() != null) {
+                                loadingCoordinator.coordinator().onLoadSource(summary.source());
+                            }
                             context.transitionTo(CoordinatorState.ACTIVE);
                             if (summary != null) {
                                 runtimeMetrics.recordPartitionLoadSensor(summary.startTimeMs(), summary.endTimeMs());

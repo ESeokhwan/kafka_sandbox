@@ -52,7 +52,12 @@ import scala.util.Try
 @Timeout(120)
 class GlobalSequenceCoordinatorIntegrationTest {
   @Test
-  def testInternalTopicCreationLoadingAndBrokerRestart(): Unit = {
+  def testFirstFetchAfterIndexCommitUsesCache(): Unit = verifyInitialCommit(restart = false)
+
+  @Test
+  def testInternalTopicCreationLoadingAndBrokerRestart(): Unit = verifyInitialCommit(restart = true)
+
+  private def verifyInitialCommit(restart: Boolean): Unit = {
     val cluster = new KafkaClusterTestKit.Builder(new TestKitNodes.Builder()
       .setNumBrokerNodes(1).setNumControllerNodes(1).build())
       .setConfigProp(GlobalSequenceCoordinatorConfig.INDEX_TOPIC_NUM_PARTITIONS_CONFIG, "2")
@@ -135,6 +140,16 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(Errors.NONE.code(), indexed.errorCode())
         assertEquals(AppendStatus.INDEXED.code(), indexed.status())
         assertEquals(0L, indexed.globalBaseOffset())
+        val fetch = new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData().setTopicId(topicId)
+          .setGlobalEndOffsetExclusive(100).setTimeoutMs(10000)).build()
+        val scans = broker.metrics.metric(broker.metrics.metricName("scan-lookups-total", "global-sequence-index-cache"))
+        val scansBeforeFetch = scans.metricValue()
+        val firstPage = IntegrationTestUtils.connectAndReceive[FetchGlobalSequenceResponse](fetch, broker.socketServer,
+          broker.config.interBrokerListenerName).data()
+        assertEquals(Errors.NONE.code(), firstPage.errorCode(), firstPage.errorMessage())
+        assertEquals(1L, firstPage.nextGlobalOffset())
+        assertEquals(scansBeforeFetch, scans.metricValue(), "The first fetch after commit must use the warmed range")
+        if (!restart) return
         val duplicate = appendIndex().data()
         assertEquals(Errors.NONE.code(), duplicate.errorCode())
         assertEquals(AppendStatus.ALREADY_INDEXED.code(), duplicate.status())
@@ -176,8 +191,6 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(2, recoveredPage.batches().size())
         assertEquals(physicalOffset, recoveredPage.batches().get(0).physicalBaseOffset())
         assertEquals(nextOffset, recoveredPage.batches().get(1).physicalBaseOffset())
-        val fetch = new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData().setTopicId(topicId)
-          .setGlobalEndOffsetExclusive(100).setTimeoutMs(10000)).build()
         val recoveredData = IntegrationTestUtils.connectAndReceive[FetchGlobalSequenceResponse](fetch, broker.socketServer,
           broker.config.interBrokerListenerName).data()
         assertEquals(Errors.NONE.code(), recoveredData.errorCode(), recoveredData.errorMessage())
