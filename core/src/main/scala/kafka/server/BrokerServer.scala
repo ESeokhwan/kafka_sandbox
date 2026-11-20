@@ -287,7 +287,7 @@ class BrokerServer(
       unusedBrokerInterceptors = new BrokerInterceptors(Vector.empty)
 
       val globalConfig = config.globalSequenceCoordinatorConfig
-      val globalSequenceMonitor = Option.when(globalConfig.monitorTopic().nonEmpty) {
+      val globalSequenceMonitor = Option.when(globalConfig.monitorTopic().nonEmpty || globalConfig.monitorProduceTopicPrefix().nonEmpty) {
         new GlobalSequenceMonitoringInterceptor(globalConfig, config.nodeId, () => metadataCache.getImage(), metrics, time, logContext)
       }
       brokerInterceptors = new BrokerInterceptors(Vector(

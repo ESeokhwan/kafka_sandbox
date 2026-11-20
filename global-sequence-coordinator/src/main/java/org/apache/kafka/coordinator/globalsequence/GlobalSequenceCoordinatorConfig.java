@@ -156,6 +156,7 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT = 10000;
     public static final String INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC = "Maximum cached BatchIndex ranges per source topic UUID across index generations. The least recently used entries are evicted first.";
 
+    public static final String MONITOR_PRODUCE_TOPIC_PREFIX_CONFIG = "global.sequence.monitor.produce.topic.prefix";
     public static final String MONITOR_TOPIC_CONFIG = "global.sequence.monitor.topic";
     public static final String MONITOR_INTERVAL_MS_CONFIG = "global.sequence.monitor.interval.ms";
     public static final String MONITOR_OUTPUT_DIR_CONFIG = "global.sequence.monitor.output.dir";
@@ -191,7 +192,9 @@ public class GlobalSequenceCoordinatorConfig {
         .define(SPI_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, SPI_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, SPI_MAX_ENTRIES_PER_TOPIC_DOC)
         .define(INDEX_CACHE_MAX_ENTRIES_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_DEFAULT, atLeast(0), MEDIUM, INDEX_CACHE_MAX_ENTRIES_DOC)
         .define(INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_CONFIG, INT, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DEFAULT, atLeast(1), MEDIUM, INDEX_CACHE_MAX_ENTRIES_PER_TOPIC_DOC)
-        .define(MONITOR_TOPIC_CONFIG, STRING, "", MEDIUM, "Topic to monitor for global sequence benchmark diagnostics. An empty name disables monitoring.")
+        .define(MONITOR_PRODUCE_TOPIC_PREFIX_CONFIG, STRING, "", MEDIUM,
+            "Topic name prefix for broker Produce pipeline diagnostics. An empty prefix disables the Produce pipeline counters.")
+        .define(MONITOR_TOPIC_CONFIG, STRING, "", MEDIUM, "Exact topic name for topic-specific global sequence diagnostics. An empty name disables the exact-topic counters.")
         .define(MONITOR_INTERVAL_MS_CONFIG, INT, 1000, atLeast(1), MEDIUM, "Interval in milliseconds between global sequence monitoring samples.")
         .define(MONITOR_OUTPUT_DIR_CONFIG, STRING, "global-sequence-monitor", MEDIUM, "Directory for broker-specific global sequence monitoring CSV files.");
 
@@ -254,6 +257,10 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int appendLingerMs() {
         return config.getInt(APPEND_LINGER_MS_CONFIG);
+    }
+
+    public String monitorProduceTopicPrefix() {
+        return config.getString(MONITOR_PRODUCE_TOPIC_PREFIX_CONFIG);
     }
 
     public String monitorTopic() {

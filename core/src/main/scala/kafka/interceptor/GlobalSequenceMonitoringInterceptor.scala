@@ -35,7 +35,7 @@ import java.nio.file.Path
 import java.time.Duration
 import java.util
 import java.util.concurrent.{CompletableFuture, Executors, ScheduledExecutorService, TimeUnit}
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicLong, LongAdder}
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
@@ -51,6 +51,11 @@ final class GlobalSequenceMonitoringInterceptor(
   import GlobalSequenceMonitoringInterceptor._
 
   private val topic = config.monitorTopic()
+  private val produceTopicPrefix = config.monitorProduceTopicPrefix()
+  private val producePrequeue = new LongAdder
+  private val produceHandlerStarted = new LongAdder
+  private val produceTerminal = new LongAdder
+  private val produceUnknownCountBatches = new LongAdder
   private val intervalMs = config.monitorIntervalMs()
   private val logger = logContext.logger(classOf[GlobalSequenceMonitoringInterceptor])
   private val receivedRecords = new AtomicLong
@@ -93,8 +98,50 @@ final class GlobalSequenceMonitoringInterceptor(
       s"(append linger ${config.appendLingerMs()} ms)")
   }
 
+  override def beforeSendRequestToQueue(request: RequestChannel.Request, connectionId: String): Unit = {
+    if (produceTopicPrefix.isEmpty || request.header.apiKey() != ApiKeys.PRODUCE) return
+
+    var pipelineCount = 0L
+    var legacyCount = 0L
+    var unknownCount = 0L
+    try {
+      val topics = metadata().topics()
+      request.body[ProduceRequest].data().topicData().forEach { entry =>
+        val name = if (entry.topicId() == Uuid.ZERO_UUID) entry.name()
+        else Option(topics.getTopic(entry.topicId())).map(_.name()).orNull
+        if (name != null) {
+          val pipelineMatch = name.startsWith(produceTopicPrefix)
+          val legacyMatch = name == topic
+          if (pipelineMatch || legacyMatch) entry.partitionData().forEach { partition =>
+            partition.records() match {
+              case records: Records => records.batches().forEach { batch =>
+                val count = batch.countOrNull()
+                if (count == null) {
+                  if (pipelineMatch) unknownCount += 1
+                } else if (count > 0) {
+                  if (pipelineMatch) pipelineCount += count.longValue()
+                  if (legacyMatch) legacyCount += count.longValue()
+                }
+              }
+              case _ =>
+            }
+          }
+        }
+      }
+      request.monitoredProduceRecords = pipelineCount
+      request.monitoredProduceReceivedRecords = legacyCount
+      if (pipelineCount > 0) producePrequeue.add(pipelineCount)
+      if (unknownCount > 0) produceUnknownCountBatches.add(unknownCount)
+    } catch {
+      case NonFatal(error) => logger.debug("Could not read Produce batch headers for monitoring", error)
+    }
+  }
+
   override def beforeHandleRequest(request: RequestChannel.Request): Unit = request.header.apiKey() match {
-    case ApiKeys.PRODUCE =>
+    case ApiKeys.PRODUCE if produceTopicPrefix.nonEmpty =>
+      if (request.monitoredProduceRecords > 0) produceHandlerStarted.add(request.monitoredProduceRecords)
+      if (request.monitoredProduceReceivedRecords > 0) receivedRecords.addAndGet(request.monitoredProduceReceivedRecords)
+    case ApiKeys.PRODUCE if topic.nonEmpty =>
       try {
         val data = request.body[ProduceRequest].data()
         val monitored = metadata().topics().getTopic(topic)
@@ -126,6 +173,15 @@ final class GlobalSequenceMonitoringInterceptor(
   }
 
   override def beforeSendResponseToQueue(response: RequestChannel.Response): Unit = response match {
+    case _: RequestChannel.NoOpResponse | _: RequestChannel.CloseConnectionResponse | _: RequestChannel.SendResponse
+      if produceTopicPrefix.nonEmpty && response.request.monitoredProduceRecords > 0 =>
+      val request = response.request
+      request.synchronized {
+        if (!request.monitoredProduceTerminal) {
+          request.monitoredProduceTerminal = true
+          produceTerminal.add(request.monitoredProduceRecords)
+        }
+      }
     case sent: RequestChannel.SendResponse
       if sent.request.header.apiKey() == ApiKeys.FETCH_GLOBAL_SEQUENCE && monitorsFetch(sent.request) =>
       val elapsedNs = math.max(0L, time.nanoseconds() - sent.request.startTimeNanos)
@@ -186,6 +242,17 @@ final class GlobalSequenceMonitoringInterceptor(
 
     def emit(name: String, value: AnyVal): Unit =
       writer.submit(Sample(nowMs, durationMs, brokerId, topic, "", "global-sequence-monitor", name, "", value.toString))
+
+    if (produceTopicPrefix.nonEmpty) {
+      def emitProduce(name: String, counter: LongAdder): Unit =
+        writer.submit(Sample(nowMs, durationMs, brokerId, produceTopicPrefix, "", "global-sequence-produce-pipeline",
+          name, "", counter.sum().toString))
+
+      emitProduce("prequeue-records-total", producePrequeue)
+      emitProduce("handler-started-records-total", produceHandlerStarted)
+      emitProduce("terminal-records-total", produceTerminal)
+      emitProduce("unknown-record-count-batches-total", produceUnknownCountBatches)
+    }
 
     emit("produce-received-records", receivedRecords.getAndSet(0))
     emit("fetch-received-requests", receivedFetches.getAndSet(0))

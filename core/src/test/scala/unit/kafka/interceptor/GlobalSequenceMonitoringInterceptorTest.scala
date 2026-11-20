@@ -23,11 +23,13 @@ import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.AbstractConfig
 import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.message.{FetchGlobalSequenceRequestData, ProduceRequestData}
+import org.apache.kafka.common.memory.MemoryPool
 import org.apache.kafka.common.metrics.Metrics
-import org.apache.kafka.common.network.Send
+import org.apache.kafka.common.network.{ClientInformation, ListenerName, Send}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.{MemoryRecords, SimpleRecord}
-import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, FetchRequest, ProduceRequest, RequestHeader}
+import org.apache.kafka.common.requests.{FetchGlobalSequenceRequest, FetchRequest, ProduceRequest, RequestContext, RequestHeader}
+import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.utils.{LogContext, MockTime}
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinator, GlobalSequenceCoordinatorConfig, GlobalSequenceLookup, GlobalSequenceResources}
 import org.apache.kafka.image.{MetadataImage, TopicImage, TopicsImage}
@@ -38,6 +40,7 @@ import org.junit.jupiter.api.io.TempDir
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito._
 
+import java.net.InetAddress
 import java.nio.file.{Files, Path}
 import java.util
 import java.util.concurrent.CompletableFuture
@@ -64,6 +67,7 @@ class GlobalSequenceMonitoringInterceptorTest {
       .including(new TopicImage(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, indexId, util.Map.of(Int.box(0), indexPartition))))
     val config = new GlobalSequenceCoordinatorConfig(new AbstractConfig(GlobalSequenceCoordinatorConfig.CONFIG_DEF, util.Map.of(
       "global.sequence.monitor.topic", topic,
+      "global.sequence.monitor.produce.topic.prefix", "ord",
       "global.sequence.monitor.interval.ms", "60000",
       "global.sequence.monitor.output.dir", outputDir.toString
     ), false))
@@ -86,10 +90,18 @@ class GlobalSequenceMonitoringInterceptorTest {
           data.topicData().add(new ProduceRequestData.TopicProduceData()
             .setName(name).setTopicId(id).setPartitionData(util.List.of(partition)))
         }
-        val request = mock(classOf[RequestChannel.Request])
-        when(request.header).thenReturn(new RequestHeader(ApiKeys.PRODUCE, version, "producer", 1))
-        when(request.body[ProduceRequest]).thenReturn(new ProduceRequest(data, version))
+        val buffer = new ProduceRequest(data, version).serializeWithHeader(new RequestHeader(ApiKeys.PRODUCE, version, "producer", 1))
+        val context = new RequestContext(RequestHeader.parse(buffer), "test", InetAddress.getLoopbackAddress,
+          KafkaPrincipal.ANONYMOUS, new ListenerName("PLAINTEXT"), SecurityProtocol.PLAINTEXT, ClientInformation.EMPTY, false)
+        val request = new RequestChannel.Request(0, context, time.nanoseconds(), MemoryPool.NONE, buffer, null)
+        monitor.beforeSendRequestToQueue(request, "test")
         monitor.beforeHandleRequest(request)
+        monitor.beforeSendResponseToQueue(new RequestChannel.StartThrottlingResponse(request))
+        val terminal = if (version == 12) new RequestChannel.NoOpResponse(request)
+        else new RequestChannel.CloseConnectionResponse(request)
+        monitor.beforeSendResponseToQueue(terminal)
+        monitor.beforeSendResponseToQueue(terminal)
+        monitor.beforeSendResponseToQueue(new RequestChannel.EndThrottlingResponse(request))
       }
       produce(12, (topic, Uuid.ZERO_UUID), ("other", Uuid.ZERO_UUID))
       produce(13, ("", topicId), ("", Uuid.randomUuid()))
@@ -178,6 +190,10 @@ class GlobalSequenceMonitoringInterceptorTest {
     val csv = Files.readAllLines(outputDir.resolve("global-sequence-monitor-2.csv")).asScala
     assertEquals("timestamp_ms,interval_ms,broker_id,topic,topic_id,metric_group,metric_name,scope,value", csv.head)
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,produce-received-records,,4"))
+    Seq("prequeue", "handler-started", "terminal").foreach { stage =>
+      assertTrue(csv.contains(s"2000,1000,2,ord,,global-sequence-produce-pipeline,$stage-records-total,,4"))
+      assertTrue(csv.contains(s"3000,1000,2,ord,,global-sequence-produce-pipeline,$stage-records-total,,4"))
+    }
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-received-requests,,1"))
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-completed-requests,,1"))
     assertTrue(csv.contains("2000,1000,2,ordered,,global-sequence-monitor,fetch-failed-requests,,1"))
