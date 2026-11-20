@@ -34,7 +34,7 @@ import org.apache.kafka.image.MetadataImage
 import java.nio.file.Path
 import java.time.Duration
 import java.util
-import java.util.concurrent.{CompletableFuture, Executors, ScheduledExecutorService, TimeUnit}
+import java.util.concurrent.{CompletableFuture, Executors, ScheduledExecutorService, ThreadLocalRandom, TimeUnit}
 import java.util.concurrent.atomic.{AtomicLong, LongAdder}
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
@@ -65,6 +65,14 @@ final class GlobalSequenceMonitoringInterceptor(
   private var failedFetches = 0L
   private var fetchLatencyNs = 0L
   private var maxFetchLatencyNs = 0L
+  private val produceNoOpUnmuteSamples = new LongAdder
+  private val produceNoOpUnmuteNs = new LongAdder
+
+  override def recordProduceNoOpUnmute(durationNs: Long): Unit = {
+    produceNoOpUnmuteNs.add(durationNs)
+    produceNoOpUnmuteSamples.increment()
+  }
+
   private val fetchTimingLock = new Object
   private val fetchTimingTotalsNs = new Array[Long](FetchTimingScopes.length)
   private var fetchTimingSamples = 0L
@@ -176,6 +184,8 @@ final class GlobalSequenceMonitoringInterceptor(
     case _: RequestChannel.NoOpResponse | _: RequestChannel.CloseConnectionResponse | _: RequestChannel.SendResponse
       if produceTopicPrefix.nonEmpty && response.request.monitoredProduceRecords > 0 =>
       val request = response.request
+      if (response.isInstanceOf[RequestChannel.NoOpResponse])
+        request.sampleProduceNoOpUnmute = ThreadLocalRandom.current().nextInt(128) == 0
       request.synchronized {
         if (!request.monitoredProduceTerminal) {
           request.monitoredProduceTerminal = true
@@ -251,6 +261,8 @@ final class GlobalSequenceMonitoringInterceptor(
       emitProduce("prequeue-records-total", producePrequeue)
       emitProduce("handler-started-records-total", produceHandlerStarted)
       emitProduce("terminal-records-total", produceTerminal)
+      emitProduce("noop-to-unmute-samples-total", produceNoOpUnmuteSamples)
+      emitProduce("noop-to-unmute-duration-ns-total", produceNoOpUnmuteNs)
       emitProduce("unknown-record-count-batches-total", produceUnknownCountBatches)
     }
 
@@ -421,7 +433,7 @@ private object GlobalSequenceMonitoringInterceptor {
   }
 
   private val ResourceScopes = Set("indexing_lag", "coordinator_write", "index_route", "index_rpc",
-    "index_read", "lookup_route", "fetch", "data_read", "rpc_retry", "source_read")
+    "index_read", "lookup_route", "fetch", "data_read", "rpc_retry", "source_read", "hw_listener")
 
   def includesMetric(name: MetricName): Boolean = name.group() match {
     case GlobalSequenceResources.GROUP => ResourceScopes.contains(name.tags().get("scope"))

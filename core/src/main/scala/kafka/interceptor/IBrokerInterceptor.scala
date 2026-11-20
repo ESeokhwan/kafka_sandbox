@@ -13,6 +13,8 @@ trait IBrokerInterceptor {
 
   def afterProcessResponse(response: RequestChannel.Response, connectionId: String): Unit
 
+  def recordProduceNoOpUnmute(durationNs: Long): Unit = {}
+
   def extensionHandlers: Seq[BrokerExtensionHandler] = Seq.empty
 
   def shutdown(): Unit

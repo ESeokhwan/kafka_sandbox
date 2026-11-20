@@ -43,7 +43,7 @@ public final class GlobalSequenceResources implements AutoCloseable {
         INDEX_READ, DATA_READ, FETCH, DATA_RESPONSE, INDEX_RESPONSE, COORDINATOR_READ, COORDINATOR_WRITE
     }
     public enum Event {
-        RPC_RETRY, FENCED, GAP, RECOVERY, WORKER_RETRY
+        RPC_RETRY, FENCED, GAP, RECOVERY, WORKER_RETRY, HW_LISTENER
     }
     public enum Progress {
         INDEXING_LAG, RETENTION_HELD

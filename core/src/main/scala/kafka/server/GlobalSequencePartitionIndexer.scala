@@ -30,7 +30,7 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorReco
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard._
 import org.apache.kafka.server.util.Scheduler
 
-import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, Executor, RejectedExecutionException, ScheduledFuture}
+import java.util.concurrent.{CompletableFuture, ConcurrentLinkedQueue, Executor, RejectedExecutionException, ScheduledFuture, ThreadLocalRandom}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters._
@@ -101,12 +101,15 @@ private[server] class GlobalSequencePartitionIndexer(
 
   private val listener = new PartitionListener {
     override def onHighWatermarkUpdated(tp: TopicPartition, offset: Long): Unit = {
+      val sampled = resources != null && ThreadLocalRandom.current().nextInt(128) == 0
+      val startedNs = if (sampled) time.nanoseconds() else 0L
       observedHighWatermark.accumulateAndGet(offset, (left, right) => math.max(left, right))
       if (wakeupQueued.compareAndSet(false, true)) enqueue {
         wakeupQueued.set(false)
         publishProgress()
         if (!busy) pump()
       }
+      if (sampled) resources.event(Event.HW_LISTENER, (time.nanoseconds() - startedNs) / 1000000.0)
     }
     override def onBecomingFollower(tp: TopicPartition): Unit = close()
     override def onFailed(tp: TopicPartition): Unit = close()

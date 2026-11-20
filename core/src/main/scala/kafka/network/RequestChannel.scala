@@ -113,6 +113,7 @@ object RequestChannel extends Logging {
     private[kafka] var monitoredProduceRecords: Long = 0L
     private[kafka] var monitoredProduceReceivedRecords: Long = 0L
     private[kafka] var monitoredProduceTerminal: Boolean = false
+    private[kafka] var sampleProduceNoOpUnmute: Boolean = false
     // These need to be volatile because the readers are in the network thread and the writers are in the request
     // handler threads or the purgatory threads
     @volatile var requestDequeueTimeNanos: Long = -1L

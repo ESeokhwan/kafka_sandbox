@@ -850,6 +850,7 @@ private[kafka] class Processor(
   val thread: KafkaThread = KafkaThread.nonDaemon(threadName, this)
 
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
+  private val sampledProduceNoOps = mutable.Map.empty[String, Long]
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
   private val responseLifecycleLock = new Object
@@ -971,6 +972,8 @@ private[kafka] class Processor(
             // Try unmuting the channel. If there was no quota violation and the channel has not been throttled,
             // it will be unmuted immediately. If the channel has been throttled, it will be unmuted only if the
             // throttling delay has already passed by now.
+            if (response.request.sampleProduceNoOpUnmute)
+              sampledProduceNoOps.put(channelId, response.request.responseCompleteTimeNanos)
             handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
             tryUnmuteChannel(channelId)
 
@@ -1125,6 +1128,7 @@ private[kafka] class Processor(
         val remoteHost = ServerConnectionId.fromString(connectionId).orElseThrow { () =>
           throw new IllegalStateException(s"connectionId has unexpected format: $connectionId")
         }.remoteHost
+        sampledProduceNoOps.remove(connectionId)
         inflightResponses.remove(connectionId).foreach(updateRequestMetrics)
         // the channel has been closed by the selector but the quotas still need to be updated
         connectionQuotas.dec(listenerName, InetAddress.getByName(remoteHost))
@@ -1152,6 +1156,7 @@ private[kafka] class Processor(
    * If the channel has already been removed from selector, no action is taken.
    */
   private def close(connectionId: String): Unit = {
+    sampledProduceNoOps.remove(connectionId)
     openOrClosingChannel(connectionId).foreach { channel =>
       debug(s"Closing selector connection $connectionId")
       val address = channel.socketAddress
@@ -1274,7 +1279,15 @@ private[kafka] class Processor(
   }
 
   private def tryUnmuteChannel(connectionId: String): Unit = {
-    openOrClosingChannel(connectionId).foreach(c => selector.unmute(c.id))
+    openOrClosingChannel(connectionId).foreach { channel =>
+      selector.unmute(channel.id)
+      // A quota can keep the channel muted until EndThrottlingResponse.
+      if (!channel.isMuted && sampledProduceNoOps.nonEmpty) {
+        sampledProduceNoOps.remove(connectionId).foreach { queuedNs =>
+          brokerInterceptors.recordProduceNoOpUnmute(time.nanoseconds() - queuedNs)
+        }
+      }
+    }
   }
 
   /* For test usage */

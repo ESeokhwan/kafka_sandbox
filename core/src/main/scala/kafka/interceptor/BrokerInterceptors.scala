@@ -29,6 +29,10 @@ class BrokerInterceptors(val interceptors: Vector[IBrokerInterceptor]) {
     interceptors.foreach(_.afterProcessResponse(response, connectionId))
   }
 
+  def recordProduceNoOpUnmute(durationNs: Long): Unit = {
+    interceptors.foreach(_.recordProduceNoOpUnmute(durationNs))
+  }
+
   def dispatchBrokerExtension(command: BrokerExtensionCommand): CompletionStage[BrokerExtensionResult] = {
     extensionRegistry.dispatch(command)
   }
