@@ -121,6 +121,7 @@ public class GlobalSequenceCoordinatorConfig {
     public static final String WORKER_QUEUE_SIZE_DOC = "Maximum queued jobs per global sequence worker pool.";
 
     public static final String FETCH_READ_WINDOW_MAX_BATCHES_CONFIG = "global.sequence.fetch.read.window.max.batches";
+    public static final String FETCH_RESPONSE_COALESCE_ENABLED_CONFIG = "global.sequence.fetch.response.coalesce.enabled";
     public static final int FETCH_READ_WINDOW_MAX_BATCHES_DEFAULT = 128;
     public static final String FETCH_READ_WINDOW_MAX_BATCHES_DOC =
         "Maximum original physical batches selected per global fetch read window across all partitions.";
@@ -175,6 +176,8 @@ public class GlobalSequenceCoordinatorConfig {
         .define(WORKER_QUEUE_SIZE_CONFIG, INT, WORKER_QUEUE_SIZE_DEFAULT, atLeast(1), MEDIUM, WORKER_QUEUE_SIZE_DOC)
         .define(FETCH_READ_WINDOW_MAX_BATCHES_CONFIG, INT, FETCH_READ_WINDOW_MAX_BATCHES_DEFAULT,
             ConfigDef.Range.between(1, GlobalSequenceLookup.MAX_BATCHES), MEDIUM, FETCH_READ_WINDOW_MAX_BATCHES_DOC)
+        .define(FETCH_RESPONSE_COALESCE_ENABLED_CONFIG, ConfigDef.Type.BOOLEAN, false, MEDIUM,
+            "Serialize global sequence fetch responses into one buffer when the fetch byte budget permits.")
         .define(READER_NUM_THREADS_CONFIG, INT, READER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, READER_NUM_THREADS_DOC)
         .define(LOOKUP_SCAN_MAX_BYTES_CONFIG, INT, LOOKUP_SCAN_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, LOOKUP_SCAN_MAX_BYTES_DOC)
         .define(SPI_BASE_INTERVAL_BATCHES_CONFIG, INT, SPI_BASE_INTERVAL_BATCHES_DEFAULT, atLeast(1), MEDIUM, SPI_BASE_INTERVAL_BATCHES_DOC)
@@ -274,6 +277,10 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int fetchReadWindowMaxBatches() {
         return config.getInt(FETCH_READ_WINDOW_MAX_BATCHES_CONFIG);
+    }
+
+    public boolean fetchResponseCoalesceEnabled() {
+        return config.getBoolean(FETCH_RESPONSE_COALESCE_ENABLED_CONFIG);
     }
 
     public int readerNumThreads() {

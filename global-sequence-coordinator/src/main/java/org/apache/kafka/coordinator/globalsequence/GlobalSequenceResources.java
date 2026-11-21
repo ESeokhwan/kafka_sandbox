@@ -199,7 +199,7 @@ public final class GlobalSequenceResources implements AutoCloseable {
     public final class Lease implements AutoCloseable {
         private final Budget budget;
         private final Object key;
-        private final long size;
+        private long size;
         private final long started = time.nanoseconds();
         private boolean released;
 
@@ -207,6 +207,17 @@ public final class GlobalSequenceResources implements AutoCloseable {
             this.budget = budget;
             this.key = key;
             this.size = size;
+        }
+
+        /** Extend this reservation without admitting a second operation. */
+        public boolean tryReserveAdditionalBytes(long extraBytes) {
+            if (extraBytes < 0) throw new IllegalArgumentException("Negative byte reservation");
+            synchronized (budget) {
+                if (released || closed || extraBytes > budget.byteLimit - budget.bytes) return false;
+                budget.bytes += extraBytes;
+                size += extraBytes;
+                return true;
+            }
         }
 
         public void finish(Throwable error) {

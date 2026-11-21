@@ -127,8 +127,11 @@ object RequestChannel extends Logging {
             new EnvelopeResponse(responseBytes, Errors.NONE)
           }
           request.context.buildResponseSend(envelopeResponse)
-        case None =>
-          context.buildResponseSend(abstractResponse)
+        case None => abstractResponse match {
+          case response: CoalescibleResponse =>
+            context.buildCoalescedResponseSend(abstractResponse, response.tryReserveFrameBytes)
+          case _ => context.buildResponseSend(abstractResponse)
+        }
       }
     }
 
@@ -301,6 +304,10 @@ object RequestChannel extends Logging {
   /** Payload reservations survive API completion and are released after sending or discarding the response. */
   trait ResourceResponse {
     def release(): Unit
+  }
+
+  private[kafka] trait CoalescibleResponse extends ResourceResponse {
+    def tryReserveFrameBytes(size: Int): Boolean
   }
 
   sealed abstract class Response(val request: Request) {

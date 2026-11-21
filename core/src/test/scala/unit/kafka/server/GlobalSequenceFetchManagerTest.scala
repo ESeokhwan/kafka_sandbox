@@ -26,7 +26,7 @@ import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.record.{MemoryRecords, SimpleRecord}
 import org.apache.kafka.common.requests.FetchGlobalSequenceResponse
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup
+import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorConfig, GlobalSequenceLookup, GlobalSequenceResources}
 import org.apache.kafka.server.util.MockTime
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
@@ -49,7 +49,7 @@ class GlobalSequenceFetchManagerTest {
   private class Context(entries: Seq[GlobalSequenceLookup.Mapping] = (0L until 6L).map(mapping(_)),
                         maxBytes: Int = MaxPayloadBytes, startOffset: Long = 0, endOffset: Long = Long.MaxValue,
                         isolation: IsolationLevel = READ_UNCOMMITTED, bounded: Boolean = false,
-                        window: Int = 1) extends AutoCloseable {
+                        window: Int = 1, coalesceResponse: Boolean = false, extraFetchBytes: Int = 0) extends AutoCloseable {
     val time = new MockTime(0, 0)
     val index: IndexRoutingManager = mock(classOf[IndexRoutingManager])
     val source: GlobalSequenceDataRouter = mock(classOf[GlobalSequenceDataRouter])
@@ -70,8 +70,10 @@ class GlobalSequenceFetchManagerTest {
       rangeWork += ((call.getArgument[ReadRange](0), future))
       future
     }
-    val limits = new GlobalSequenceTestResources(time)
-    val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time, if (bounded) limits.resources else null, window)
+    val limits = new GlobalSequenceTestResources(time, Map(
+      GlobalSequenceCoordinatorConfig.FETCH_BUFFER_BYTES_CONFIG -> Int.box(GlobalSequenceResources.FETCH_BYTES.toInt + extraFetchBytes)))
+    val manager = new GlobalSequenceFetchManager(index, source, time.scheduler, time, if (bounded) limits.resources else null, window,
+      coalesceResponse)
     val future = manager.fetch(request)
     def loaded(): Unit = {
       val end = entries.lastOption.map(_.globalEndOffset()).getOrElse(startOffset)
@@ -146,6 +148,29 @@ class GlobalSequenceFetchManagerTest {
       next.asInstanceOf[kafka.network.RequestChannel.ResourceResponse].release()
       assertEquals(0L, c.limits.resources.used(FETCH))
     } finally c.close()
+  }
+
+  @Test
+  def testCoalescingReservesFrameWithoutRejectingPagesWhenBudgetIsFull(): Unit = {
+    import kafka.network.RequestChannel.CoalescibleResponse
+    import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.FETCH
+    for (extraBytes <- Seq(0, 1024)) {
+      val c = new Context(entries = Seq(mapping(0)), bounded = true, coalesceResponse = true, extraFetchBytes = extraBytes)
+      try {
+        c.loaded()
+        c.complete(0)
+        val response = c.response.asInstanceOf[CoalescibleResponse]
+        assertEquals(extraBytes > 0, response.tryReserveFrameBytes(1024))
+        assertEquals(1L, c.limits.resources.used(FETCH))
+        assertEquals(GlobalSequenceResources.FETCH_BYTES + extraBytes, c.limits.resources.bytes(FETCH))
+        val metrics = c.limits.metrics
+        val fallback = metrics.metric(metrics.metricName("coalesce-budget-fallback-total", GlobalSequenceResources.GROUP,
+          java.util.Map.of("scope", "fetch")))
+        assertEquals(if (extraBytes == 0) Double.box(1.0) else Double.box(0.0), fallback.metricValue())
+        response.release()
+        assertEquals(0L, c.limits.resources.bytes(FETCH))
+      } finally c.close()
+    }
   }
 
   @Test
