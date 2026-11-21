@@ -18,19 +18,20 @@ package org.apache.kafka.common.protocol;
 
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.message.FetchGlobalSequenceResponseData;
-import org.apache.kafka.common.network.ByteBufferSend;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.UnalignedMemoryRecords;
+import org.apache.kafka.common.requests.ByteBufferChannel;
 import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 
@@ -39,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 public class SendBuilderTest {
 
     @Test
-    public void testCoalescedGlobalFetchMatchesExistingFrame() {
+    public void testCoalescedGlobalFetchMatchesExistingFrame() throws IOException {
         MemoryRecords compressed = MemoryRecords.withRecords(Compression.gzip().build(), new SimpleRecord(Utils.utf8("first")));
         MemoryRecords plain = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Utils.utf8("second")));
         for (short version = 0; version <= 1; version++) {
@@ -53,18 +54,29 @@ public class SendBuilderTest {
             for (Errors error : List.of(Errors.NONE, Errors.NOT_LEADER_OR_FOLLOWER)) {
                 response.setErrorCode(error.code());
                 ByteBuffer expected = TestUtils.toBuffer(SendBuilder.buildResponseSend(header, response, version));
-                ByteBufferSend send = (ByteBufferSend) SendBuilder.buildCoalescedResponseSend(header, response, version, size -> {
+                Send send = SendBuilder.buildCoalescedResponseSend(header, response, version, size -> {
                     assertEquals(expected.remaining(), size);
                     return true;
                 });
-                assertEquals(1, send.bufferCount());
-                assertEquals(expected, TestUtils.toBuffer(send));
-                ByteBufferSend fallback = (ByteBufferSend) SendBuilder.buildCoalescedResponseSend(header, response, version, size -> false);
-                assertEquals(5, fallback.bufferCount());
-                assertEquals(expected, TestUtils.toBuffer(fallback));
+                assertEquals(expected, readFrame(send, 1));
+                Send fallback = SendBuilder.buildCoalescedResponseSend(header, response, version, size -> false);
+                assertEquals(expected, readFrame(fallback, 5));
                 assertEquals(0, compressed.buffer().position());
                 assertEquals(0, plain.buffer().position());
             }
+        }
+    }
+
+    private static ByteBuffer readFrame(Send send, int expectedBufferCount) throws IOException {
+        try (ByteBufferChannel channel = new ByteBufferChannel(send.size()) {
+            @Override
+            public long write(ByteBuffer[] buffers) {
+                assertEquals(expectedBufferCount, buffers.length);
+                return super.write(buffers);
+            }
+        }) {
+            send.writeTo(channel);
+            return channel.buffer().duplicate().flip();
         }
     }
 
