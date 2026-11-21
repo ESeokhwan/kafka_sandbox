@@ -60,6 +60,7 @@ public final class GlobalSequenceResources implements AutoCloseable {
     private final Map<Event, Sensor> events = new EnumMap<>(Event.class);
     private final Map<Progress, AtomicLong> progress = new EnumMap<>(Progress.class);
     private final Sensor sourceRead;
+    private final Sensor sourceReadDuration;
     private final List<MetricName> names = new ArrayList<>();
     private final List<String> sensors = new ArrayList<>();
 
@@ -83,6 +84,8 @@ public final class GlobalSequenceResources implements AutoCloseable {
         sourceRead = sensor("source-read");
         sourceRead.add(name("reads-total", "SOURCE_READ"), new CumulativeCount());
         sourceRead.add(name("batches-total", "SOURCE_READ"), new CumulativeSum());
+        sourceReadDuration = sensor("source-read-duration");
+        sourceReadDuration.add(name("duration-ms-total", "SOURCE_READ"), new CumulativeSum());
     }
 
     public GlobalSequenceCoordinatorConfig config() {
@@ -112,8 +115,9 @@ public final class GlobalSequenceResources implements AutoCloseable {
     public void progress(Progress kind, long delta) {
         progress.get(kind).addAndGet(delta);
     }
-    public void recordSourceRead(int batches) {
+    public void recordSourceRead(int batches, double durationMs) {
         sourceRead.record(batches);
+        sourceReadDuration.record(durationMs);
     }
     public long used(Scope scope) {
         return budgets.get(scope).count();

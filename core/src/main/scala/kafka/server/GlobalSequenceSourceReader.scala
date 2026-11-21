@@ -20,7 +20,8 @@ package kafka.server
 import org.apache.kafka.common.{KafkaException, TopicIdPartition, TopicPartition}
 import org.apache.kafka.common.errors.{CorruptRecordException, InvalidRequestException, KafkaStorageException, NotLeaderOrFollowerException, OffsetOutOfRangeException, UnknownTopicIdException, UnsupportedForMessageFormatException}
 import org.apache.kafka.common.internals.Topic
-import org.apache.kafka.common.record.{FileRecords, MemoryRecords, MutableRecordBatch, RecordBatch, Records}
+import org.apache.kafka.common.record.FileLogInputStream.FileChannelRecordBatch
+import org.apache.kafka.common.record.{DefaultRecordBatch, FileRecords, MemoryRecords, MutableRecordBatch, RecordBatch, Records}
 import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.utils.{BufferSupplier, Time}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
@@ -66,7 +67,10 @@ object GlobalSequenceSourceReader {
  * from a HW/leadership callback or while holding a partition lock. No payload or log handle escapes a read.
  * The caller owns its cursor and must recheck its indexer generation before applying asynchronous results.
  */
-class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Time.SYSTEM, readTimeoutMs: Int = 30000) {
+class GlobalSequenceSourceReader(replicaManager: ReplicaManager,
+                                 time: Time = Time.SYSTEM,
+                                 readTimeoutMs: Int = 30000,
+                                 headerOnly: Boolean = false) {
   import GlobalSequenceSourceReader._
 
   def read(partition: PartitionKey, sourceLeaderEpoch: Int, physicalOffset: Long, maxBytes: Int): ReadResult = {
@@ -146,7 +150,8 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
         // Bound the oversized-first-batch exception as well as ordinary read chunks.
         if (info.fetchedData.records.sizeInBytes() > math.max(maxBytes, GlobalSequenceFetch.MaxBatchBytes))
           throw new org.apache.kafka.common.errors.RecordTooLargeException("Global sequence source batch exceeds the configured read budget")
-        val records = copyRecords(info.fetchedData.records)
+        val fetched = info.fetchedData.records
+        val records = if (headerOnly) fetched else copyRecords(fetched)
         scan(records, partition, sourceLeaderEpoch, physicalOffset, highWatermark, () => checkDeadline(),
           offset => gap(offset, snapshot, "The next physical batch starts after the required resume position"))
       }
@@ -185,7 +190,7 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
   }
 
   private def scan(
-    records: MemoryRecords,
+    records: Records,
     partition: PartitionKey,
     epoch: Int,
     start: Long,
@@ -196,7 +201,12 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
     var cursor = start
     val batches = records.batches().iterator()
     val validated = new ArrayBuffer[PhysicalBatch]()
-    val buffers = BufferSupplier.create()
+    val buffers = if (headerOnly) BufferSupplier.NO_CACHING else BufferSupplier.create()
+    // FileRecords slices retain their original bounds if the underlying file is truncated.
+    val fileSize = records match {
+      case file: FileRecords => file.channel().size()
+      case _ => Long.MaxValue
+    }
 
     def result(status: ReadStatus): ReadResult =
       ReadResult(partition, epoch, highWatermark, cursor, validated.toVector, if (validated.nonEmpty) BATCH else status)
@@ -208,20 +218,32 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
         val batch = batches.next()
         if (batch.magic() != RecordBatch.MAGIC_VALUE_V2)
           throw new UnsupportedForMessageFormatException("Global sequence source batches must use record format v2")
-        batch.ensureValid()
-        if (batch.baseOffset() > cursor) gap(cursor)
-        if (batch.baseOffset() < cursor)
-          throw new InvalidRequestException(s"Source cursor $cursor is not a physical batch boundary (${batch.baseOffset()})")
+        if (headerOnly && batch.sizeInBytes() <= DefaultRecordBatch.RECORD_BATCH_OVERHEAD)
+          throw new CorruptRecordException("Source batch has no room for records after its v2 header")
+        batch match {
+          case file: FileChannelRecordBatch if file.position().toLong + file.sizeInBytes() > fileSize =>
+            throw new CorruptRecordException("Source batch extends past the end of the log segment file")
+          case _ =>
+        }
+        if (!headerOnly) batch.ensureValid()
+        val base = batch.baseOffset()
+        val last = batch.lastOffset()
+        if (base > cursor) gap(cursor)
+        if (base < cursor)
+          throw new InvalidRequestException(s"Source cursor $cursor is not a physical batch boundary ($base)")
         val count = batch.countOrNull()
-        if (count == null || count <= 0 || batch.baseOffset() < 0 || batch.lastOffset() < batch.baseOffset() ||
-          batch.lastOffset() == Long.MaxValue || batch.lastOffset() - batch.baseOffset() != count.longValue() - 1)
+        if (count == null || count <= 0 || base < 0 || last < base ||
+          last == Long.MaxValue || last - base != count.longValue() - 1)
           throw new CorruptRecordException("Source batch bounds and record count are inconsistent")
-        if (batch.lastOffset() >= highWatermark)
+        if (last >= highWatermark)
           return result(AWAIT_HIGH_WATERMARK)
-        validateRecords(batch, buffers, checkDeadline)
-        if (!batch.isControlBatch)
-          validated += new PhysicalBatch(partition, batch.baseOffset(), batch.lastOffset(), count)
-        cursor = batch.lastOffset() + 1
+        // Full validation scans the MutableRecordBatch instances produced by copyRecords.
+        if (!headerOnly) validateRecords(batch.asInstanceOf[MutableRecordBatch], buffers, checkDeadline)
+        val control = batch.isControlBatch
+        checkDeadline()
+        if (!control)
+          validated += new PhysicalBatch(partition, base, last, count)
+        cursor = last + 1
       }
       // A slice may end in a partial trailing batch or at a segment boundary. Resume at the last
       // fully validated boundary; minOneMessage will return the next complete batch on reread.

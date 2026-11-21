@@ -22,7 +22,7 @@ import kafka.server.GlobalSequenceSourceReader.{AWAIT_HIGH_WATERMARK, BATCH, CON
 import org.apache.kafka.common.{TopicIdPartition, Uuid}
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.TopicConfig
-import org.apache.kafka.common.errors.{FencedLeaderEpochException, InvalidRequestException, NotLeaderOrFollowerException, UnknownLeaderEpochException, UnknownTopicIdException}
+import org.apache.kafka.common.errors.{CorruptRecordException, FencedLeaderEpochException, InvalidRequestException, NotLeaderOrFollowerException, UnknownLeaderEpochException, UnknownTopicIdException}
 import org.apache.kafka.common.record.{CompressionType, ControlRecordType, EndTransactionMarker, MemoryRecords, SimpleRecord}
 import org.apache.kafka.common.requests.LeaderAndIsrRequest
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
@@ -41,6 +41,7 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
   private val epoch = 3
   private var replicaManager: ReplicaManager = _
   private var reader: GlobalSequenceSourceReader = _
+  private var headerReader: GlobalSequenceSourceReader = _
   private def key: PartitionKey = new PartitionKey(topicId.get, topicPartition.partition())
 
   override def createLogProperties(overrides: Map[String, String]): Properties = super.createLogProperties(overrides ++ Map(
@@ -60,11 +61,25 @@ class GlobalSequenceSourceReaderTest extends AbstractPartitionTest {
     when(metadataCache.getTopicName(topicId.get)).thenReturn(Optional.of(topicPartition.topic()))
     when(replicaManager.getPartitionOrException(new TopicIdPartition(topicId.get, topicPartition))).thenReturn(partition)
     reader = new GlobalSequenceSourceReader(replicaManager, time)
+    headerReader = new GlobalSequenceSourceReader(replicaManager, time, headerOnly = true)
   }
 
   private def log = partition.localLogOrException
   private def commit(): Unit = { log.updateHighWatermark(log.logEndOffset) }
-  private def read(offset: Long, maxBytes: Int = 1024): GlobalSequenceSourceReader.ReadResult = reader.read(key, epoch, offset, maxBytes)
+  private def read(offset: Long, maxBytes: Int = 1024): GlobalSequenceSourceReader.ReadResult = {
+    val full = reader.read(key, epoch, offset, maxBytes)
+    assertEquals(full, headerReader.read(key, epoch, offset, maxBytes))
+    full
+  }
+
+  @Test
+  def testHeaderReaderRejectsTruncatedBatchWithAnIntactHeader(): Unit = {
+    append(3)
+    commit()
+    val file = log.activeSegment().log()
+    file.channel().truncate(file.sizeInBytes().toLong - 1)
+    assertThrows(classOf[CorruptRecordException], () => headerReader.read(key, epoch, 0, 1024))
+  }
   private def append(count: Int = 1, compression: Compression = Compression.NONE): Long = {
     val records = MemoryRecords.withRecords(compression, (0 until count).map(_ => new SimpleRecord(time.milliseconds(), Array[Byte](1, 2, 3))): _*)
     log.appendAsLeader(records, epoch).firstOffset()

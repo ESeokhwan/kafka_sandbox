@@ -261,6 +261,7 @@ private[server] class GlobalSequencePartitionIndexer(
       case Some(request) => append(request)
       case None if bufferedRead.nonEmpty => submitNext(bufferedRead.get)
       case None =>
+        val readStarted = time.nanoseconds()
         val read = try reader.read(partition, sourceLeaderEpoch, cursor, readMaxBytes)
         catch {
           case _: org.apache.kafka.common.errors.TimeoutException =>
@@ -271,7 +272,7 @@ private[server] class GlobalSequencePartitionIndexer(
             if (!isStopped) recover(gap)
             return
         }
-        Option(resources).foreach(_.recordSourceRead(read.batches.size))
+        Option(resources).foreach(_.recordSourceRead(read.batches.size, (time.nanoseconds() - readStarted) / 1000000.0))
         recoveryError = None
         recoveryCheckedAt = None
         if (!isStopped) read.status match {

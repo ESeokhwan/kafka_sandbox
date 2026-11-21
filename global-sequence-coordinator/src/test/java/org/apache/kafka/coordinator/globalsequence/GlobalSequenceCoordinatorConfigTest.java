@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -50,6 +51,7 @@ class GlobalSequenceCoordinatorConfigTest {
         assertEquals(1, config.numThreads());
         assertEquals(2, config.indexerNumThreads());
         assertEquals(1024 * 1024, config.indexerReadMaxBytes());
+        assertFalse(config.indexerHeaderOnly());
         assertEquals(1000, config.retentionRefreshIntervalMs());
         assertEquals(5 * 1024 * 1024, config.loadBufferSize());
         assertEquals(5000, config.writeTimeoutMs());
@@ -121,6 +123,13 @@ class GlobalSequenceCoordinatorConfigTest {
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_MIN_ISR_CONFIG, 4)));
         assertThrows(ConfigException.class, () -> config(Map.of(
             GlobalSequenceCoordinatorConfig.INDEX_TOPIC_SEGMENT_BYTES_CONFIG, 1024)));
+    }
+
+    @Test
+    void testIndexerValidationMode() {
+        String setting = GlobalSequenceCoordinatorConfig.INDEXER_VALIDATION_MODE_CONFIG;
+        assertTrue(config(Map.of(setting, "header")).indexerHeaderOnly());
+        assertThrows(ConfigException.class, () -> config(Map.of(setting, "disabled")));
     }
 
     @Test

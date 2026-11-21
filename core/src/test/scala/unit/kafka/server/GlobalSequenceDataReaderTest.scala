@@ -36,6 +36,7 @@ import org.junit.jupiter.params.provider.EnumSource
 import org.mockito.Mockito.{mock, when}
 import org.mockito.ArgumentMatchers.{any, anyBoolean, anyInt, anyLong}
 
+import java.nio.ByteBuffer
 import java.util.{List => JList, Optional, Properties}
 
 @Timeout(30)
@@ -81,6 +82,28 @@ class GlobalSequenceDataReaderTest extends AbstractPartitionTest {
     val records = MemoryRecords.withRecords(compression, (0 until count).map(_ => new SimpleRecord(time.milliseconds(), Array[Byte](1, 2, 3))): _*)
     log.appendAsLeader(records, epoch).firstOffset()
   }
+
+  @Test
+  def testHeaderIndexingDefersPayloadCorruptionDetectionToFetch(): Unit = {
+    append(3, Compression.gzip().build())
+    commit()
+    val file = log.activeSegment().log()
+    val lastByte = file.sizeInBytes().toLong - 1
+    val byte = ByteBuffer.allocate(1)
+    assertEquals(1, file.channel().read(byte, lastByte))
+    byte.put(0, (byte.get(0) ^ 1).toByte).rewind()
+    assertEquals(1, file.channel().write(byte, lastByte))
+
+    val headerReader = new GlobalSequenceSourceReader(replicaManager, time, headerOnly = true)
+    val mapping = new PhysicalBatch(key, 0, 2, 3)
+    assertEquals(Vector(mapping), headerReader.read(key, epoch, 0, 1024).batches)
+    val fullReader = new GlobalSequenceSourceReader(replicaManager, time)
+    assertThrows(classOf[CorruptRecordException], () => fullReader.read(key, epoch, 0, 1024))
+    val future = reader.read(mapping, epoch, time.nanoseconds() + 100000000L)
+    workers.runAll()
+    assertFutureThrows(classOf[CorruptRecordException], future)
+  }
+
   @ParameterizedTest
   @EnumSource(classOf[CompressionType])
   def testReturnsOneOriginalBatchWithoutRewritingOffsetsOrCrc(compressionType: CompressionType): Unit = {
