@@ -41,6 +41,7 @@ import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.Coordinato
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.CoordinatorWriteOperationWithContext;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorWriteContext;
 import org.apache.kafka.coordinator.common.runtime.MockPartitionWriter;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorService.LookupPartitions;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendResponse;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.IndexerIdentity;
@@ -95,22 +96,26 @@ class GlobalSequenceCoordinatorServiceTest {
     }
 
     static MetadataImage image(int indexPartitions, boolean enabled) {
+        return image(indexPartitions, enabled, 1, 3);
+    }
+
+    static MetadataImage image(int indexPartitions, boolean enabled, int indexLeader, int indexEpoch) {
         MetadataDelta delta = new MetadataDelta.Builder().setImage(MetadataImage.EMPTY).build();
-        addTopic(delta, "data", TOPIC, 1);
+        addTopic(delta, "data", TOPIC, 1, 1, 3);
         config(delta, "data", TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, Boolean.toString(enabled));
         if (indexPartitions > 0) {
-            addTopic(delta, GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, INDEX, indexPartitions);
+            addTopic(delta, GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, INDEX, indexPartitions, indexLeader, indexEpoch);
             GlobalSequenceCoordinatorConfig.REQUIRED_INDEX_TOPIC_CONFIGS.forEach((key, value) ->
                 config(delta, GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, key, value));
         }
         return delta.apply(MetadataProvenance.EMPTY);
     }
 
-    private static void addTopic(MetadataDelta delta, String name, Uuid id, int partitions) {
+    private static void addTopic(MetadataDelta delta, String name, Uuid id, int partitions, int leader, int epoch) {
         delta.replay(new TopicRecord().setName(name).setTopicId(id));
         for (int partition = 0; partition < partitions; partition++) {
-            delta.replay(new PartitionRecord().setTopicId(id).setPartitionId(partition).setLeader(1).setLeaderEpoch(3)
-                .setReplicas(List.of(1)).setIsr(List.of(1)));
+            delta.replay(new PartitionRecord().setTopicId(id).setPartitionId(partition).setLeader(leader).setLeaderEpoch(epoch)
+                .setReplicas(List.of(leader)).setIsr(List.of(leader)));
         }
     }
 
@@ -124,8 +129,9 @@ class GlobalSequenceCoordinatorServiceTest {
         final MockTimer timer = new MockTimer();
         final CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime = mock(CoordinatorRuntime.class);
         final AtomicInteger creations = new AtomicInteger();
+        final LookupPartitions lookupPartitions = new LookupPartitions(config().indexTopicNumPartitions());
         final GlobalSequenceCoordinatorService service = new GlobalSequenceCoordinatorService(
-            new LogContext(), config(), runtime, timer, creations::incrementAndGet, reader, time);
+            new LogContext(), config(), runtime, timer, creations::incrementAndGet, reader, time, 1, lookupPartitions);
 
         void start() {
             service.startup(() -> 2);

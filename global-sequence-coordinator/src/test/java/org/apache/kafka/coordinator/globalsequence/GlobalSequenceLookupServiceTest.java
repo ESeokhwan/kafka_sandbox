@@ -17,22 +17,30 @@
 
 package org.apache.kafka.coordinator.globalsequence;
 
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.CoordinatorLoadInProgressException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.NotCoordinatorException;
+import org.apache.kafka.common.errors.OffsetOutOfRangeException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorReadContext;
-import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.CoordinatorReadOperationWithContext;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.CoordinatorState;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorServiceTest.Context;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.CommittedTopic;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
+import org.apache.kafka.server.immutable.ImmutableMap;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
+import static org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorServiceTest.image;
 import static org.apache.kafka.test.TestUtils.assertFutureThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,109 +48,116 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-@SuppressWarnings("unchecked")
 class GlobalSequenceLookupServiceTest {
     private static final Uuid TOPIC = new Uuid(1, 2);
     private static final Uuid INDEX = new Uuid(3, 4);
+    private static final TopicPartition INDEX_PARTITION = new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 1);
     private static final PhysicalBatch BATCH = new PhysicalBatch(new PartitionKey(TOPIC, 0), 0, 2, 3);
+    private static final GlobalSequenceLookup.Position FIRST = new GlobalSequenceLookup.Position(0, 4);
+
+    private static GlobalSequenceCoordinatorShard shard() {
+        GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
+        GlobalSequenceSparseIndex positions = new GlobalSequenceSparseIndex(1, 10, 10);
+        positions.add(FIRST);
+        when(shard.lookupGeneration()).thenReturn(new Object());
+        when(shard.committedTopics()).thenReturn(ImmutableMap.singleton(TOPIC, new CommittedTopic(3, positions)));
+        return shard;
+    }
+
+    private static void publish(Context ctx, GlobalSequenceCoordinatorShard shard, int epoch, long highWatermark) {
+        ctx.lookupPartitions.onUpdate(INDEX_PARTITION, CoordinatorState.ACTIVE, new CoordinatorReadContext(highWatermark, epoch), shard);
+    }
 
     @Test
-    void testLookupCapturesCommittedSnapshotWithoutWaitingForPendingWrites() throws Exception {
+    void testLookupUsesPublishedBoundaryWhileCommitAdvancesWithoutCallingRuntime() {
         Context ctx = new Context();
         ctx.start();
         ctx.publish(image(2, true));
-        GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
-        when(shard.committedNextGlobalOffset(TOPIC)).thenReturn(3L);
-        when(shard.lookupPosition(TOPIC, 1)).thenReturn(Optional.of(new GlobalSequenceLookup.Position(0, 4)));
-        when(ctx.runtime.scheduleReadOperationWithContext(anyString(), any(), any())).thenAnswer(invocation -> {
-            CoordinatorReadOperationWithContext<GlobalSequenceCoordinatorShard, Object> op = invocation.getArgument(2);
-            return CompletableFuture.completedFuture(op.generateResponse(shard, new CoordinatorReadContext(6L, 10)));
-        });
+        clearInvocations(ctx.runtime);
+        GlobalSequenceCoordinatorShard shard = shard();
+        publish(ctx, shard, 3, 6);
+
         CompletableFuture<GlobalSequenceLookup.Result> scan = new CompletableFuture<>();
         when(ctx.reader.read(any(), any(), any(), any(), anyLong())).thenReturn(scan);
-        GlobalSequenceLookup.Request request = new GlobalSequenceLookup.Request(TOPIC, 1, 100, 2, 1000);
+        var request = new GlobalSequenceLookup.Request(TOPIC, 1, 100, 2, 1000);
         long start = ctx.time.nanoseconds();
-        CompletableFuture<GlobalSequenceLookup.Result> result = ctx.service.lookupIndex(request, 10);
-        ArgumentCaptor<GlobalSequenceLookup.Snapshot> snapshot = ArgumentCaptor.forClass(GlobalSequenceLookup.Snapshot.class);
-        verify(ctx.reader).read(eq(request), snapshot.capture(), eq(new GlobalSequenceLookup.Position(0, 4)), eq(shard), eq(start + 1000000000L));
-        assertEquals(new GlobalSequenceLookup.Snapshot(INDEX, 1, 10, 6, 3), snapshot.getValue());
+        var result = ctx.service.lookupIndex(request, 3);
+        var snapshot = ArgumentCaptor.forClass(GlobalSequenceLookup.Snapshot.class);
+        Object generation = shard.lookupGeneration();
+        verify(ctx.reader).read(eq(request), snapshot.capture(), eq(FIRST), eq(generation), eq(start + 1_000_000_000L));
+        assertEquals(new GlobalSequenceLookup.Snapshot(INDEX, 1, 3, 6, 3), snapshot.getValue());
         assertFalse(result.isDone());
-        when(shard.committedNextGlobalOffset(TOPIC)).thenReturn(6L);
-        GlobalSequenceLookup.Result page = new GlobalSequenceLookup.Result(snapshot.getValue(),
-            List.of(new GlobalSequenceLookup.Mapping(0, BATCH)), 3);
+
+        GlobalSequenceSparseIndex positions = shard.committedTopics().get(TOPIC).positions();
+        positions.add(new GlobalSequenceLookup.Position(3, 6));
+        when(shard.committedTopics()).thenReturn(ImmutableMap.singleton(TOPIC, new CommittedTopic(6, positions)));
+        publish(ctx, shard, 3, 8);
+        var page = new GlobalSequenceLookup.Result(snapshot.getValue(), List.of(new GlobalSequenceLookup.Mapping(0, BATCH)), 3);
         scan.complete(page);
-        assertSame(page, result.get());
+
+        assertSame(page, result.join());
+        verifyNoInteractions(ctx.runtime);
         ctx.service.shutdown();
         verify(ctx.reader).close();
     }
 
-    @Test
-    void testLookupRejectsChangedEpochShardWatermarkTopicAndExpiredDeadline() {
-        for (String change : List.of("epoch", "shard", "hw", "topic", "timeout")) {
-            Context ctx = new Context();
-            ctx.start();
-            ctx.publish(image(2, true));
-            GlobalSequenceCoordinatorShard initial = mock(GlobalSequenceCoordinatorShard.class);
-            when(initial.committedNextGlobalOffset(TOPIC)).thenReturn(3L);
-            java.util.concurrent.atomic.AtomicReference<GlobalSequenceCoordinatorShard> shard = new java.util.concurrent.atomic.AtomicReference<>(initial);
-            java.util.concurrent.atomic.AtomicReference<CoordinatorReadContext> context =
-                new java.util.concurrent.atomic.AtomicReference<>(new CoordinatorReadContext(6, 10));
-            when(ctx.runtime.scheduleReadOperationWithContext(anyString(), any(), any())).thenAnswer(invocation -> {
-                CoordinatorReadOperationWithContext<GlobalSequenceCoordinatorShard, Object> op = invocation.getArgument(2);
-                try {
-                    return CompletableFuture.completedFuture(op.generateResponse(shard.get(), context.get()));
-                } catch (Exception error) {
-                    return CompletableFuture.failedFuture(error);
-                }
-            });
-            CompletableFuture<GlobalSequenceLookup.Result> scan = new CompletableFuture<>();
-            when(ctx.reader.read(any(), any(), any(), any(), anyLong())).thenReturn(scan);
-            CompletableFuture<GlobalSequenceLookup.Result> result = ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 0, 3, 1, 1000), 10);
-            switch (change) {
-                case "epoch" -> context.set(new CoordinatorReadContext(6, 11));
-                case "shard" -> shard.set(mock(GlobalSequenceCoordinatorShard.class));
-                case "hw" -> context.set(new CoordinatorReadContext(5, 10));
-                case "topic" -> ctx.publish(image(2, false));
-                case "timeout" -> ctx.time.sleep(1000);
-                default -> throw new AssertionError(change);
-            }
-            scan.complete(new GlobalSequenceLookup.Result(new GlobalSequenceLookup.Snapshot(INDEX, 1, 10, 6, 3),
-                List.of(new GlobalSequenceLookup.Mapping(0, BATCH)), 3));
-            if (change.equals("timeout")) assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, result);
-            else if (change.equals("topic")) assertFutureThrows(InvalidRequestException.class, result);
-            else assertFutureThrows(NotCoordinatorException.class, result);
-            ctx.service.shutdown();
-        }
-    }
-
-    @Test
-    void testLookupRejectsStartAfterCommittedEndAndStaleEpochBeforeScanning() {
+    @ParameterizedTest
+    @ValueSource(strings = {"epoch", "reload", "unload", "hw", "topic", "resignation", "timeout"})
+    void testLookupFencesInFlightRead(String change) {
         Context ctx = new Context();
         ctx.start();
         ctx.publish(image(2, true));
-        GlobalSequenceCoordinatorShard shard = mock(GlobalSequenceCoordinatorShard.class);
-        when(shard.committedNextGlobalOffset(TOPIC)).thenReturn(3L);
-        when(ctx.runtime.scheduleReadOperationWithContext(anyString(), any(), any())).thenAnswer(invocation -> {
-            CoordinatorReadOperationWithContext<GlobalSequenceCoordinatorShard, Object> op = invocation.getArgument(2);
-            try {
-                return CompletableFuture.completedFuture(op.generateResponse(shard, new CoordinatorReadContext(6, 10)));
-            } catch (Exception error) {
-                return CompletableFuture.failedFuture(error);
+        GlobalSequenceCoordinatorShard shard = shard();
+        publish(ctx, shard, 3, 6);
+
+        CompletableFuture<GlobalSequenceLookup.Result> scan = new CompletableFuture<>();
+        when(ctx.reader.read(any(), any(), any(), any(), anyLong())).thenReturn(scan);
+        var result = ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 0, 3, 1, 1000), 3);
+        switch (change) {
+            case "epoch" -> {
+                ctx.publish(image(2, true, 1, 4));
+                publish(ctx, shard, 4, 6);
             }
-        });
-        assertFutureThrows(org.apache.kafka.common.errors.OffsetOutOfRangeException.class,
-            ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 4, 4, 1, 1000), 10));
-        assertFutureThrows(NotCoordinatorException.class,
-            ctx.service.lookupIndex(new GlobalSequenceLookup.Request(TOPIC, 0, 3, 1, 1000), 9));
-        verify(ctx.reader, never()).read(any(), any(), any(), any(), anyLong());
+            case "reload" -> publish(ctx, shard(), 3, 6);
+            case "unload" -> ctx.lookupPartitions.onUpdate(INDEX_PARTITION, CoordinatorState.CLOSED, null, null);
+            case "hw" -> publish(ctx, shard, 3, 5);
+            case "topic" -> ctx.publish(image(2, false));
+            case "resignation" -> ctx.publish(image(2, true, 2, 4));
+            case "timeout" -> ctx.time.sleep(1000);
+            default -> throw new AssertionError(change);
+        }
+        scan.complete(new GlobalSequenceLookup.Result(new GlobalSequenceLookup.Snapshot(INDEX, 1, 3, 6, 3),
+            List.of(new GlobalSequenceLookup.Mapping(0, BATCH)), 3));
+        Class<? extends RuntimeException> error = switch (change) {
+            case "timeout" -> TimeoutException.class;
+            case "topic" -> InvalidRequestException.class;
+            default -> NotCoordinatorException.class;
+        };
+        assertFutureThrows(error, result);
         ctx.service.shutdown();
     }
 
+    @Test
+    void testLookupRejectsInactiveLoadingOutOfRangeAndStaleEpochBeforeScanning() {
+        Context ctx = new Context();
+        ctx.start();
+        ctx.publish(image(2, true));
+        var request = new GlobalSequenceLookup.Request(TOPIC, 4, 4, 1, 1000);
+        assertFutureThrows(NotCoordinatorException.class, ctx.service.lookupIndex(request, 3));
+        ctx.lookupPartitions.onUpdate(INDEX_PARTITION, CoordinatorState.LOADING, null, null);
+        assertFutureThrows(CoordinatorLoadInProgressException.class, ctx.service.lookupIndex(request, 3));
+        publish(ctx, shard(), 3, 6);
+        assertFutureThrows(OffsetOutOfRangeException.class, ctx.service.lookupIndex(request, 3));
+        assertFutureThrows(NotCoordinatorException.class, ctx.service.lookupIndex(request, 2));
+        verify(ctx.reader, never()).read(any(), any(), any(), any(), anyLong());
+        ctx.service.shutdown();
+    }
 }

@@ -21,10 +21,13 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.CoordinatorLoadInProgressException;
 import org.apache.kafka.common.errors.CoordinatorNotAvailableException;
 import org.apache.kafka.common.errors.FencedLeaderEpochException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.NotCoordinatorException;
+import org.apache.kafka.common.errors.OffsetOutOfRangeException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.utils.KafkaThread;
@@ -32,13 +35,16 @@ import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorReadContext;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.CoordinatorState;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetricsImpl;
 import org.apache.kafka.coordinator.common.runtime.MultiThreadedEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.PartitionWriter;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendRequest;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.AppendResponse;
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.CommittedTopic;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionDescription;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PartitionKey;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
@@ -47,6 +53,7 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShar
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.TopicImage;
+import org.apache.kafka.server.immutable.ImmutableMap;
 import org.apache.kafka.server.util.timer.Timer;
 import org.apache.kafka.server.util.timer.TimerTask;
 
@@ -61,6 +68,8 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.function.IntSupplier;
 
 import static org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME;
@@ -144,6 +153,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                 "global-sequence-coordinator-event-processor-", config.numThreads(), time, runtimeMetrics);
             ExecutorService executor = Executors.newSingleThreadExecutor(runnable ->
                 new KafkaThread("global-sequence-coordinator-executor-" + nodeId, runnable, true));
+            LookupPartitions lookupPartitions = new LookupPartitions(config.indexTopicNumPartitions());
             try {
                 CoordinatorRuntime<GlobalSequenceCoordinatorShard, CoordinatorRecord> runtime =
                     new CoordinatorRuntime.Builder<GlobalSequenceCoordinatorShard, CoordinatorRecord>()
@@ -154,6 +164,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                         .withOperationAdmission((tp, write) -> resources == null ? () -> { } : resources.acquire(
                             write ? GlobalSequenceResources.Scope.COORDINATOR_WRITE : GlobalSequenceResources.Scope.COORDINATOR_READ,
                             tp, 0)::close)
+                        .withCoordinatorStateListener(lookupPartitions::onUpdate)
                         .withPartitionWriter(writer)
                         .withLoader(loader)
                         .withCoordinatorShardBuilderSupplier(() -> new GlobalSequenceCoordinatorShardBuilder().withConfig(config))
@@ -164,7 +175,8 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
                         .withAppendLingerMs(config.appendLingerMs())
                         .withExecutorService(executor)
                         .build();
-                return new GlobalSequenceCoordinatorService(logContext, config, runtime, timer, createIndexTopic, indexReader, time);
+                return new GlobalSequenceCoordinatorService(logContext, config, runtime, timer, createIndexTopic, indexReader,
+                    time, nodeId, lookupPartitions);
             } catch (RuntimeException e) {
                 Utils.closeQuietly(indexReader, "global sequence index reader");
                 Utils.closeQuietly(processor, "global sequence event processor");
@@ -184,6 +196,8 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
     private final Runnable createIndexTopic;
     private final GlobalSequenceLookup.Reader indexReader;
     private final Time time;
+    private final int nodeId;
+    private final LookupPartitions lookupPartitions;
     private volatile boolean active;
     private boolean closed;
     private volatile MetadataImage metadataImage = MetadataImage.EMPTY;
@@ -201,7 +215,7 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
     ) {
         this(logContext, config, runtime, timer, createIndexTopic,
             (request, snapshot, deadline) -> CompletableFuture.failedFuture(new UnsupportedOperationException("Index reader is not configured")),
-            Time.SYSTEM);
+            Time.SYSTEM, -1, new LookupPartitions(config.indexTopicNumPartitions()));
     }
 
     GlobalSequenceCoordinatorService(
@@ -211,10 +225,14 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         Timer timer,
         Runnable createIndexTopic,
         GlobalSequenceLookup.Reader indexReader,
-        Time time
+        Time time,
+        int nodeId,
+        LookupPartitions lookupPartitions
     ) {
         this.indexReader = indexReader;
         this.time = time;
+        this.nodeId = nodeId;
+        this.lookupPartitions = lookupPartitions;
         this.log = logContext.logger(GlobalSequenceCoordinatorService.class);
         this.config = config;
         this.runtime = runtime;
@@ -403,41 +421,94 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
         }
     }
 
-    private record LookupState(GlobalSequenceLookup.Snapshot snapshot, GlobalSequenceLookup.Position position,
-                               GlobalSequenceCoordinatorShard shard) { }
+    private record LookupPartition(CoordinatorReadContext context, Object generation,
+                                   ImmutableMap<Uuid, CommittedTopic> topics) { }
+
+    static final class LookupPartitions {
+        private static final LookupPartition LOADING = new LookupPartition(null, null, ImmutableMap.empty());
+        private final AtomicReferenceArray<LookupPartition> partitions;
+
+        LookupPartitions(int partitionCount) {
+            partitions = new AtomicReferenceArray<>(partitionCount);
+        }
+
+        // The runtime serializes updates per partition and discards stale load and HW callbacks.
+        void onUpdate(TopicPartition tp, CoordinatorState state, CoordinatorReadContext context, GlobalSequenceCoordinatorShard shard) {
+            LookupPartition view = switch (state) {
+                case ACTIVE -> new LookupPartition(context, shard.lookupGeneration(), shard.committedTopics());
+                case LOADING -> LOADING;
+                default -> null;
+            };
+            partitions.set(tp.partition(), view);
+        }
+
+        private LookupPartition requireActive(int partition) {
+            LookupPartition view = partitions.get(partition);
+            if (view == LOADING) {
+                throw new CoordinatorLoadInProgressException("Global sequence coordinator is loading");
+            }
+            if (view == null) {
+                throw new NotCoordinatorException("Global sequence coordinator is not active for index partition " + partition);
+            }
+            return view;
+        }
+    }
 
     @Override
     public CompletableFuture<GlobalSequenceLookup.Result> lookupIndex(GlobalSequenceLookup.Request request, int expectedCoordinatorEpoch) {
         try {
-            requireReady();
-            long deadline = time.nanoseconds() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(request.timeoutMs());
+            long deadline = time.nanoseconds() + TimeUnit.MILLISECONDS.toNanos(request.timeoutMs());
+            TopicImage index = requireLookupIndexTopic(request.topicId());
             int partition = partitionFor(request.topicId());
-            TopicPartition tp = indexPartition(partition);
-            return runtime.scheduleReadOperationWithContext("capture-global-lookup", tp, (shard, context) -> {
-                requireReady();
-                requireEnabledTopic(new PartitionKey(request.topicId(), 0));
-                validateCoordinatorEpoch(expectedCoordinatorEpoch, context.leaderEpoch());
-                long globalEnd = shard.committedNextGlobalOffset(request.topicId());
-                if (request.startOffset() > globalEnd)
-                    throw new org.apache.kafka.common.errors.OffsetOutOfRangeException("Global start exceeds the committed end");
-                return new LookupState(new GlobalSequenceLookup.Snapshot(
-                    metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id(), partition,
-                    context.leaderEpoch(), context.highWatermark(), globalEnd),
-                    shard.lookupPosition(request.topicId(), request.startOffset()).orElse(GlobalSequenceLookup.Position.START), shard);
-            }).thenCompose(state -> indexReader.read(request, state.snapshot(), state.position(), state.shard(), deadline).thenCompose(result ->
-                runtime.scheduleReadOperationWithContext("validate-global-lookup", tp, (shard, context) -> {
-                    requireReady();
-                    requireEnabledTopic(new PartitionKey(request.topicId(), 0));
-                    validateCoordinatorEpoch(state.snapshot().leaderEpoch(), context.leaderEpoch());
-                    if (shard != state.shard() || context.highWatermark() < state.snapshot().indexHighWatermark() ||
-                        !metadataImage.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME).id().equals(state.snapshot().indexTopicId()))
-                        throw new NotCoordinatorException("Global lookup snapshot was invalidated");
-                    if (time.nanoseconds() >= deadline)
-                        throw new org.apache.kafka.common.errors.TimeoutException("Global lookup deadline expired");
-                    return result;
-                })));
+            LookupPartition view = lookupPartitions.requireActive(partition);
+            CoordinatorReadContext context = view.context();
+            validateLookupOwner(index, partition, context.leaderEpoch());
+            validateCoordinatorEpoch(expectedCoordinatorEpoch, context.leaderEpoch());
+            CommittedTopic topic = view.topics().get(request.topicId());
+            long globalEnd = topic == null ? 0L : topic.globalEnd();
+            if (request.startOffset() > globalEnd) {
+                throw new OffsetOutOfRangeException("Global start exceeds the committed end");
+            }
+            var snapshot = new GlobalSequenceLookup.Snapshot(index.id(), partition, context.leaderEpoch(),
+                context.highWatermark(), globalEnd);
+            var position = topic == null ? GlobalSequenceLookup.Position.START :
+                topic.positions().floor(request.startOffset(), globalEnd, context.highWatermark());
+            Object generation = view.generation();
+            return indexReader.read(request, snapshot, position, generation, deadline).thenApply(result -> {
+                TopicImage currentIndex = requireLookupIndexTopic(request.topicId());
+                LookupPartition current = lookupPartitions.requireActive(partition);
+                validateLookupOwner(currentIndex, partition, current.context().leaderEpoch());
+                validateCoordinatorEpoch(snapshot.leaderEpoch(), current.context().leaderEpoch());
+                if (current.generation() != generation || current.context().highWatermark() < snapshot.indexHighWatermark() ||
+                    !currentIndex.id().equals(snapshot.indexTopicId())) {
+                    throw new NotCoordinatorException("Global lookup snapshot was invalidated");
+                }
+                if (time.nanoseconds() >= deadline) {
+                    throw new TimeoutException("Global lookup deadline expired");
+                }
+                return result;
+            });
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    private TopicImage requireLookupIndexTopic(Uuid topicId) {
+        requireActive();
+        MetadataImage image = metadataImage;
+        TopicImage index = image.topics().getTopic(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME);
+        if (index == null) {
+            throw new CoordinatorNotAvailableException("The global sequence index topic is not yet available");
+        }
+        requireEnabledTopic(image, new PartitionKey(topicId, 0));
+        return index;
+    }
+
+    private void validateLookupOwner(TopicImage index, int partition, int leaderEpoch) {
+        // Broker metadata can change before the queued runtime election or resignation runs.
+        var registration = index.partitions().get(partition);
+        if (registration == null || registration.leader != nodeId || registration.leaderEpoch != leaderEpoch) {
+            throw new NotCoordinatorException("Index partition leadership changed during global lookup");
         }
     }
 
@@ -472,7 +543,10 @@ public class GlobalSequenceCoordinatorService implements GlobalSequenceCoordinat
     }
 
     private TopicImage requireEnabledTopic(PartitionKey partition) {
-        MetadataImage image = metadataImage;
+        return requireEnabledTopic(metadataImage, partition);
+    }
+
+    private static TopicImage requireEnabledTopic(MetadataImage image, PartitionKey partition) {
         TopicImage topic = image.topics().getTopic(partition.topicId());
         if (topic == null || !topic.partitions().containsKey(partition.partition())) {
             throw new UnknownTopicOrPartitionException("Unknown global sequence data partition " + partition);

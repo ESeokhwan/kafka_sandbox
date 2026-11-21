@@ -24,10 +24,11 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
-import java.util.TreeMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
- * Bounded positions for one topic, accessed only on its coordinator event thread.
+ * Bounded positions for one topic. The coordinator is the only writer, and
+ * lookups can read positions concurrently without accessing the sampling levels.
  * Level zero samples every N committed source batches, starting with the first batch.
  * When a level overflows, its oldest pair is replaced by its first position in the
  * next level. Each older level therefore doubles the spacing. The final level drops
@@ -38,7 +39,7 @@ final class GlobalSequenceSparseIndex {
     private final int entriesPerLevel;
     private final int maxEntries;
     private final List<Deque<Position>> levels = new ArrayList<>();
-    private final TreeMap<Long, Position> positions = new TreeMap<>();
+    private final ConcurrentSkipListMap<Long, Position> positions = new ConcurrentSkipListMap<>();
     private int batchesUntilSample;
 
     GlobalSequenceSparseIndex(int baseIntervalBatches, int entriesPerLevel, int maxEntries) {
@@ -77,6 +78,14 @@ final class GlobalSequenceSparseIndex {
     Optional<Position> floor(long globalOffset) {
         var entry = positions.floorEntry(globalOffset);
         return entry == null ? Optional.empty() : Optional.of(entry.getValue());
+    }
+
+    Position floor(long startOffset, long committedGlobalEnd, long indexHighWatermark) {
+        var entry = positions.floorEntry(Math.min(startOffset, committedGlobalEnd - 1));
+        while (entry != null && entry.getValue().indexOffset() > indexHighWatermark - 2) {
+            entry = positions.lowerEntry(entry.getKey());
+        }
+        return entry == null ? Position.START : entry.getValue();
     }
 
     int size() {

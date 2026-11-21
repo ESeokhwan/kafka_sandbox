@@ -28,6 +28,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GlobalSequenceSparseIndexTest {
     @Test
+    void testFloorUsesCapturedCommitBoundaries() {
+        GlobalSequenceSparseIndex index = new GlobalSequenceSparseIndex(1, 10, 10);
+        var older = new Position(0, 1);
+        var newer = new Position(3, 3);
+        index.add(older);
+        index.add(newer);
+
+        assertEquals(older, index.floor(3, 3, 5));
+        assertEquals(older, index.floor(3, 6, 4));
+        assertEquals(newer, index.floor(3, 6, 5));
+        assertEquals(Position.START, index.floor(0, 0, 0));
+    }
+
+    @Test
     void testBaseIntervalCountsBatchesAndFloorIncludesBatchInterior() {
         GlobalSequenceSparseIndex index = new GlobalSequenceSparseIndex(3, 100, 100);
         assertTrue(index.floor(0).isEmpty());
