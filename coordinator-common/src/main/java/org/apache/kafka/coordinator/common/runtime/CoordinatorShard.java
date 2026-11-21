@@ -63,6 +63,9 @@ public interface CoordinatorShard<U> {
      */
     default void onHighWatermarkUpdated(long highWatermark) {}
 
+    /** Associates an optional loader-provided source with the shard before activation. */
+    default void onLoadSource(Object source) {}
+
     /**
      * The runtime has restored the snapshot at the supplied offset. Called after snapshot
      * restoration and before the affected write futures fail, to discard speculative

@@ -17,12 +17,14 @@
 
 package kafka.server
 
+import kafka.cluster.Partition
+
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope
 import java.util.concurrent.atomic.AtomicInteger
 
 import org.apache.kafka.common.{TopicIdPartition, TopicPartition}
-import org.apache.kafka.common.errors.{CorruptRecordException, CoordinatorNotAvailableException, FencedLeaderEpochException, KafkaStorageException, NotCoordinatorException, NotLeaderOrFollowerException, RecordTooLargeException, ThrottlingQuotaExceededException, TimeoutException}
+import org.apache.kafka.common.errors.{CorruptRecordException, CoordinatorNotAvailableException, FencedLeaderEpochException, KafkaStorageException, NotCoordinatorException, NotLeaderOrFollowerException, RecordTooLargeException, ThrottlingQuotaExceededException, TimeoutException, UnknownTopicIdException, UnknownTopicOrPartitionException}
 import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.record.{FileRecords, MemoryRecords, RecordBatch, Records}
 import org.apache.kafka.common.requests.FetchRequest
@@ -30,11 +32,11 @@ import org.apache.kafka.common.utils.{BufferSupplier, KafkaThread, ThreadUtils, 
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorConfig, GlobalSequenceCoordinatorRecordSerde, GlobalSequenceLookup}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.validateBatchRecordCounts
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Position, Request, Result, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{CommittedRange, Mapping, Position, Request, Result, Snapshot}
 import org.apache.kafka.coordinator.globalsequence.generated.{BatchIndexKey, BatchIndexValue, IndexerFenceKey, TopicMetadataKey, TopicMetadataValue}
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams}
 import org.apache.kafka.server.util.Scheduler
-import org.apache.kafka.storage.internals.log.LogReadInfo
+import org.apache.kafka.storage.internals.log.{LogReadInfo, UnifiedLog}
 
 import java.nio.ByteBuffer
 import java.util.Optional
@@ -44,6 +46,8 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 private[server] object GlobalSequenceIndexReader {
+  private case class LoadSource(partition: Partition, log: UnifiedLog)
+
   val ReadBytes = 1024 * 1024
   val MaxBatchBytes = 8 * ReadBytes
   def workers(threads: Int = 2, queueSize: Int = 128): ExecutorService = new ThreadPoolExecutor(threads, threads, 0L, TimeUnit.MILLISECONDS,
@@ -122,6 +126,34 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
     result
   }
 
+  private[server] def captureLoadSource(tp: TopicPartition, log: UnifiedLog): AnyRef = {
+    if (!mappingCache.enabled) return null
+    replicas.getPartition(tp) match {
+      case HostedPartition.Online(source) if source.log.contains(log) => LoadSource(source, log)
+      case _ => null
+    }
+  }
+
+  override def cacheCommitted(tp: TopicPartition, leaderEpoch: Int, generation: AnyRef, loadSource: AnyRef,
+                              ranges: java.util.List[CommittedRange]): Unit = loadSource match {
+    case LoadSource(source, log) if mappingCache.enabled && !ranges.isEmpty && log.topicId().isPresent =>
+      val indexId = log.topicId().get()
+      val epoch = Optional.of(Int.box(leaderEpoch))
+      try {
+        if ((replicas.getPartitionOrException(new TopicIdPartition(indexId, tp)) eq source) &&
+          (source.localLogWithEpochOrThrow(epoch, requireLeader = true) eq log)) {
+          val scope = CacheScope(indexId, tp.partition(), leaderEpoch,
+            new Identity(generation), new Identity(source), new Identity(log))
+          mappingCache.putAll(scope, ranges.asScala.iterator
+            .map(range => Entry(range.mapping(), range.indexEndOffset(), range.batchRecordCounts())).toVector)
+        }
+      } catch {
+        case _: NotLeaderOrFollowerException | _: FencedLeaderEpochException | _: UnknownTopicOrPartitionException |
+             _: UnknownTopicIdException => // The loaded source no longer owns this partition.
+      }
+    case _ =>
+  }
+
   private def scan(request: Request, snapshot: Snapshot, position: Position, generation: AnyRef, checkDeadline: () => Unit): Result = {
     checkDeadline()
     val tp = new TopicIdPartition(snapshot.indexTopicId(), new TopicPartition(GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, snapshot.indexPartition()))
@@ -162,9 +194,9 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
         checkDeadline()
         mappingCache.get(cacheScope, request.topicId(), scanFrom, snapshot) match {
           case Some(entry) =>
-            selected += entry.mapping
+            entry.appendBatches(scanFrom, end, request.maxBatches(), selected, checkDeadline)
             cachedEnd = Some(entry)
-            scanFrom = entry.mapping.globalEndOffset()
+            scanFrom = selected.last.globalEndOffset()
           case None => cacheMiss = true
         }
       }
@@ -174,41 +206,16 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
       val start = if (position.globalBaseOffset() <= request.startOffset() &&
         position.globalBaseOffset() < snapshot.committedGlobalEnd() && position.indexOffset() <= snapshot.indexHighWatermark() - 2)
         position else Position.START
-      // An interior cached batch may be followed by an uncached batch in the same index entry.
-      val cachedRangeStart = cachedEnd.flatMap(_.rangeStart)
-      var cursor = cachedRangeStart.map(_.indexOffset()).orElse(cachedEnd.map(_.indexEndOffset)).getOrElse(start.indexOffset())
-      var globalCursor = cachedRangeStart.map(_.globalBaseOffset()).orElse(cachedEnd.map(_.mapping.globalEndOffset()))
-        .getOrElse(start.globalBaseOffset())
+      var cursor = cachedEnd.map(_.indexEndOffset).getOrElse(start.indexOffset())
+      var globalCursor = cachedEnd.map(_.mapping.globalEndOffset()).getOrElse(start.globalBaseOffset())
       var firstBatch = true
-      var verifyPosition = cachedRangeStart.nonEmpty || (cachedEnd.isEmpty && start != Position.START)
+      var verifyPosition = cachedEnd.isEmpty && start != Position.START
       var staged: Option[Mapping] = None
       var stagedCounts = java.util.List.of[Integer]()
       var stagedOffset = -1L
       var done = scanFrom >= end || selected.size >= request.maxBatches()
 
-      def selectBatches(mapping: Mapping, indexEnd: Long): Unit = {
-        if (stagedCounts.isEmpty) {
-          selected += mapping
-          additions += Entry(mapping, indexEnd)
-        } else {
-          val range = mapping.batch()
-          val rangeStart = Some(new Position(mapping.globalBaseOffset(), stagedOffset))
-          val counts = stagedCounts.iterator()
-          var global = mapping.globalBaseOffset()
-          while (counts.hasNext && global < end && selected.size < request.maxBatches()) {
-            checkDeadline()
-            val count = counts.next().intValue()
-            if (global + count > scanFrom) {
-              val base = range.baseOffset() + (global - mapping.globalBaseOffset())
-              val original = new Mapping(global, new PhysicalBatch(range.partition(), base, base + count - 1, count))
-              selected += original
-              additions += Entry(original, indexEnd, if (counts.hasNext) rangeStart else None)
-            }
-            global += count
-          }
-        }
-      }
-
+      if (!done && cursor < snapshot.indexHighWatermark()) mappingCache.recordScan()
       val buffers = BufferSupplier.create()
       try {
         while (!done && cursor < snapshot.indexHighWatermark()) {
@@ -272,7 +279,9 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
                         throw new CorruptRecordException("Global index range contradicts the committed snapshot")
                       globalCursor = mapping.globalEndOffset()
                       if (mapping.globalEndOffset() > scanFrom && mapping.globalBaseOffset() < end) {
-                        selectBatches(mapping, cursor + 1)
+                        val entry = Entry(mapping, cursor + 1, stagedCounts)
+                        entry.appendBatches(scanFrom max mapping.globalBaseOffset(), end, request.maxBatches(), selected, checkDeadline)
+                        additions += entry
                       }
                       done = globalCursor >= end || selected.size >= request.maxBatches()
                     }

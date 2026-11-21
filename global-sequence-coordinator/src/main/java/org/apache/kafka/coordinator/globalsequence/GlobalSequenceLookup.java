@@ -17,6 +17,7 @@
 
 package org.apache.kafka.coordinator.globalsequence;
 
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch;
 
@@ -85,6 +86,9 @@ public final class GlobalSequenceLookup {
         }
     }
 
+    /** A committed allocation and its original physical batch boundaries. */
+    public record CommittedRange(Mapping mapping, long indexEndOffset, List<Integer> batchRecordCounts) { }
+
     /** Broker-owned log I/O, performed outside coordinator event threads and locks. */
     public interface Reader extends AutoCloseable {
         CompletableFuture<Result> read(Request request, Snapshot snapshot, long deadlineNs);
@@ -97,6 +101,9 @@ public final class GlobalSequenceLookup {
         default CompletableFuture<Result> read(Request request, Snapshot snapshot, Position position, Object generation, long deadlineNs) {
             return read(request, snapshot, position, deadlineNs);
         }
+
+        default void cacheCommitted(TopicPartition partition, int leaderEpoch, Object generation, Object loadSource,
+                                    List<CommittedRange> ranges) { }
 
         @Override
         default void close() { }

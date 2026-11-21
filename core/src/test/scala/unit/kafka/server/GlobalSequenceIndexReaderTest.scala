@@ -18,7 +18,7 @@
 package kafka.server
 
 import kafka.cluster.Partition
-import org.apache.kafka.common.{TopicIdPartition, Uuid}
+import org.apache.kafka.common.{TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, CorruptRecordException, FencedLeaderEpochException, KafkaStorageException, NotCoordinatorException, TimeoutException}
 import org.apache.kafka.common.record.{MemoryRecords, Records, SimpleRecord}
@@ -26,7 +26,8 @@ import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.{newBatchIndexRecord, newTopicMetadataRecord}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordSerde
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Position, Request, Result, Snapshot}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{CommittedRange, Mapping, Position, Request, Result, Snapshot}
 import org.apache.kafka.server.util.MockTime
 import org.apache.kafka.storage.internals.log.{FetchDataInfo, LogOffsetMetadata, LogReadInfo, UnifiedLog}
 import org.apache.kafka.test.TestUtils.assertFutureThrows
@@ -63,7 +64,9 @@ class GlobalSequenceIndexReaderTest {
       val first = c.finish(c.read(startOffset = 1, maxBatches = 1))
       assertEquals(2L, first.nextGlobalOffset())
       assertEquals(10L, first.mappings().get(0).batch().baseOffset())
-      // The first batch hits in cache, then the lookup must reread the same index entry.
+      val interior = c.finish(c.read(startOffset = 3, endOffset = 5, maxBatches = 1))
+      assertEquals(2L, interior.mappings().get(0).globalBaseOffset())
+      assertEquals(1, c.reads, "A page ending inside an allocation must cache the whole allocation")
       val rest = c.finish(c.read(startOffset = 1, maxBatches = 4))
       assertEquals(8L, rest.nextGlobalOffset())
       assertEquals(Seq(0L, 2L, 5L, 6L), rest.mappings().asScala.map(_.globalBaseOffset()).toSeq)
@@ -101,6 +104,8 @@ class GlobalSequenceIndexReaderTest {
     var onRead: () => Unit = () => ()
     var onBoundsRead: () => Unit = () => ()
     when(replicas.getPartitionOrException(any[TopicIdPartition])).thenReturn(partition)
+    when(replicas.getPartition(any[TopicPartition])).thenReturn(HostedPartition.Online(partition))
+    when(partition.log).thenAnswer(_ => Some(currentLog))
     when(log.topicId()).thenReturn(Optional.of(index))
     when(log.logEndOffset()).thenReturn(8L)
     when(partition.localLogWithEpochOrThrow(any(), anyBoolean())).thenAnswer { _ =>
@@ -138,6 +143,31 @@ class GlobalSequenceIndexReaderTest {
     }
     def finish(future: CompletableFuture[Result]): Result = { workers.runAll(); future.join() }
     override def close(): Unit = { reader.close(); limits.close(); time.scheduler.clear() }
+  }
+
+  @Test
+  def testCommittedRangeIsAvailableOnFirstLookupAndCannotWarmReplacementLog(): Unit = {
+    val merged = Seq(newBatchIndexRecord(topic, 0, 10, 15, 6, 0,
+      java.util.List.of(Int.box(2), Int.box(3), Int.box(1))), newTopicMetadataRecord(topic, 6))
+    val c = new Context(records(merged), snapshotHw = 2, globalEnd = 6)
+    try {
+      val tp = new TopicPartition(org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME, 1)
+      val source = c.reader.captureLoadSource(tp, c.log)
+      val counts = java.util.List.of(Int.box(2), Int.box(3), Int.box(1))
+      val allocation = new CommittedRange(new Mapping(0, new PhysicalBatch(new PartitionKey(topic, 0), 10, 15, 6)), 2, counts)
+      c.reader.cacheCommitted(tp, 10, c.generation, source, java.util.List.of(allocation))
+      val hit = c.finish(c.read(startOffset = 3))
+      assertEquals(Seq(2L, 5L), hit.mappings().asScala.map(_.globalBaseOffset()).toSeq)
+      assertEquals(0, c.reads)
+
+      val replacement = mock(classOf[UnifiedLog])
+      when(replacement.topicId()).thenReturn(Optional.of(index))
+      when(replacement.logEndOffset()).thenReturn(8L)
+      c.currentLog = replacement
+      c.reader.cacheCommitted(tp, 10, c.generation, source, java.util.List.of(allocation))
+      assertEquals(hit, c.finish(c.read(startOffset = 3)))
+      assertEquals(1, c.reads)
+    } finally c.close()
   }
 
   @Test

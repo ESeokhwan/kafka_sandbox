@@ -32,7 +32,11 @@ public interface CoordinatorLoader<U> extends AutoCloseable {
      * Object that is returned as part of the future from load(). Holds the partition load time and the
      * end time.
      */
-    record LoadSummary(long startTimeMs, long endTimeMs, long schedulerQueueTimeMs, long numRecords, long numBytes) { }
+    record LoadSummary(long startTimeMs, long endTimeMs, long schedulerQueueTimeMs, long numRecords, long numBytes, Object source) {
+        public LoadSummary(long startTimeMs, long endTimeMs, long schedulerQueueTimeMs, long numRecords, long numBytes) {
+            this(startTimeMs, endTimeMs, schedulerQueueTimeMs, numRecords, numBytes, null);
+        }
+    }
 
     /**
      * Loads the coordinator by reading all the records from the TopicPartition
