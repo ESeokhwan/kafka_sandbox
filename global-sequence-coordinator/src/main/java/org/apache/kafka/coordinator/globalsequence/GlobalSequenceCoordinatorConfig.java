@@ -120,6 +120,11 @@ public class GlobalSequenceCoordinatorConfig {
     public static final int WORKER_QUEUE_SIZE_DEFAULT = 128;
     public static final String WORKER_QUEUE_SIZE_DOC = "Maximum queued jobs per global sequence worker pool.";
 
+    public static final String FETCH_READ_WINDOW_MAX_BATCHES_CONFIG = "global.sequence.fetch.read.window.max.batches";
+    public static final int FETCH_READ_WINDOW_MAX_BATCHES_DEFAULT = 128;
+    public static final String FETCH_READ_WINDOW_MAX_BATCHES_DOC =
+        "Maximum original physical batches selected per global fetch read window across all partitions.";
+
     public static final String READER_NUM_THREADS_CONFIG = "global.sequence.reader.num.threads";
     public static final int READER_NUM_THREADS_DEFAULT = 2;
     public static final String READER_NUM_THREADS_DOC = "Threads in each independent index and data reader pool.";
@@ -168,6 +173,8 @@ public class GlobalSequenceCoordinatorConfig {
         .define(DATA_RPC_BUFFER_BYTES_CONFIG, INT, DATA_RPC_BUFFER_BYTES_DEFAULT, atLeast(8388608), MEDIUM, DATA_RPC_BUFFER_BYTES_DOC)
         .define(READ_RESPONSE_BUFFER_BYTES_CONFIG, INT, READ_RESPONSE_BUFFER_BYTES_DEFAULT, atLeast(8388608), MEDIUM, READ_RESPONSE_BUFFER_BYTES_DOC)
         .define(WORKER_QUEUE_SIZE_CONFIG, INT, WORKER_QUEUE_SIZE_DEFAULT, atLeast(1), MEDIUM, WORKER_QUEUE_SIZE_DOC)
+        .define(FETCH_READ_WINDOW_MAX_BATCHES_CONFIG, INT, FETCH_READ_WINDOW_MAX_BATCHES_DEFAULT,
+            ConfigDef.Range.between(1, GlobalSequenceLookup.MAX_BATCHES), MEDIUM, FETCH_READ_WINDOW_MAX_BATCHES_DOC)
         .define(READER_NUM_THREADS_CONFIG, INT, READER_NUM_THREADS_DEFAULT, atLeast(1), MEDIUM, READER_NUM_THREADS_DOC)
         .define(LOOKUP_SCAN_MAX_BYTES_CONFIG, INT, LOOKUP_SCAN_MAX_BYTES_DEFAULT, atLeast(1), MEDIUM, LOOKUP_SCAN_MAX_BYTES_DOC)
         .define(SPI_BASE_INTERVAL_BATCHES_CONFIG, INT, SPI_BASE_INTERVAL_BATCHES_DEFAULT, atLeast(1), MEDIUM, SPI_BASE_INTERVAL_BATCHES_DOC)
@@ -263,6 +270,10 @@ public class GlobalSequenceCoordinatorConfig {
 
     public int workerQueueSize() {
         return config.getInt(WORKER_QUEUE_SIZE_CONFIG);
+    }
+
+    public int fetchReadWindowMaxBatches() {
+        return config.getInt(FETCH_READ_WINDOW_MAX_BATCHES_CONFIG);
     }
 
     public int readerNumThreads() {

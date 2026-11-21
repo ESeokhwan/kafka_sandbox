@@ -35,13 +35,22 @@ public class ReadGlobalSequenceDataRequest extends AbstractRequest {
 
         @Override
         public short oldestAllowedVersion() {
+            if (!data.batches().isEmpty()) {
+                return 2;
+            }
             return data.isolationLevel() == 1 ? (short) 1 : (short) 0;
         }
 
         @Override
+        public short latestAllowedVersion() {
+            return data.batches().isEmpty() ? (short) 1 : super.latestAllowedVersion();
+        }
+
+        @Override
         public ReadGlobalSequenceDataRequest build(short version) {
-            if (data.isolationLevel() == 1 && version < 1)
-                throw new UnsupportedVersionException("READ_COMMITTED global fetch requires version 1");
+            if (version < oldestAllowedVersion()) {
+                throw new UnsupportedVersionException("Global sequence data request requires version " + oldestAllowedVersion());
+            }
             return new ReadGlobalSequenceDataRequest(data, version);
         }
 

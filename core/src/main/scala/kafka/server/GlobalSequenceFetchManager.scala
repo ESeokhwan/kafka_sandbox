@@ -35,15 +35,19 @@ import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ScheduledFutu
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
-/** A sliding window bounds reads and completed out-of-order payloads; only the contiguous prefix can advance. */
+/** Bounds physical reads and emits only a contiguous prefix of the committed global order. */
 class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSequenceDataRouter,
-                                 scheduler: Scheduler, time: Time, resources: GlobalSequenceResources = null) extends AutoCloseable {
+                                 scheduler: Scheduler, time: Time, resources: GlobalSequenceResources = null,
+                                 readWindowMaxBatches: Int = 1) extends AutoCloseable {
   import GlobalSequenceFetch._
   private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[FetchGlobalSequenceResponse]]()
   @volatile private var closed = false
 
   def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
     source.readLocal(batch, epoch, deadlineNs, isolation)
+
+  private[server] def readLocalRange(range: ReadRange, epoch: Int, deadlineNs: Long, isolation: IsolationLevel): CompletableFuture[RangeResult] =
+    source.readLocalRange(range, epoch, deadlineNs, isolation)
 
   private[server] def reserveDataResponse(key: PartitionKey): Option[GlobalSequenceResources#Lease] =
     Option(resources).map(_.acquire(Scope.DATA_RESPONSE, key, GlobalSequenceResources.BATCH_BYTES))
@@ -60,8 +64,13 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
     private var mappings = Vector.empty[GlobalSequenceLookup.Mapping]
     private var response = new FetchGlobalSequenceResponseData().setTopicId(request.lookup.topicId())
       .setNextGlobalOffset(request.lookup.startOffset())
-    private var running = Map.empty[Int, CompletableFuture[Data]]
+    private var running = Map.empty[Int, CompletableFuture[_]]
     private var completed = Map.empty[Int, Either[Throwable, Data]]
+    private var queuedRanges = Vector.empty[Vector[Int]]
+    private var windowStart = 0
+    private var windowCount = 0
+    private var windowBytes = 0
+    private var sampledBatches = 0
     private var issued = 0
     private var consumed = 0
     private var bytes = 0
@@ -78,7 +87,8 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
         if (lookup != null) lookup.cancel(false)
         val work = running.values.toList
         running = Map.empty
-        completed = Map.empty
+        discardCompleted()
+        queuedRanges = Vector.empty
         work.foreach(_.cancel(false))
       }}
       if (closed) result.completeExceptionally(new CoordinatorNotAvailableException("Global fetch manager is closed"))
@@ -126,6 +136,60 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
       if (!result.complete(owned)) owned.release()
     }
 
+    private def discardCompleted(): Unit = {
+      val discarded = completed.valuesIterator.collect { case Right(data) => data.records.sizeInBytes().toLong }.sum
+      completed = Map.empty
+      Option(resources).foreach(_.recordFetchRead(0, 0, discarded))
+    }
+
+    private def selectWindow(): Unit = {
+      val remaining = request.maxBytes - bytes
+      val estimated = if (sampledBatches == 0) readWindowMaxBatches
+        else math.max(1, (remaining.toLong * sampledBatches / bytes).toInt)
+      windowStart = consumed
+      windowCount = math.min(math.min(estimated, readWindowMaxBatches), mappings.size - consumed)
+      // Allow room for unevenly sized partitions, while bounding completed and in-flight payloads.
+      windowBytes = math.min(MaxBatchBytes, math.max(windowCount.toLong, remaining.toLong * 2)).toInt
+      val byPartition = scala.collection.mutable.Map.empty[PartitionKey, Vector[Int]]
+      val ranges = Vector.newBuilder[Vector[Int]]
+      (consumed until consumed + windowCount).foreach { position =>
+        val batch = mappings(position).batch()
+        val previous = byPartition.getOrElse(batch.partition(), Vector.empty)
+        if (previous.lastOption.exists(i => mappings(i).batch().lastOffset() + 1 != batch.baseOffset())) {
+          ranges += previous
+          byPartition(batch.partition()) = Vector(position)
+        } else byPartition(batch.partition()) = previous :+ position
+      }
+      ranges ++= byPartition.values
+      queuedRanges = ranges.result().sortBy(_.head)
+      Option(resources).foreach(_.recordFetchRead(1, 0, 0))
+    }
+
+    private def issueRange(positions: Vector[Int]): Unit = {
+      val start = positions.head
+      val budget = math.min(MaxRangeReadBytes, windowBytes * positions.size.toLong / windowCount).toInt
+      val range = ReadRange(positions.map(i => mappings(i).batch()), budget, minOneBatch = start == windowStart)
+      Option(resources).foreach(_.recordFetchRead(0, 1, 0))
+      try {
+        val read = source.readRange(range, deadlineNs, request.isolation)
+        running += start -> read
+        read.whenComplete { (value, error) => synchronized {
+          running -= start
+          if (!result.isDone) {
+            if (error != null) completed += start -> Left(error)
+            else {
+              positions.zip(value.data).foreach { case (position, data) => completed += position -> Right(data) }
+              value.error.foreach(failure => completed += positions(value.data.size) -> Left(failure))
+            }
+            drain()
+          }
+        }}
+      } catch { case NonFatal(error) =>
+        running -= start
+        completed += start -> Left(error)
+      }
+    }
+
     // All calls hold the session monitor. Immediate future completion re-enters without recursive draining.
     private def drain(): Unit = {
       if (draining || result.isDone || route == null) return
@@ -148,12 +212,16 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
                 progress = true
               case Right(data) =>
                 val size = data.records.sizeInBytes()
-                if (bytes > 0 && (bytes.toLong + size > request.maxBytes || bytes.toLong + size > MaxPayloadBytes)) finish(None)
+                if (bytes > 0 && (bytes.toLong + size > request.maxBytes || bytes.toLong + size > MaxPayloadBytes)) {
+                  Option(resources).foreach(_.recordFetchRead(0, 0, size))
+                  finish(None)
+                }
                 else {
                   val entry = GlobalSequenceFetch.fetched(request, mappings(consumed), data)
                   response.batches().add(entry)
                   response.setNextGlobalOffset(entry.selectedGlobalEndOffset())
                   bytes += size
+                  sampledBatches += 1
                   consumed += 1
                   progress = true
                   if (bytes >= request.maxBytes) finish(None)
@@ -162,21 +230,36 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
           }
           if (!result.isDone && consumed == mappings.size) finish(None)
           if (!result.isDone && time.nanoseconds() >= deadlineNs) finish(Some(new TimeoutException("Global fetch deadline expired")))
-          while (!result.isDone && issued < mappings.size && issued < consumed + ParallelReads) {
-            val position = issued
-            issued += 1
-            progress = true
-            try {
-              val read = source.read(mappings(position).batch(), deadlineNs, request.isolation)
-              running += position -> read
-              read.whenComplete { (data, error) => synchronized {
-                running -= position
-                if (!result.isDone) {
-                  completed += position -> (if (error != null) Left(error) else Right(data))
-                  drain()
-                }
-              }}
-            } catch { case NonFatal(error) => completed += position -> Left(error) }
+          if (readWindowMaxBatches == 1) {
+            while (!result.isDone && issued < mappings.size && issued < consumed + ParallelReads) {
+              val position = issued
+              issued += 1
+              progress = true
+              try {
+                val read = source.read(mappings(position).batch(), deadlineNs, request.isolation)
+                running += position -> read
+                read.whenComplete { (data, error) => synchronized {
+                  running -= position
+                  if (!result.isDone) {
+                    completed += position -> (if (error != null) Left(error) else Right(data))
+                    drain()
+                  }
+                }}
+              } catch { case NonFatal(error) => completed += position -> Left(error) }
+            }
+          } else if (!result.isDone) {
+            if (running.isEmpty && queuedRanges.isEmpty && !completed.contains(consumed)) {
+              // A short read can leave results after a gap. Drop that suffix before opening
+              // a new window so it cannot monopolize the next prefix's buffer budget.
+              discardCompleted()
+              selectWindow()
+            }
+            while (!result.isDone && queuedRanges.nonEmpty && running.size < ParallelReads) {
+              val positions = queuedRanges.head
+              queuedRanges = queuedRanges.tail
+              issueRange(positions)
+              progress = true
+            }
           }
         }
       } finally draining = false

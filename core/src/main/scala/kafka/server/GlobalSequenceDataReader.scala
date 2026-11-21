@@ -28,7 +28,7 @@ import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.record.{FileRecords, MemoryRecords, Records}
 import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.utils.{BufferSupplier, KafkaThread, ThreadUtils, Time}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams}
 import org.apache.kafka.server.util.Scheduler
 import org.apache.kafka.storage.internals.log.LogReadInfo
@@ -45,18 +45,26 @@ private[server] object GlobalSequenceDataReader {
     new ThreadPoolExecutor.AbortPolicy)
 }
 
-/** Copies one complete mapped batch below raw data HW, fenced by topic UUID and leader epoch. */
+/** Reads complete mapped batches below raw data HW, fenced by topic UUID and leader epoch. */
 class GlobalSequenceDataReader private[server](replicas: ReplicaManager, scheduler: Scheduler, time: Time,
                                                workers: ExecutorService = GlobalSequenceDataReader.workers(),
                                                 resources: GlobalSequenceResources = null) extends AutoCloseable {
   import GlobalSequenceFetch._
 
-  private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Data]]()
+  private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[_]]()
   @volatile private var closed = false
 
-  def read(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] = {
-    val result = new CompletableFuture[Data]()
-    val lease = try Option(resources).map(_.acquire(Scope.DATA_READ, batch.partition(), GlobalSequenceResources.BATCH_BYTES))
+  def read(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
+    submit(batch.partition(), deadlineNs) { check =>
+      readPhysicalRange(ReadRange(Vector(batch), 1, minOneBatch = true), epoch, isolation, check).data.head
+    }
+
+  def readRange(range: ReadRange, epoch: Int, deadlineNs: Long, isolation: IsolationLevel): CompletableFuture[RangeResult] =
+    submit(range.partition, deadlineNs)(check => readPhysicalRange(range, epoch, isolation, check))
+
+  private def submit[A](key: PartitionKey, deadlineNs: Long)(read: (() => Unit) => A): CompletableFuture[A] = {
+    val result = new CompletableFuture[A]()
+    val lease = try Option(resources).map(_.acquire(Scope.DATA_READ, key, GlobalSequenceResources.BATCH_BYTES))
     catch { case NonFatal(error) => return CompletableFuture.failedFuture(error) }
     @volatile var completionError: Throwable = null
     val state = new AtomicInteger(0) // queued, running, released
@@ -64,7 +72,7 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
     @volatile var timer: ScheduledFuture[_] = null
     val work: Runnable = () => {
       if (state.compareAndSet(0, 1)) try {
-        if (!result.isDone) try result.complete(readBatch(batch, epoch, isolation, () => {
+        if (!result.isDone) try result.complete(read(() => {
           if (closed || result.isDone || time.nanoseconds() >= deadlineNs)
             throw new TimeoutException("Global data fetch was cancelled or expired")
         })) catch {
@@ -104,21 +112,21 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
     result
   }
 
-  private def readBatch(expected: PhysicalBatch, leaderEpoch: Int, isolation: IsolationLevel, deadline: () => Unit): Data = {
+  private def readPhysicalRange(range: ReadRange, leaderEpoch: Int, isolation: IsolationLevel, deadline: () => Unit): RangeResult = {
     deadline()
     require(leaderEpoch >= 0, "sourceLeaderEpoch must be non-negative")
-    val key = expected.partition()
+    val key = range.partition
     val name = replicas.metadataCache.getTopicName(key.topicId())
     if (name.isEmpty) throw new UnknownTopicIdException("Unknown global sequence source UUID")
     val tp = new TopicIdPartition(key.topicId(), new TopicPartition(name.get(), key.partition()))
     val source = replicas.getPartitionOrException(tp)
     val epoch = Optional.of(Int.box(leaderEpoch))
     val log = source.localLogWithEpochOrThrow(epoch, requireLeader = true)
-    def fetch(offset: Long, bytes: Int): LogReadInfo = {
+    def fetch(offset: Long, bytes: Int, minOne: Boolean = false): LogReadInfo = {
       val params = new FetchParams(FetchRequest.CONSUMER_REPLICA_ID, -1L, 0L, 1, bytes, FetchIsolation.LOG_END, Optional.empty())
       val request = new FetchRequest.PartitionData(key.topicId(), offset, FetchRequest.INVALID_LOG_START_OFFSET,
         bytes, epoch, Optional.empty())
-      source.fetchRecords(params, request, time.milliseconds(), bytes, minOneMessage = bytes > 0, updateFetchState = false)
+      source.fetchRecords(params, request, time.milliseconds(), bytes, minOneMessage = minOne, updateFetchState = false)
     }
     def validate(): LogReadInfo = {
       deadline()
@@ -132,69 +140,100 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
       val offsets = fetch(log.logEndOffset(), 0)
       if (source.localLogWithEpochOrThrow(epoch, requireLeader = true) ne log)
         throw new NotLeaderOrFollowerException("Source log changed while capturing offsets")
-      if (expected.baseOffset() < math.max(offsets.logStartOffset, log.localLogStartOffset()))
-        throw new OffsetOutOfRangeException("The mapped physical batch is no longer available in the local source log")
-      if (expected.lastOffset() >= offsets.highWatermark || expected.lastOffset() >= offsets.logEndOffset)
-        throw new OffsetNotAvailableException("The current source leader has not exposed the entire mapped batch below HW")
       if (offsets.lastStableOffset < 0)
         throw new CorruptRecordException("Source LSO is negative")
       offsets
     }
+    def checkBounds(batch: PhysicalBatch, offsets: LogReadInfo): Unit = {
+      if (batch.baseOffset() < math.max(offsets.logStartOffset, log.localLogStartOffset()))
+        throw new OffsetOutOfRangeException("The mapped physical batch is no longer available in the local source log")
+      if (batch.lastOffset() >= offsets.highWatermark || batch.lastOffset() >= offsets.logEndOffset)
+        throw new OffsetNotAvailableException("The current source leader has not exposed the entire mapped batch below HW")
+    }
     val snapshot = validate()
-    // Partition captures HW before LSO. Replication may advance HW between those reads; cap LSO
-    // at the earlier HW rather than treating a valid advance as corruption or exposing newer data.
     val stableOffset = math.min(snapshot.highWatermark, snapshot.lastStableOffset)
-    def revalidate(): Unit = {
-      val current = validate()
-      if (current.highWatermark < snapshot.highWatermark ||
-        (isolation == READ_COMMITTED && math.min(current.highWatermark, current.lastStableOffset) < stableOffset))
-        throw new NotLeaderOrFollowerException("Source HW or LSO regressed during global fetch")
-    }
-    if (isolation == READ_COMMITTED && expected.lastOffset() >= stableOffset) {
-      revalidate()
-      return Data(MemoryRecords.EMPTY, leaderEpoch, snapshot.highWatermark, stableOffset, Pending)
-    }
+    val first = range.batches.head
+    val results = Vector.newBuilder[Data]
+    val buffers = BufferSupplier.create()
+    var checked = 0
+    var failure: Option[Throwable] = None
+    def isPending(batch: PhysicalBatch): Boolean = isolation == READ_COMMITTED && batch.lastOffset() >= stableOffset
+    def pendingBatch: Data = Data(MemoryRecords.EMPTY, leaderEpoch, snapshot.highWatermark, stableOffset, Pending)
     try {
-      val info = fetch(expected.baseOffset(), 1)
-      if (info.divergingEpoch.isPresent) throw new NotLeaderOrFollowerException("Source log diverged during global fetch")
-      if (info.fetchedData.firstEntryIncomplete) throw new CorruptRecordException("Incomplete first physical batch")
-      val original = copy(info.fetchedData.records)
-      validateBatch(expected, original)
-      val buffers = BufferSupplier.create()
-      try {
-        val iterator = original.batches().iterator().next().skipKeyValueIterator(buffers)
-        var offset = expected.baseOffset()
-        try {
-          while (iterator.hasNext) {
+      checkBounds(first, snapshot)
+      if (isPending(first)) {
+        results += pendingBatch
+        checked = 1
+      } else {
+        val info = fetch(first.baseOffset(), range.maxBytes, range.minOneBatch)
+        if (info.divergingEpoch.isPresent) throw new NotLeaderOrFollowerException("Source log diverged during global fetch")
+        if (!info.fetchedData.firstEntryIncomplete) {
+          val original = copy(info.fetchedData.records)
+          val batches = original.batches().iterator()
+          var position = 0
+          var finished = false
+          while (checked < range.batches.size && !finished) {
             deadline()
-            if (iterator.next().offset() != offset || offset > expected.lastOffset())
-              throw new CorruptRecordException("Mapped source records contain missing or out-of-order offsets")
-            offset += 1
+            val expected = range.batches(checked)
+            checkBounds(expected, snapshot)
+            if (isPending(expected)) {
+              results += pendingBatch
+              checked += 1
+              finished = true
+            } else if (!batches.hasNext) {
+              if (checked == 0 && range.minOneBatch)
+                throw new CorruptRecordException("Missing first mapped physical batch")
+              finished = true
+            } else {
+              val batch = batches.next()
+              val size = batch.sizeInBytes()
+              val records = if (size == original.sizeInBytes()) original else {
+                val source = original.buffer()
+                source.position(position)
+                source.limit(position + size)
+                val target = ByteBuffer.allocate(size)
+                target.put(source).flip()
+                MemoryRecords.readableRecords(target)
+              }
+              validateBatch(expected, records)
+              val iterator = batch.skipKeyValueIterator(buffers)
+              var offset = expected.baseOffset()
+              try {
+                while (iterator.hasNext) {
+                  deadline()
+                  if (iterator.next().offset() != offset || offset > expected.lastOffset())
+                    throw new CorruptRecordException("Mapped source records contain missing or out-of-order offsets")
+                  offset += 1
+                }
+                if (offset != expected.lastOffset() + 1)
+                  throw new CorruptRecordException("Mapped source record count is inconsistent")
+              } finally iterator.close()
+              val aborted = isolation == READ_COMMITTED && batch.isTransactional &&
+                log.isAborted(batch.producerId(), expected.baseOffset(), expected.lastOffset(), () => deadline())
+              results += Data(if (aborted) MemoryRecords.EMPTY else records, leaderEpoch, snapshot.highWatermark,
+                stableOffset, if (aborted) Aborted else Visible)
+              position += size
+              checked += 1
+            }
           }
-          if (offset != expected.lastOffset() + 1) throw new CorruptRecordException("Mapped source record count is inconsistent")
-        } finally iterator.close()
-      } finally buffers.close()
-      val batch = original.batches().iterator().next()
-      // Use full transaction ranges: matching only producer ID/first offset can confuse a previous
-      // aborted transaction with a later committed one from the same producer, especially across pages.
-      val aborted = isolation == READ_COMMITTED && batch.isTransactional &&
-        log.isAborted(batch.producerId(), expected.baseOffset(), expected.lastOffset(), () => deadline())
-      revalidate()
-      Data(if (aborted) MemoryRecords.EMPTY else original, leaderEpoch, snapshot.highWatermark,
-        stableOffset, if (aborted) Aborted else Visible)
+        } else if (range.minOneBatch) throw new CorruptRecordException("Incomplete first physical batch")
+      }
     } catch {
-      case NonFatal(error) =>
-        revalidate()
-        error match {
-          case io: java.io.IOException => throw new KafkaStorageException("Failed to read mapped global sequence data", io)
-          case _ => throw error
-        }
-    }
+      case error: java.io.IOException => failure = Some(new KafkaStorageException("Failed to read mapped global sequence data", error))
+      case NonFatal(error) => failure = Some(error)
+    } finally buffers.close()
+
+    val current = validate()
+    if (current.highWatermark < snapshot.highWatermark ||
+      (isolation == READ_COMMITTED && math.min(current.highWatermark, current.lastStableOffset) < stableOffset))
+      throw new NotLeaderOrFollowerException("Source HW or LSO regressed during global fetch")
+    checkBounds(first, current)
+    if (checked == 0) failure.foreach(error => throw error)
+    RangeResult(results.result(), failure)
   }
 
   private def copy(records: Records): MemoryRecords = {
     if (records.sizeInBytes() > MaxBatchBytes) throw new RecordTooLargeException("Global fetch batch exceeds 8 MiB")
-    // A one-byte minOneMessage fetch returns exactly one complete batch. Never retain or close the live FileRecords slice.
     val buffer = ByteBuffer.allocate(records.sizeInBytes())
     records match {
       case memory: MemoryRecords => buffer.put(memory.buffer().duplicate()); buffer.flip()

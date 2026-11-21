@@ -23,13 +23,12 @@ import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.{Even
 import org.apache.kafka.common.{IsolationLevel, Node}
 import org.apache.kafka.common.IsolationLevel.READ_UNCOMMITTED
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
-import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, FencedLeaderEpochException, InvalidRequestException, NotLeaderOrFollowerException, TimeoutException, UnknownTopicIdException}
+import org.apache.kafka.common.errors.{CoordinatorNotAvailableException, FencedLeaderEpochException, InvalidRequestException, NotLeaderOrFollowerException, TimeoutException, UnknownTopicIdException, UnsupportedVersionException}
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.protocol.Errors
-import org.apache.kafka.common.requests.AbstractResponse
 import org.apache.kafka.common.utils.Time
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.PhysicalBatch
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
 import org.apache.kafka.image.MetadataImage
 import org.apache.kafka.server.util.Scheduler
 
@@ -47,21 +46,22 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
                                                scheduler: Scheduler, time: Time, resources: GlobalSequenceResources = null,
                                                ownsTransport: Boolean = false) extends AutoCloseable {
   import GlobalSequenceDataRouter._
-  import GlobalSequenceFetch.Data
-  private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[Data]]()
+  import GlobalSequenceFetch.{Data, RangeResult, ReadRange}
+  private val pending = ConcurrentHashMap.newKeySet[CompletableFuture[_]]()
+  private val legacyBrokerEpochs = new ConcurrentHashMap[Int, java.lang.Long]()
   @volatile private var closed = false
 
   def readLocal(batch: PhysicalBatch, epoch: Int, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
     reader.read(batch, epoch, deadlineNs, isolation)
 
-  private def resolve(batch: PhysicalBatch): Location = {
+  private def resolve(key: PartitionKey): Location = {
     val image = metadata()
-    val topic = image.topics().getTopic(batch.partition().topicId())
+    val topic = image.topics().getTopic(key.topicId())
     if (topic == null) throw new UnknownTopicIdException("Mapped source topic UUID is unknown")
     val config = image.configs().configProperties(new ConfigResource(ConfigResource.Type.TOPIC, topic.name()))
     if (Topic.isInternal(topic.name()) || !java.lang.Boolean.parseBoolean(config.getProperty(TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG)))
       throw new InvalidRequestException("Global sequence is not enabled for the source topic")
-    val partition = topic.partitions().get(batch.partition().partition())
+    val partition = topic.partitions().get(key.partition())
     if (partition == null || partition.leader < 0) throw new NotLeaderOrFollowerException("Mapped source partition has no leader")
     val broker = image.cluster().broker(partition.leader)
     if (broker == null || broker.fenced()) throw new NotLeaderOrFollowerException("Mapped source broker is unavailable")
@@ -70,12 +70,83 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
     Location(node.get(), partition.leaderEpoch, broker.epoch())
   }
 
-  def read(batch: PhysicalBatch, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] = {
-    GlobalSequenceAdmission.run(resources, Scope.DATA_ROUTE, batch.partition()) { readAdmitted(batch, deadlineNs, isolation) }
+  def readLocalRange(range: ReadRange, epoch: Int, deadlineNs: Long, isolation: IsolationLevel): CompletableFuture[RangeResult] =
+    reader.readRange(range, epoch, deadlineNs, isolation)
+
+  def read(batch: PhysicalBatch, deadlineNs: Long, isolation: IsolationLevel = READ_UNCOMMITTED): CompletableFuture[Data] =
+    route(batch.partition(), deadlineNs) { (location, timeout, track) =>
+      if (location.node.id() == brokerId) {
+        val local = readLocal(batch, location.leaderEpoch, deadlineNs, isolation)
+        track(local)
+        local.thenApply[Data] { value =>
+          if (value.sourceLeaderEpoch != location.leaderEpoch)
+            throw new NotLeaderOrFollowerException("Source epoch changed while reading the mapped batch")
+          GlobalSequenceFetch.validateData(batch, value, isolation)
+          value
+        }
+      } else {
+        val remote = transport.send(location.node, GlobalSequenceFetch.dataRequest(batch, location.leaderEpoch, timeout, isolation))
+        track(remote)
+        remote.thenApply[Data](response => GlobalSequenceFetch.decode(batch, location.leaderEpoch, response, isolation))
+      }
+    }
+
+  def readRange(range: ReadRange, deadlineNs: Long, isolation: IsolationLevel): CompletableFuture[RangeResult] =
+    route[RangeResult](range.partition, deadlineNs) { (location, timeout, track) =>
+      if (location.node.id() == brokerId) {
+        val local = readLocalRange(range, location.leaderEpoch, deadlineNs, isolation)
+        track(local)
+        local.thenApply[RangeResult](retryablePrefix)
+      } else {
+        def readLegacy(): CompletableFuture[RangeResult] = {
+          // Older peers do not enforce a per-range byte limit. Read only at the next global position.
+          if (!range.minOneBatch) CompletableFuture.completedFuture(RangeResult(Vector.empty))
+          else {
+            val first = range.batches.head
+            val remaining = math.max(1L, (deadlineNs - time.nanoseconds() + 999999L) / 1000000L).toInt
+            val legacy = transport.send(location.node, GlobalSequenceFetch.dataRequest(first, location.leaderEpoch, remaining, isolation))
+            track(legacy)
+            legacy.thenApply[RangeResult](reply => RangeResult(Vector(
+              GlobalSequenceFetch.decode(first, location.leaderEpoch, reply, isolation))))
+          }
+        }
+
+        if (Option(legacyBrokerEpochs.get(location.node.id())).exists(_.longValue() == location.brokerEpoch)) readLegacy()
+        else {
+          val remote = transport.send(location.node, GlobalSequenceFetch.rangeRequest(range, location.leaderEpoch, timeout, isolation))
+          track(remote)
+          remote.handle[CompletableFuture[RangeResult]] { (response, error) =>
+            if (error == null)
+              CompletableFuture.completedFuture(retryablePrefix(GlobalSequenceFetch.decodeRange(range, location.leaderEpoch, response, isolation)))
+            else if (Errors.maybeUnwrapException(error).isInstanceOf[UnsupportedVersionException]) {
+              legacyBrokerEpochs.put(location.node.id(), Long.box(location.brokerEpoch))
+              readLegacy()
+            } else CompletableFuture.failedFuture(error)
+          }.thenCompose[RangeResult]((next: CompletableFuture[RangeResult]) => next)
+        }
+      }
+    }
+
+  private def retryablePrefix(value: RangeResult): RangeResult = value.error match {
+    case Some(error) if isRetryable(error) =>
+      if (value.data.isEmpty) throw error
+      value.copy(error = None)
+    case _ => value
   }
 
-  private def readAdmitted(batch: PhysicalBatch, deadlineNs: Long, isolation: IsolationLevel): CompletableFuture[Data] = {
-    val result = new CompletableFuture[Data]()
+  private def isRetryable(cause: Throwable): Boolean = {
+    val code = Errors.forException(cause)
+    IndexRoutingManager.isRetryable(cause) || cause.isInstanceOf[FencedLeaderEpochException] ||
+      code == Errors.UNKNOWN_LEADER_EPOCH || code == Errors.OFFSET_NOT_AVAILABLE
+  }
+
+  private def route[A](key: PartitionKey, deadlineNs: Long)
+                      (readAt: (Location, Int, CompletableFuture[_] => Unit) => CompletableFuture[A]): CompletableFuture[A] =
+    GlobalSequenceAdmission.run(resources, Scope.DATA_ROUTE, key) { readAdmitted(key, deadlineNs)(readAt) }
+
+  private def readAdmitted[A](key: PartitionKey, deadlineNs: Long)
+                             (readAt: (Location, Int, CompletableFuture[_] => Unit) => CompletableFuture[A]): CompletableFuture[A] = {
+    val result = new CompletableFuture[A]()
     @volatile var timer: ScheduledFuture[_] = null
     @volatile var retryTimer: ScheduledFuture[_] = null
     @volatile var active: CompletableFuture[_] = null
@@ -90,9 +161,7 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
     }
     def retry(error: Throwable, attempt: Int): Unit = {
       val cause = Errors.maybeUnwrapException(error)
-      val code = Errors.forException(cause)
-      if (IndexRoutingManager.isRetryable(cause) || cause.isInstanceOf[FencedLeaderEpochException] ||
-        code == Errors.UNKNOWN_LEADER_EPOCH || code == Errors.OFFSET_NOT_AVAILABLE) {
+      if (isRetryable(cause)) {
         Option(resources).foreach(_.event(Event.RPC_RETRY, 0))
         if (remainingMs == 0) timeout()
         else {
@@ -110,25 +179,18 @@ class GlobalSequenceDataRouter private[server](brokerId: Int, listener: Listener
       }
       if (remainingMs == 0) { timeout(); return }
       try {
-        val route = resolve(batch)
-        val operation = if (route.node.id() == brokerId) {
-          val local = readLocal(batch, route.leaderEpoch, deadlineNs, isolation)
-          active = local
-          local
-        } else {
-          val remote = transport.send(route.node, GlobalSequenceFetch.dataRequest(batch, route.leaderEpoch, remainingMs.toInt, isolation))
-          active = remote
-          remote.thenApply[Data]((response: AbstractResponse) => GlobalSequenceFetch.decode(batch, route.leaderEpoch, response, isolation))
-        }
-        if (result.isDone) active.cancel(false)
+        val location = resolve(key)
+        val operation = readAt(location, remainingMs.toInt, future => {
+          active = future
+          if (result.isDone) future.cancel(false)
+        })
         operation.whenComplete { (value, error) =>
           if (!result.isDone) {
             if (remainingMs == 0) timeout()
             else if (error != null) retry(error, attempt)
             else try {
-              if (resolve(batch) != route || value.sourceLeaderEpoch != route.leaderEpoch)
+              if (resolve(key) != location)
                 throw new NotLeaderOrFollowerException("Source route changed while reading the mapped batch")
-              GlobalSequenceFetch.validateData(batch, value, isolation)
               result.complete(value)
             } catch { case NonFatal(failure) => retry(failure, attempt) }
           }

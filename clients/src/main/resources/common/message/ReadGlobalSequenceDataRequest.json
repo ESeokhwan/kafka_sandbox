@@ -17,7 +17,7 @@
   "apiKey": 99,
   "type": "request",
   "name": "ReadGlobalSequenceDataRequest",
-  "validVersions": "0-1",
+  "validVersions": "0-2",
   "flexibleVersions": "0+",
   "listeners": [
     "broker"
@@ -73,6 +73,17 @@
       "versions": "1+",
       "about": "READ_UNCOMMITTED (0) or READ_COMMITTED (1).",
       "default": 0
+    },
+    { "name": "RangeMaxBytes", "type": "int32", "versions": "2+", "default": 0,
+      "about": "Soft byte limit for the physical range." },
+    { "name": "MinOneBatch", "type": "bool", "versions": "2+", "default": false,
+      "about": "Whether the first mapped batch may exceed RangeMaxBytes." },
+    { "name": "Batches", "type": "[]BatchBoundary", "versions": "2+",
+      "about": "Consecutive original physical batch boundaries.", "fields": [
+        { "name": "BaseOffset", "type": "int64", "versions": "2+" },
+        { "name": "LastOffset", "type": "int64", "versions": "2+" },
+        { "name": "RecordCount", "type": "int32", "versions": "2+" }
+      ]
     }
   ]
 }
