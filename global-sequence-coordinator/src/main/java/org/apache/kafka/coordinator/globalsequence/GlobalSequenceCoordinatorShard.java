@@ -33,6 +33,7 @@ import org.apache.kafka.coordinator.globalsequence.generated.IndexerFenceValue;
 import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataKey;
 import org.apache.kafka.coordinator.globalsequence.generated.TopicMetadataValue;
 import org.apache.kafka.image.MetadataImage;
+import org.apache.kafka.server.common.ApiMessageAndVersion;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 import org.apache.kafka.timeline.TimelineLong;
@@ -50,6 +51,7 @@ import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordina
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.newTopicMetadataRecord;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.requireNonNegative;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.requireNonZeroId;
+import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.validateBatchRecordCounts;
 import static org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.validatePhysicalBatch;
 
 /**
@@ -94,13 +96,18 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         }
     }
 
-    /** predecessorBaseOffset is -1 for the first non-control batch, even after control-only data. */
+    /** predecessorBaseOffset identifies the previous index entry in this partition, or -1 for the first entry. */
     public record AppendRequest(
         PhysicalBatch batch,
         long predecessorBaseOffset,
         long dataHighWatermark,
-        IndexerIdentity indexer
+        IndexerIdentity indexer,
+        List<Integer> batchRecordCounts
     ) {
+        public AppendRequest(PhysicalBatch batch, long predecessorBaseOffset, long dataHighWatermark, IndexerIdentity indexer) {
+            this(batch, predecessorBaseOffset, dataHighWatermark, indexer, List.of());
+        }
+
         public AppendRequest {
             Objects.requireNonNull(batch, "batch");
             Objects.requireNonNull(indexer, "indexer");
@@ -110,6 +117,8 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
             if (dataHighWatermark <= batch.lastOffset()) {
                 throw new IllegalArgumentException("The entire physical batch must be below the data high watermark");
             }
+            batchRecordCounts = List.copyOf(batchRecordCounts);
+            validateBatchRecordCounts(batch.recordCount(), batchRecordCounts);
         }
     }
 
@@ -180,7 +189,8 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
 
     private sealed interface PendingChange permits Allocation, Fence { }
 
-    private record Allocation(PhysicalBatch batch, long globalBaseOffset, long endOffset) implements PendingChange {
+    private record Allocation(PhysicalBatch batch, long globalBaseOffset, long endOffset, List<Integer> batchRecordCounts)
+        implements PendingChange {
         long globalEndOffset() {
             return globalBaseOffset + batch.recordCount();
         }
@@ -302,12 +312,12 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         PhysicalBatch batch = request.batch();
         Allocation committed = committedAllocations.get(batch.partition());
         if (committed != null && batch.baseOffset() <= committed.batch().baseOffset()) {
-            validateCommittedRetry(batch, committed.batch());
+            validateCommittedRetry(request, committed);
             return response(AppendStatus.ALREADY_INDEXED, batch, context);
         }
         Allocation pending = pendingAllocations.get(batch.id());
         if (pending != null) {
-            requireSameBatch(batch, pending.batch());
+            requireSameBatch(request, pending);
             return indexedResponse(batch, pending.globalBaseOffset(), context, List.of());
         }
         if (committed != null && batch.baseOffset() <= committed.batch().lastOffset()) {
@@ -323,7 +333,7 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
 
         long globalBaseOffset = nextGlobalOffset(batch.partition().topicId());
         CoordinatorRecord indexRecord = newBatchIndexRecord(batch.partition().topicId(), batch.partition().partition(),
-            batch.baseOffset(), batch.lastOffset(), batch.recordCount(), globalBaseOffset);
+            batch.baseOffset(), batch.lastOffset(), batch.recordCount(), globalBaseOffset, request.batchRecordCounts());
         return indexedResponse(batch, globalBaseOffset, context, List.of(indexRecord,
             newTopicMetadataRecord(batch.partition().topicId(), globalBaseOffset + batch.recordCount())));
     }
@@ -347,17 +357,19 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
             OptionalLong.of(globalBaseOffset), Optional.of(batch), context.leaderEpoch()));
     }
 
-    private static void validateCommittedRetry(PhysicalBatch batch, PhysicalBatch committed) {
+    private static void validateCommittedRetry(AppendRequest request, Allocation allocation) {
+        PhysicalBatch batch = request.batch();
+        PhysicalBatch committed = allocation.batch();
         if (batch.baseOffset() == committed.baseOffset()) {
-            requireSameBatch(batch, committed);
+            requireSameBatch(request, allocation);
         } else if (batch.lastOffset() >= committed.baseOffset()) {
             throw new IllegalArgumentException("The old physical batch overlaps the latest committed batch");
         }
     }
 
-    private static void requireSameBatch(PhysicalBatch batch, PhysicalBatch known) {
-        if (!batch.equals(known)) {
-            throw new IllegalArgumentException("The same physical batch identity has conflicting bounds or record count");
+    private static void requireSameBatch(AppendRequest request, Allocation known) {
+        if (!request.batch().equals(known.batch()) || !request.batchRecordCounts().equals(known.batchRecordCounts())) {
+            throw new IllegalArgumentException("The same physical batch identity has conflicting bounds or batch boundaries");
         }
     }
 
@@ -399,9 +411,7 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         if (record.value() == null) {
             throw new IllegalStateException("Index tombstones are not supported without a checkpoint/GC contract");
         }
-        if (record.value().version() != 0) {
-            throw new UnsupportedVersionException("Unsupported global sequence record version " + record.value().version());
-        }
+        validateRecordVersion(record.value());
         CoordinatorRecordType type = CoordinatorRecordType.fromId(record.key().apiKey());
         if (stagedAllocation != null && type != CoordinatorRecordType.TOPIC_METADATA) {
             throw new IllegalStateException("BatchIndex must be immediately followed by TopicMetadata");
@@ -412,6 +422,13 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
             case INDEXER_FENCE -> replayFence(offset, (IndexerFenceKey) record.key(), (IndexerFenceValue) record.value().message());
         }
         nextReplayOffset.set(offset + 1);
+    }
+
+    private static void validateRecordVersion(ApiMessageAndVersion value) {
+        short version = value.version();
+        if (version < value.message().lowestSupportedVersion() || version > value.message().highestSupportedVersion()) {
+            throw new UnsupportedVersionException("Unsupported global sequence record version " + version);
+        }
     }
 
     private void replayBatch(long offset, BatchIndexKey key, BatchIndexValue value) {
@@ -428,7 +445,8 @@ public class GlobalSequenceCoordinatorShard implements CoordinatorShard<Coordina
         if (previous != null && batch.baseOffset() <= previous.batch().lastOffset()) {
             throw new IllegalStateException("BatchIndex physical ranges must be strictly ordered and non-overlapping");
         }
-        stagedAllocation = new Allocation(batch, key.globalBaseOffset(), Math.addExact(offset, 2));
+        validateBatchRecordCounts(batch.recordCount(), value.batchRecordCounts());
+        stagedAllocation = new Allocation(batch, key.globalBaseOffset(), Math.addExact(offset, 2), List.copyOf(value.batchRecordCounts()));
     }
 
     private void replayMetadata(long offset, TopicMetadataKey key, TopicMetadataValue value) {

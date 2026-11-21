@@ -29,6 +29,7 @@ import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.utils.{BufferSupplier, KafkaThread, ThreadUtils, Time}
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorConfig, GlobalSequenceCoordinatorRecordSerde, GlobalSequenceLookup}
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{PartitionKey, PhysicalBatch}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorRecordHelpers.validateBatchRecordCounts
 import org.apache.kafka.coordinator.globalsequence.GlobalSequenceLookup.{Mapping, Position, Request, Result, Snapshot}
 import org.apache.kafka.coordinator.globalsequence.generated.{BatchIndexKey, BatchIndexValue, IndexerFenceKey, TopicMetadataKey, TopicMetadataValue}
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams}
@@ -173,13 +174,41 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
       val start = if (position.globalBaseOffset() <= request.startOffset() &&
         position.globalBaseOffset() < snapshot.committedGlobalEnd() && position.indexOffset() <= snapshot.indexHighWatermark() - 2)
         position else Position.START
-      var cursor = cachedEnd.map(_.indexEndOffset).getOrElse(start.indexOffset())
-      var globalCursor = cachedEnd.map(_.mapping.globalEndOffset()).getOrElse(start.globalBaseOffset())
+      // An interior cached batch may be followed by an uncached batch in the same index entry.
+      val cachedRangeStart = cachedEnd.flatMap(_.rangeStart)
+      var cursor = cachedRangeStart.map(_.indexOffset()).orElse(cachedEnd.map(_.indexEndOffset)).getOrElse(start.indexOffset())
+      var globalCursor = cachedRangeStart.map(_.globalBaseOffset()).orElse(cachedEnd.map(_.mapping.globalEndOffset()))
+        .getOrElse(start.globalBaseOffset())
       var firstBatch = true
-      var verifyPosition = cachedEnd.isEmpty && start != Position.START
+      var verifyPosition = cachedRangeStart.nonEmpty || (cachedEnd.isEmpty && start != Position.START)
       var staged: Option[Mapping] = None
+      var stagedCounts = java.util.List.of[Integer]()
       var stagedOffset = -1L
       var done = scanFrom >= end || selected.size >= request.maxBatches()
+
+      def selectBatches(mapping: Mapping, indexEnd: Long): Unit = {
+        if (stagedCounts.isEmpty) {
+          selected += mapping
+          additions += Entry(mapping, indexEnd)
+        } else {
+          val range = mapping.batch()
+          val rangeStart = Some(new Position(mapping.globalBaseOffset(), stagedOffset))
+          val counts = stagedCounts.iterator()
+          var global = mapping.globalBaseOffset()
+          while (counts.hasNext && global < end && selected.size < request.maxBatches()) {
+            checkDeadline()
+            val count = counts.next().intValue()
+            if (global + count > scanFrom) {
+              val base = range.baseOffset() + (global - mapping.globalBaseOffset())
+              val original = new Mapping(global, new PhysicalBatch(range.partition(), base, base + count - 1, count))
+              selected += original
+              additions += Entry(original, indexEnd, if (counts.hasNext) rangeStart else None)
+            }
+            global += count
+          }
+        }
+      }
+
       val buffers = BufferSupplier.create()
       try {
         while (!done && cursor < snapshot.indexHighWatermark()) {
@@ -230,6 +259,8 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
                     val value = decoded.value().message().asInstanceOf[BatchIndexValue]
                     staged = Some(new Mapping(key.globalBaseOffset(), new PhysicalBatch(new PartitionKey(key.topicId(), value.physicalPartition()),
                       value.physicalBaseOffset(), value.physicalLastOffset(), value.recordCount())))
+                    stagedCounts = value.batchRecordCounts()
+                    validateBatchRecordCounts(value.recordCount(), stagedCounts)
                     stagedOffset = cursor
                   case key: TopicMetadataKey =>
                     val value = decoded.value().message().asInstanceOf[TopicMetadataValue]
@@ -241,8 +272,7 @@ class GlobalSequenceIndexReader private[server](replicas: ReplicaManager, schedu
                         throw new CorruptRecordException("Global index range contradicts the committed snapshot")
                       globalCursor = mapping.globalEndOffset()
                       if (mapping.globalEndOffset() > scanFrom && mapping.globalBaseOffset() < end) {
-                        selected += mapping
-                        additions += Entry(mapping, cursor + 1)
+                        selectBatches(mapping, cursor + 1)
                       }
                       done = globalCursor >= end || selected.size >= request.maxBatches()
                     }

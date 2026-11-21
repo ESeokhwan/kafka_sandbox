@@ -107,7 +107,7 @@ class GlobalSequenceCoordinatorRecordSerdeTest {
     @ParameterizedTest
     @MethodSource("records")
     void testUnknownValueVersionsFail(CoordinatorRecord record) {
-        for (short version : new short[] {-1, 1}) {
+        for (short version : new short[] {-1, (short) (record.value().message().highestSupportedVersion() + 1)}) {
             assertThrows(Deserializer.UnknownRecordVersionException.class, () -> serde.deserialize(
                 ByteBuffer.wrap(serde.serializeKey(record)),
                 ByteBuffer.allocate(2).putShort(version).flip()));

@@ -87,7 +87,7 @@ class GlobalSequencePartitionIndexerTest {
     val registrations = mutable.ArrayBuffer.empty[(RegistrationRequest, CompletableFuture[RoutedResult[RegistrationResponse]])]
     val appends = mutable.ArrayBuffer.empty[(AppendRequest, CompletableFuture[RoutedResult[AppendResponse]])]
     val reads = mutable.ArrayBuffer.empty[Long]
-    var read: Long => ReadResult = offset => ReadResult(sourceKey, 3, offset, offset, None, AWAIT_HIGH_WATERMARK)
+    var read: Long => ReadResult = offset => ReadResult(sourceKey, 3, offset, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
     when(source.maybeAddListener(any[PartitionListener])).thenAnswer { invocation =>
       listener = invocation.getArgument[PartitionListener](0)
       true
@@ -138,7 +138,7 @@ class GlobalSequencePartitionIndexerTest {
       assertTrue(reads.isEmpty, "Do not read before post-barrier progress arrives")
       describe(progress, Some(owner))
     }
-    def batch(value: PhysicalBatch): ReadResult = ReadResult(sourceKey, 3, 20, value.resumeOffset(), Some(value), BATCH)
+    def batch(value: PhysicalBatch): ReadResult = ReadResult(sourceKey, 3, 20, value.resumeOffset(), Vector(value), BATCH)
     def completeAppend(status: AppendStatus = AppendStatus.INDEXED): Unit = {
       val request = appends.last._1
       val global = if (status == AppendStatus.INDEXED) OptionalLong.of(0) else OptionalLong.empty()
@@ -168,7 +168,7 @@ class GlobalSequencePartitionIndexerTest {
   def testWorkerAndRpcOverloadRetainTheIdenticalAppendAndResume(): Unit = {
     val c = new Context
     try {
-      c.read = offset => if (offset == 0) c.batch(a) else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+      c.read = offset => if (offset == 0) c.batch(a) else ReadResult(key, 3, 20, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
       c.start()
       val original = c.appends.head._1
       c.executor.reject = true
@@ -197,7 +197,7 @@ class GlobalSequencePartitionIndexerTest {
       val c = new Context
       try {
         c.read = offset => if (offset == 0) c.batch(a)
-          else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+          else ReadResult(key, 3, 20, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
         c.start()
         val wait = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(1))
         assertFalse(wait.isDone)
@@ -231,7 +231,7 @@ class GlobalSequencePartitionIndexerTest {
     val c = new Context
     try {
       c.read = offset => if (offset == 0) c.batch(a)
-        else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+        else ReadResult(key, 3, 20, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
       c.start()
       val wait = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.MILLISECONDS.toNanos(20))
       c.time.sleep(20)
@@ -248,7 +248,7 @@ class GlobalSequencePartitionIndexerTest {
     val c = new Context
     try {
       c.read = offset => if (offset == 0) c.batch(a) else if (offset == 3) c.batch(b)
-        else ReadResult(key, 3, 20, offset, None, AWAIT_HIGH_WATERMARK)
+        else ReadResult(key, 3, 20, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
       c.start()
       assertEquals(Seq(0L), c.reads.toSeq)
       assertEquals(-1L, c.appends.head._1.predecessorBaseOffset())
@@ -263,6 +263,41 @@ class GlobalSequencePartitionIndexerTest {
       c.completeAppend(AppendStatus.ALREADY_INDEXED)
       assertEquals(Seq(0L, 3L, 5L), c.reads.toSeq)
       assertFalse(c.indexer.isStopped)
+    } finally c.close()
+  }
+
+  @Test
+  def testOneReadMergesContiguousBatchesAndSplitsAtControlOffsets(): Unit = {
+    val c = new Context
+    val third = new PhysicalBatch(key, 6, 7, 2)
+    val merged = new PhysicalBatch(key, 0, 4, 5)
+    try {
+      c.read = offset => if (offset == 0) ReadResult(key, 3, 20, 9, Vector(a, b, third), BATCH)
+        else ReadResult(key, 3, 20, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
+      c.start()
+      val waitingForA = c.indexer.awaitIndexed(a.lastOffset(), TimeUnit.SECONDS.toNanos(5))
+      val waitingForB = c.indexer.awaitIndexed(b.lastOffset(), TimeUnit.SECONDS.toNanos(5))
+      val pending = c.appends.head._1
+      assertEquals(merged, pending.batch())
+      assertEquals(java.util.List.of(Int.box(3), Int.box(2)), pending.batchRecordCounts())
+      assertFalse(waitingForA.isDone)
+      assertFalse(waitingForB.isDone)
+      c.appends.head._2.completeExceptionally(new TimeoutException("response lost"))
+      c.executor.runAll()
+      assertEquals(1, c.appends.size)
+      c.time.sleep(100)
+      c.executor.runAll()
+      assertSame(pending, c.appends.last._1)
+      assertFalse(waitingForB.isDone)
+      assertEquals(Seq(0L), c.reads.toSeq)
+      c.completeAppend(AppendStatus.ALREADY_INDEXED)
+      assertTrue(waitingForA.isDone)
+      assertTrue(waitingForB.isDone)
+      assertEquals(Seq(merged, merged, third), c.appends.map(_._1.batch()).toSeq)
+      assertEquals(Seq(-1L, -1L, 0L), c.appends.map(_._1.predecessorBaseOffset()).toSeq)
+      assertEquals(Seq(0L), c.reads.toSeq)
+      c.completeAppend()
+      assertEquals(Seq(0L, 9L), c.reads.toSeq)
     } finally c.close()
   }
 
@@ -335,7 +370,7 @@ class GlobalSequencePartitionIndexerTest {
     try {
       val previous = new PhysicalBatch(key, 4, 6, 3)
       val next = new PhysicalBatch(key, 9, 10, 2)
-      c.read = offset => if (offset == 7) ReadResult(key, 3, 20, 9, None, CONTINUE) else c.batch(next)
+      c.read = offset => if (offset == 7) ReadResult(key, 3, 20, 9, Vector.empty, CONTINUE) else c.batch(next)
       c.start(Some(previous))
       assertEquals(Seq(7L, 9L), c.reads.toSeq)
       assertEquals(1, c.appends.size)
@@ -352,7 +387,7 @@ class GlobalSequencePartitionIndexerTest {
         if (c.reads.size == 1) {
           c.listener.onHighWatermarkUpdated(tp, 3)
           assertEquals(1, c.reads.size)
-          ReadResult(key, 3, 0, offset, None, AWAIT_HIGH_WATERMARK)
+          ReadResult(key, 3, 0, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
         } else c.batch(a)
       }
       c.start()
@@ -365,7 +400,7 @@ class GlobalSequencePartitionIndexerTest {
   def testMidBatchHighWatermarkWaitsForAnotherNotification(): Unit = {
     val c = new Context
     try {
-      c.read = offset => ReadResult(key, 3, 2, offset, None, AWAIT_HIGH_WATERMARK)
+      c.read = offset => ReadResult(key, 3, 2, offset, Vector.empty, AWAIT_HIGH_WATERMARK)
       c.start()
       assertEquals(Seq(0L), c.reads.toSeq)
       c.read = _ => c.batch(a)
@@ -515,18 +550,21 @@ class GlobalSequencePartitionIndexerTest {
   @Test
   def testObsoleteQueuedAppendSuccessUsesBarrierProgressBeforeReadingNextBatch(): Unit = {
     val c = new Context
+    val merged = new PhysicalBatch(key, 0, 4, 5)
+    val next = new PhysicalBatch(key, 6, 7, 2)
     try {
-      c.read = offset => if (offset == 0) c.batch(a) else c.batch(b)
+      c.read = offset => if (offset == 0) ReadResult(key, 3, 20, 8, Vector(a, b, next), BATCH) else c.batch(next)
       c.start()
-      c.appends.last._2.complete(RoutedResult(new AppendResponse(AppendStatus.INDEXED, a, OptionalLong.of(0), Optional.of(a), 10), route))
+      c.appends.last._2.complete(RoutedResult(
+        new AppendResponse(AppendStatus.INDEXED, merged, OptionalLong.of(0), Optional.of(merged), 10), route))
       c.currentRoute = route.copy(leaderEpoch = 11)
       c.executor.runAll()
       assertEquals(Seq(0L), c.reads.toSeq)
       assertSame(c.registrations.head._1, c.registrations.last._1)
       c.registered()
-      c.describe(Some(a), Some(c.owner))
-      assertEquals(Seq(0L, 3L), c.reads.toSeq)
-      assertEquals(b, c.appends.last._1.batch())
+      c.describe(Some(merged), Some(c.owner))
+      assertEquals(Seq(0L, 5L), c.reads.toSeq)
+      assertEquals(next, c.appends.last._1.batch())
       assertEquals(0L, c.appends.last._1.predecessorBaseOffset())
     } finally c.close()
   }
@@ -619,7 +657,7 @@ class GlobalSequencePartitionIndexerTest {
   def testGapRecoveryPreservesValidatedControlOnlyCursorWithinTheSameSourceLifetime(): Unit = {
     val c = new Context
     try {
-      c.read = offset => if (offset == 0) ReadResult(key, 3, 5, 3, None, CONTINUE)
+      c.read = offset => if (offset == 0) ReadResult(key, 3, 5, 3, Vector.empty, CONTINUE)
         else throw new SourceLogGapException(key, offset, 4, 4, 5, "missing data after control prefix")
       c.start()
       assertEquals(Seq(0L, 3L), c.reads.toSeq)

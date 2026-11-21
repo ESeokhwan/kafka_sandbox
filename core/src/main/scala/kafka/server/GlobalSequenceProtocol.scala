@@ -112,6 +112,7 @@ private[server] object GlobalSequenceProtocol {
     new AppendGlobalSequenceIndexRequest.Builder(new AppendGlobalSequenceIndexRequestData()
       .setTopicId(batch.partition().topicId()).setPartition(batch.partition().partition())
       .setPhysicalBaseOffset(batch.baseOffset()).setPhysicalLastOffset(batch.lastOffset()).setRecordCount(batch.recordCount())
+      .setBatchRecordCounts(request.batchRecordCounts())
       .setPredecessorBaseOffset(request.predecessorBaseOffset()).setDataHighWatermark(request.dataHighWatermark())
       .setSourceBrokerId(owner.brokerId()).setSourceLeaderEpoch(owner.leaderEpoch()).setIndexerGeneration(owner.generation())
       .setRegistrationId(owner.registrationId()).setCoordinatorLeaderEpoch(epoch))

@@ -83,7 +83,7 @@ class GlobalSequenceSourceReaderValidationTest {
     }
     val time = new MockTime()
     val reader = new GlobalSequenceSourceReader(replicaManager, time, 10)
-    def read(): GlobalSequenceSourceReader.ReadResult = reader.read(key, 3, 0, 1024)
+    def read(offset: Long = 0L): GlobalSequenceSourceReader.ReadResult = reader.read(key, 3, offset, 1024)
   }
 
   @Test
@@ -92,7 +92,7 @@ class GlobalSequenceSourceReaderValidationTest {
     c.onRead = () => c.time.sleep(10)
     assertThrows(classOf[org.apache.kafka.common.errors.TimeoutException], () => c.read())
     c.onRead = () => ()
-    assertEquals(0L, c.read().batch.get.baseOffset())
+    assertEquals(0L, c.read().batches.head.baseOffset())
     val large = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(new Array[Byte](GlobalSequenceFetch.MaxBatchBytes)))
     val oversized = new Context(large)
     assertThrows(classOf[org.apache.kafka.common.errors.RecordTooLargeException], () => oversized.read())
@@ -106,7 +106,7 @@ class GlobalSequenceSourceReaderValidationTest {
     assertEquals(AWAIT_HIGH_WATERMARK, first.status)
     assertEquals(2L, first.dataHighWatermark)
     assertEquals(0L, first.nextPhysicalOffset)
-    assertTrue(first.batch.isEmpty)
+    assertTrue(first.batches.isEmpty)
     val next = ctx.read()
     assertEquals(BATCH, next.status)
     assertEquals(3L, next.dataHighWatermark)
@@ -147,6 +147,37 @@ class GlobalSequenceSourceReaderValidationTest {
       val ctx = new Context(MemoryRecords.readableRecords(buffer))
       assertThrows(classOf[CorruptRecordException], () => ctx.read())
     }
+  }
+
+  @Test
+  def testReadReturnsValidatedPrefixBeforeAnIncompleteOrCorruptBatch(): Unit = {
+    val first = records()
+    val second = records(base = 3)
+    val combined = ByteBuffer.allocate(first.sizeInBytes() + second.sizeInBytes())
+    combined.put(first.buffer().duplicate()).put(second.buffer().duplicate()).flip()
+    val truncated = combined.duplicate()
+    truncated.limit(truncated.limit() - 1)
+    val partial = new Context(MemoryRecords.readableRecords(truncated), initialHw = 6)
+    val waiting = new Context(MemoryRecords.readableRecords(combined), initialHw = 4)
+    waiting.end = 6
+    val complete = waiting.read()
+    assertEquals(Seq(0L), complete.batches.map(_.baseOffset()))
+    assertEquals(3L, complete.nextPhysicalOffset)
+
+    val lastByte = combined.limit() - 1
+    combined.put(lastByte, (combined.get(lastByte) ^ 1).toByte)
+    val corrupt = new Context(MemoryRecords.readableRecords(combined), initialHw = 6)
+    for (ctx <- Seq(partial, corrupt)) {
+      ctx.end = 6
+      val result = ctx.read()
+      assertEquals(BATCH, result.status)
+      assertEquals(Seq(0L), result.batches.map(_.baseOffset()))
+      assertEquals(3L, result.nextPhysicalOffset)
+    }
+    combined.position(first.sizeInBytes())
+    val atCorruptBatch = new Context(MemoryRecords.readableRecords(combined.slice()), initialHw = 6)
+    atCorruptBatch.end = 6
+    assertThrows(classOf[CorruptRecordException], () => atCorruptBatch.read(3))
   }
 
   @Test

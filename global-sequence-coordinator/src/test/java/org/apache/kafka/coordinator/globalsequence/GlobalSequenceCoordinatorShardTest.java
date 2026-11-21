@@ -339,6 +339,30 @@ class GlobalSequenceCoordinatorShardTest {
     }
 
     @Test
+    void testMergedAppendPersistsOneEntryAndChecksRetryBoundaries() {
+        Context ctx = new Context(P0);
+        PhysicalBatch range = batch(P0, 0, 5);
+        AppendRequest request = new AppendRequest(range, -1, 5, OWNER, List.of(1, 3, 1));
+        AppendRequest conflicting = new AppendRequest(range, -1, 5, OWNER, List.of(3, 1, 1));
+        var write = ctx.shard.prepareAppend(request, new CoordinatorWriteContext(ctx.highWatermark, 10));
+        assertEquals(2, write.records().size());
+        assertEquals(1, write.records().get(0).value().version());
+        assertEquals(List.of(1, 3, 1), ((BatchIndexValue) write.records().get(0).value().message()).batchRecordCounts());
+        ctx.replay(write.records());
+        var retry = ctx.shard.prepareAppend(request, new CoordinatorWriteContext(ctx.highWatermark, 10));
+        assertTrue(retry.records().isEmpty());
+        assertEquals(OptionalLong.of(0), retry.response().globalBaseOffset());
+        assertThrows(IllegalArgumentException.class, () ->
+            ctx.shard.prepareAppend(conflicting, new CoordinatorWriteContext(ctx.highWatermark, 10)));
+        ctx.commit(ctx.endOffset);
+        assertEquals(ALREADY_INDEXED, ctx.shard.prepareAppend(request,
+            new CoordinatorWriteContext(ctx.highWatermark, 10)).response().status());
+        assertThrows(IllegalArgumentException.class, () ->
+            ctx.shard.prepareAppend(conflicting, new CoordinatorWriteContext(ctx.highWatermark, 10)));
+        assertEquals(5, ctx.shard.committedNextGlobalOffset(TOPIC));
+    }
+
+    @Test
     void testKnownBatchConflictsAndOverlapsAreRejected() {
         Context ctx = new Context(P0);
         ctx.append(A, -1);
@@ -562,8 +586,9 @@ class GlobalSequenceCoordinatorShardTest {
         assertThrows(IllegalStateException.class, () -> ctx.shard.replayEndTransactionMarker(5, (short) 0, TransactionResult.ABORT));
         assertThrows(IllegalStateException.class, () -> ctx.replay(List.of(CoordinatorRecord.tombstone(allocation(A, 0).get(0).key()))));
         CoordinatorRecord record = allocation(A, 0).get(0);
+        short unsupportedVersion = (short) (record.value().message().highestSupportedVersion() + 1);
         assertThrows(UnsupportedVersionException.class, () -> ctx.replay(List.of(CoordinatorRecord.record(record.key(),
-            new ApiMessageAndVersion(record.value().message(), (short) 1)))));
+            new ApiMessageAndVersion(record.value().message(), unsupportedVersion)))));
         Context unfenced = new Context();
         assertThrows(IllegalStateException.class, () -> unfenced.replay(allocation(A, 0)));
     }

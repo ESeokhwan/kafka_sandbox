@@ -62,6 +62,7 @@ import org.apache.kafka.common.message.AlterShareGroupOffsetsRequestData;
 import org.apache.kafka.common.message.AlterShareGroupOffsetsResponseData;
 import org.apache.kafka.common.message.AlterUserScramCredentialsRequestData;
 import org.apache.kafka.common.message.AlterUserScramCredentialsResponseData;
+import org.apache.kafka.common.message.AppendGlobalSequenceIndexRequestData;
 import org.apache.kafka.common.message.ApiMessageType;
 import org.apache.kafka.common.message.ApiVersionsRequestData;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
@@ -334,6 +335,17 @@ public class RequestResponseTest {
 
     // Exception includes a message that we verify is not included in error responses
     private final UnknownServerException unknownServerException = new UnknownServerException("secret");
+
+    @Test
+    public void testMergedGlobalSequenceAppendRequiresVersionOne() {
+        var data = new AppendGlobalSequenceIndexRequestData();
+        checkRequest(new AppendGlobalSequenceIndexRequest.Builder(data).build((short) 0));
+        data.setRecordCount(5).setPhysicalLastOffset(4).setBatchRecordCounts(List.of(2, 3));
+        var merged = new AppendGlobalSequenceIndexRequest.Builder(data);
+        assertEquals(1, merged.oldestAllowedVersion());
+        assertThrows(UnsupportedVersionException.class, () -> merged.build((short) 0));
+        checkRequest(merged.build((short) 1));
+    }
 
     @Test
     public void testSerialization() {
@@ -1081,7 +1093,7 @@ public class RequestResponseTest {
             case ALTER_SHARE_GROUP_OFFSETS: return createAlterShareGroupOffsetsRequest(version);
             case REGISTER_GLOBAL_SEQUENCE_INDEXER: return new RegisterGlobalSequenceIndexerRequest.Builder(new org.apache.kafka.common.message.RegisterGlobalSequenceIndexerRequestData()).build(version);
             case DESCRIBE_GLOBAL_SEQUENCE_PARTITION: return new DescribeGlobalSequencePartitionRequest.Builder(new org.apache.kafka.common.message.DescribeGlobalSequencePartitionRequestData()).build(version);
-            case APPEND_GLOBAL_SEQUENCE_INDEX: return new AppendGlobalSequenceIndexRequest.Builder(new org.apache.kafka.common.message.AppendGlobalSequenceIndexRequestData()).build(version);
+            case APPEND_GLOBAL_SEQUENCE_INDEX: return new AppendGlobalSequenceIndexRequest.Builder(new AppendGlobalSequenceIndexRequestData()).build(version);
             case LOOKUP_GLOBAL_SEQUENCE: return new LookupGlobalSequenceRequest.Builder(new org.apache.kafka.common.message.LookupGlobalSequenceRequestData()).build(version);
             case FETCH_GLOBAL_SEQUENCE: return new FetchGlobalSequenceRequest.Builder(new org.apache.kafka.common.message.FetchGlobalSequenceRequestData()).build(version);
             case READ_GLOBAL_SEQUENCE_INDEX: return new ReadGlobalSequenceIndexRequest.Builder(new org.apache.kafka.common.message.ReadGlobalSequenceIndexRequestData()).build(version);

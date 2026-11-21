@@ -30,10 +30,11 @@ import org.apache.kafka.storage.internals.log.{LogReadInfo, UnifiedLog}
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.Optional
+import scala.collection.mutable.ArrayBuffer
 import scala.util.control.NonFatal
 
 object GlobalSequenceSourceReader {
-  /** BATCH requires an index commit before consuming nextPhysicalOffset; CONTINUE skips only control batches. */
+  /** BATCH requires committing every returned batch before using nextPhysicalOffset. */
   sealed trait ReadStatus
   case object BATCH extends ReadStatus
   case object CONTINUE extends ReadStatus
@@ -44,7 +45,7 @@ object GlobalSequenceSourceReader {
     sourceLeaderEpoch: Int,
     dataHighWatermark: Long,
     nextPhysicalOffset: Long,
-    batch: Option[PhysicalBatch],
+    batches: Vector[PhysicalBatch],
     status: ReadStatus
   )
 
@@ -129,13 +130,10 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
         gap(physicalOffset, current, "Source high watermark regressed within the captured leader epoch")
     }
 
-    def result(offset: Long, batch: Option[PhysicalBatch], status: ReadStatus): ReadResult =
-      ReadResult(partition, sourceLeaderEpoch, highWatermark, offset, batch, status)
-
     try {
       checkBounds(snapshot)
       val readResult = if (physicalOffset >= highWatermark) {
-        result(physicalOffset, None, AWAIT_HIGH_WATERMARK)
+        ReadResult(partition, sourceLeaderEpoch, highWatermark, physicalOffset, Vector.empty, AWAIT_HIGH_WATERMARK)
       } else {
         // Read up to LOG_END, then enforce the captured HW below. An HW in the middle of a batch
         // can make a HIGH_WATERMARK fetch empty; that is a wait, not evidence of a missing batch.
@@ -197,7 +195,12 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
   ): ReadResult = {
     var cursor = start
     val batches = records.batches().iterator()
+    val validated = new ArrayBuffer[PhysicalBatch]()
     val buffers = BufferSupplier.create()
+
+    def result(status: ReadStatus): ReadResult =
+      ReadResult(partition, epoch, highWatermark, cursor, validated.toVector, if (validated.nonEmpty) BATCH else status)
+
     try {
       if (!batches.hasNext) throw new CorruptRecordException("Incomplete first batch in the source log")
       while (cursor < highWatermark && batches.hasNext) {
@@ -214,18 +217,19 @@ class GlobalSequenceSourceReader(replicaManager: ReplicaManager, time: Time = Ti
           batch.lastOffset() == Long.MaxValue || batch.lastOffset() - batch.baseOffset() != count.longValue() - 1)
           throw new CorruptRecordException("Source batch bounds and record count are inconsistent")
         if (batch.lastOffset() >= highWatermark)
-          return ReadResult(partition, epoch, highWatermark, cursor, None, AWAIT_HIGH_WATERMARK)
+          return result(AWAIT_HIGH_WATERMARK)
         validateRecords(batch, buffers, checkDeadline)
+        if (!batch.isControlBatch)
+          validated += new PhysicalBatch(partition, batch.baseOffset(), batch.lastOffset(), count)
         cursor = batch.lastOffset() + 1
-        if (!batch.isControlBatch) {
-          val physicalBatch = new PhysicalBatch(partition, batch.baseOffset(), batch.lastOffset(), count)
-          return ReadResult(partition, epoch, highWatermark, cursor, Some(physicalBatch), BATCH)
-        }
       }
       // A slice may end in a partial trailing batch or at a segment boundary. Resume at the last
-      // fully validated control batch; minOneMessage will return the next complete batch on reread.
-      ReadResult(partition, epoch, highWatermark, cursor, None,
-        if (cursor >= highWatermark) AWAIT_HIGH_WATERMARK else CONTINUE)
+      // fully validated boundary; minOneMessage will return the next complete batch on reread.
+      result(if (cursor >= highWatermark) AWAIT_HIGH_WATERMARK else CONTINUE)
+    } catch {
+      // Preserve the valid prefix if validation of a later batch fails. The next read starts
+      // at that batch and handles the failure with the usual first-batch retry or recovery.
+      case NonFatal(_) if validated.nonEmpty => result(CONTINUE)
     } finally buffers.close()
   }
 

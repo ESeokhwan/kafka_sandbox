@@ -35,7 +35,7 @@ import org.apache.kafka.common.internals.Topic.GLOBAL_SEQUENCE_INDEX_TOPIC_NAME
 import org.apache.kafka.common.test.{KafkaClusterTestKit, TestKitNodes}
 import org.apache.kafka.coordinator.globalsequence.{GlobalSequenceCoordinatorConfig, GlobalSequenceCoordinatorRecordSerde}
 import org.apache.kafka.coordinator.globalsequence.generated.{BatchIndexKey, BatchIndexValue}
-import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{AppendRequest, AppendStatus, PartitionKey, RegistrationRequest}
+import org.apache.kafka.coordinator.globalsequence.GlobalSequenceCoordinatorShard.{AppendRequest, AppendStatus, PartitionKey, PhysicalBatch, RegistrationRequest}
 import org.apache.kafka.test.TestUtils.assertFutureThrows
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotSame, assertTrue}
 import org.junit.jupiter.api.{Test, Timeout}
@@ -159,9 +159,10 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(physicalOffset, recovered.physicalLastOffset())
         assertTrue(recovered.registrationId() != registrationId)
         assertTrue(recovered.indexerGeneration() > 0)
+        val resumedValue = """{"id":"resumed"}""".getBytes(java.nio.charset.StandardCharsets.UTF_8)
         val resumedProducer = new KafkaProducer[Array[Byte], Array[Byte]](props)
         val nextOffset = try {
-          resumedProducer.send(new ProducerRecord[Array[Byte], Array[Byte]]("ordered", 0, null, Array[Byte](4)))
+          resumedProducer.send(new ProducerRecord[Array[Byte], Array[Byte]]("ordered", 0, null, resumedValue))
             .get(30, TimeUnit.SECONDS).offset()
         } finally resumedProducer.close()
         TestUtils.waitUntilTrue(() => Try(describe().data()).toOption.exists(_.physicalLastOffset() == nextOffset),
@@ -182,7 +183,7 @@ class GlobalSequenceCoordinatorIntegrationTest {
         assertEquals(Errors.NONE.code(), recoveredData.errorCode(), recoveredData.errorMessage())
         assertEquals(2L, recoveredData.nextGlobalOffset())
         val values = recoveredData.batches().asScala.map(_.records().asInstanceOf[MemoryRecords].records().iterator().next().value())
-        assertEquals(Seq(java.nio.ByteBuffer.wrap(Array[Byte](1, 2, 3)), java.nio.ByteBuffer.wrap(Array[Byte](4))), values.toSeq)
+        assertEquals(Seq(java.nio.ByteBuffer.wrap(Array[Byte](1, 2, 3)), java.nio.ByteBuffer.wrap(resumedValue)), values.toSeq)
       } finally {
         admin.close()
       }
@@ -249,24 +250,23 @@ class GlobalSequenceCoordinatorIntegrationTest {
         val owner = registered.value.indexer().get()
         locally {
           val reader = new GlobalSequenceSourceReader(source.replicaManager)
-          def produce(): GlobalSequenceSourceReader.ReadResult = {
+          def produce(batchCount: Int): GlobalSequenceSourceReader.ReadResult = {
             val sourcePartition = source.replicaManager.onlinePartition(new TopicPartition("routed", 0)).get
-            val info = sourcePartition.appendRecordsToLeader(
-              MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Array[Byte](1))),
-              AppendOrigin.CLIENT, -1, RequestLocal.noCaching)
-            val offset = info.firstOffset
-            TestUtils.waitUntilTrue(() => sourcePartition.log.get.highWatermark > info.lastOffset,
+            val offsets = (0 until batchCount).map { _ =>
+              sourcePartition.appendRecordsToLeader(MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(Array[Byte](1))),
+                AppendOrigin.CLIENT, -1, RequestLocal.noCaching).firstOffset
+            }
+            TestUtils.waitUntilTrue(() => sourcePartition.log.get.highWatermark > offsets.last,
               "Manually appended data did not reach its HW", 30000)
-            val read = reader.read(partition, sourceEpoch, offset, maxBytes = 1)
+            val read = reader.read(partition, sourceEpoch, offsets.head, maxBytes = 1024)
             assertEquals(GlobalSequenceSourceReader.BATCH, read.status)
-            assertEquals(offset, read.batch.get.baseOffset())
+            assertEquals(offsets.toSeq, read.batches.map(_.baseOffset()))
             read
           }
-          def request(read: GlobalSequenceSourceReader.ReadResult, predecessor: Long): AppendRequest =
-            new AppendRequest(read.batch.get, predecessor, read.dataHighWatermark, owner)
-          val firstRead = produce()
-          val first = firstRead.batch.get
-          val append = request(firstRead, -1)
+          val firstRead = produce(3)
+          val first = new PhysicalBatch(partition, 0, 2, 3)
+          val append = new AppendRequest(first, -1, firstRead.dataHighWatermark, owner,
+            util.List.of(Int.box(1), Int.box(1), Int.box(1)))
           val indexed = source.indexRoutingManager.appendIndex(append, 30000).get(35, TimeUnit.SECONDS)
           assertEquals(AppendStatus.INDEXED, indexed.value.status())
           assertEquals(0L, indexed.value.globalBaseOffset().getAsLong)
@@ -284,10 +284,11 @@ class GlobalSequenceCoordinatorIntegrationTest {
           val retry = source.indexRoutingManager.appendIndex(append, 30000).get(35, TimeUnit.SECONDS)
           assertEquals(AppendStatus.ALREADY_INDEXED, retry.value.status())
           assertTrue(retry.value.globalBaseOffset().isEmpty)
-          val second = produce()
-          val next = source.indexRoutingManager.appendIndex(request(second, first.baseOffset()), 30000).get(35, TimeUnit.SECONDS)
+          val second = produce(1)
+          val next = source.indexRoutingManager.appendIndex(
+            new AppendRequest(second.batches.head, first.baseOffset(), second.dataHighWatermark, owner), 30000).get(35, TimeUnit.SECONDS)
           assertEquals(AppendStatus.INDEXED, next.value.status())
-          assertEquals(1L, next.value.globalBaseOffset().getAsLong)
+          assertEquals(3L, next.value.globalBaseOffset().getAsLong)
         }
       } finally admin.close()
     } finally cluster.close()
@@ -334,10 +335,11 @@ class GlobalSequenceCoordinatorIntegrationTest {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
         props.put(ProducerConfig.ACKS_CONFIG, acks)
         if (acks == "1") props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false")
+        val value = """{"id":"automatic"}""".getBytes(java.nio.charset.StandardCharsets.UTF_8)
         val producer = new KafkaProducer[Array[Byte], Array[Byte]](props)
         def produceAndAwait(start: Int): Unit = {
           for (offset <- start until start + 3; partition <- 0 to 1) {
-            val result = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("automatic", partition, null, Array[Byte](1)))
+            val result = producer.send(new ProducerRecord[Array[Byte], Array[Byte]]("automatic", partition, null, value))
               .get(30, TimeUnit.SECONDS)
             assertEquals(offset.toLong, result.offset(), "Produce still returns the physical offset")
             val committed = brokers(partition).indexRoutingManager.describePartition(keys(partition), 5000)
@@ -386,7 +388,7 @@ class GlobalSequenceCoordinatorIntegrationTest {
                   val batch = entry.records().asInstanceOf[MemoryRecords].batches().iterator().next()
                   batch.ensureValid()
                   assertEquals(next / 2, batch.baseOffset())
-                  assertEquals(java.nio.ByteBuffer.wrap(Array[Byte](1)), batch.iterator().next().value())
+                  assertEquals(java.nio.ByteBuffer.wrap(value), batch.iterator().next().value())
                   next += 1
                 }
                 assertEquals(next, page.nextGlobalOffset())
@@ -486,27 +488,28 @@ class GlobalSequenceCoordinatorIntegrationTest {
         awaitProgress(0)
         val firstIndexer = source.globalSequenceIndexerManager.indexer(key).get
         firstIndexer.close()
-        // Commit source data with indexing stopped, independently of the Produce waiter added in step 13.
-        assertEquals(2, appendOn(source, 2))
-        TestUtils.waitUntilTrue(() => source.replicaManager.localLog(tp).get.highWatermark >= 3,
+        // Leave two physical batches for the new indexer to read and merge in one allocation.
+        assertEquals(1, appendOn(source, 1))
+        assertEquals(3, appendOn(source, 2))
+        TestUtils.waitUntilTrue(() => source.replicaManager.localLog(tp).get.highWatermark >= 4,
           "Source data did not replicate before leader movement", 30000)
         assertEquals(0L, source.indexRoutingManager.describePartition(key, 5000).get(6, TimeUnit.SECONDS)
           .value.committedProgress().get().lastOffset())
         def verifyGlobalFetchAfterMove(): Unit = {
           brokers.foreach { broker =>
             val request = new FetchGlobalSequenceRequest.Builder(new FetchGlobalSequenceRequestData().setTopicId(id)
-              .setGlobalStartOffset(1).setGlobalEndOffsetExclusive(2).setMaxBytes(1).setTimeoutMs(10000)).build()
+              .setGlobalStartOffset(3).setGlobalEndOffsetExclusive(4).setMaxBytes(1).setTimeoutMs(10000)).build()
             val page = IntegrationTestUtils.connectAndReceive[FetchGlobalSequenceResponse](request, broker.socketServer,
               broker.config.interBrokerListenerName).data()
             assertEquals(Errors.NONE.code(), page.errorCode(), page.errorMessage())
-            assertEquals(2L, page.nextGlobalOffset())
+            assertEquals(4L, page.nextGlobalOffset())
             assertEquals(1, page.batches().size())
             val entry = page.batches().get(0)
-            assertEquals(1L, entry.physicalBaseOffset())
-            assertEquals(2L, entry.physicalLastOffset())
+            assertEquals(2L, entry.physicalBaseOffset())
+            assertEquals(3L, entry.physicalLastOffset())
             assertEquals(2, entry.recordCount())
-            assertEquals(1L, entry.selectedGlobalStartOffset())
-            assertEquals(2L, entry.selectedGlobalEndOffset())
+            assertEquals(3L, entry.selectedGlobalStartOffset())
+            assertEquals(4L, entry.selectedGlobalEndOffset())
             entry.records().asInstanceOf[MemoryRecords].batches().iterator().next().ensureValid()
           }
         }
@@ -522,7 +525,10 @@ class GlobalSequenceCoordinatorIntegrationTest {
             .partitions().get(0).leader == target.config.brokerId), "Source leader did not move", 30000)
         }
         move(brokers(1))
-        awaitProgress(2)
+        awaitProgress(3)
+        val merged = source.indexRoutingManager.describePartition(key, 5000).get(6, TimeUnit.SECONDS)
+          .value.committedProgress().get()
+        assertEquals(new PhysicalBatch(key, 1, 3, 3), merged)
         verifyGlobalFetchAfterMove()
         val secondIndexer = brokers(1).globalSequenceIndexerManager.indexer(key).get
         assertTrue(secondIndexer.sourceLeaderEpoch > firstIndexer.sourceLeaderEpoch)
@@ -531,8 +537,8 @@ class GlobalSequenceCoordinatorIntegrationTest {
           .exists(_.sourceLeaderEpoch > secondIndexer.sourceLeaderEpoch), "Returning source did not create a new lifetime", 30000)
         assertTrue(secondIndexer.isStopped)
         assertNotSame(firstIndexer, source.globalSequenceIndexerManager.indexer(key).get)
-        assertEquals(3, appendOn(source, 1))
-        awaitProgress(3)
+        assertEquals(4, appendOn(source, 1))
+        awaitProgress(4)
         verifyGlobalFetchAfterMove()
       } finally admin.close()
     } finally cluster.close()
