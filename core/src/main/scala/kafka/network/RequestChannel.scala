@@ -21,6 +21,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent._
 import com.fasterxml.jackson.databind.JsonNode
 import com.typesafe.scalalogging.Logger
+import kafka.interceptor.BrokerInterceptors
 import kafka.network
 import kafka.server.KafkaConfig
 import kafka.utils.Logging
@@ -318,6 +319,8 @@ object RequestChannel extends Logging {
 
     def onComplete: Option[Send => Unit] = None
 
+    def errorCounts: Map[Errors, Int] = Map.empty
+
     def release(): Unit = ()
   }
 
@@ -326,7 +329,8 @@ object RequestChannel extends Logging {
                      val responseSend: Send,
                      val responseLogValue: Option[JsonNode],
                      val onCompleteCallback: Option[Send => Unit],
-                     val onReleaseCallback: Option[() => Unit] = None) extends Response(request) {
+                     val onReleaseCallback: Option[() => Unit] = None,
+                     override val errorCounts: Map[Errors, Int] = Map.empty) extends Response(request) {
     private val released = new java.util.concurrent.atomic.AtomicBoolean(false)
     override def release(): Unit = if (released.compareAndSet(false, true)) onReleaseCallback.foreach(_())
 
@@ -343,7 +347,10 @@ object RequestChannel extends Logging {
       s"Response(type=NoOp, request=$request)"
   }
 
-  class CloseConnectionResponse(request: Request) extends Response(request) {
+  class CloseConnectionResponse(
+    request: Request,
+    override val errorCounts: Map[Errors, Int] = Map.empty
+  ) extends Response(request) {
     override def toString: String =
       s"Response(type=CloseConnection, request=$request)"
   }
@@ -361,7 +368,8 @@ object RequestChannel extends Logging {
 
 class RequestChannel(val queueSize: Int,
                      time: Time,
-                     val metrics: RequestChannelMetrics) {
+                     val metrics: RequestChannelMetrics,
+                     val brokerInterceptors: BrokerInterceptors = new BrokerInterceptors(Vector.empty)) {
   import RequestChannel._
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -403,7 +411,10 @@ class RequestChannel(val queueSize: Int,
     // This case is used when the request handler has encountered an error, but the client
     // does not expect a response (e.g. when produce request has acks set to 0)
     updateErrorMetrics(request.header.apiKey, errorCounts.asScala)
-    sendResponse(new RequestChannel.CloseConnectionResponse(request))
+    val responseErrorCounts = errorCounts.asScala.iterator
+      .map { case (error, count) => error -> count.intValue() }
+      .toMap
+    sendResponse(new RequestChannel.CloseConnectionResponse(request, responseErrorCounts))
   }
 
   def sendResponse(
@@ -416,13 +427,17 @@ class RequestChannel(val queueSize: Int,
       case _ => None
     }
     try {
+      val responseErrorCounts = response.errorCounts.asScala.iterator
+        .map { case (error, count) => error -> count.intValue() }
+        .toMap
       updateErrorMetrics(request.header.apiKey, response.errorCounts.asScala)
       sendResponse(new RequestChannel.SendResponse(
         request,
         request.buildResponseSend(response),
         request.responseNode(response),
         onComplete,
-        release
+        release,
+        responseErrorCounts
       ))
     } catch {
       case error: Throwable =>
@@ -445,6 +460,7 @@ class RequestChannel(val queueSize: Int,
 
   /** Send a response back to the socket server to be sent over the network */
   private[network] def sendResponse(response: RequestChannel.Response): Unit = {
+    brokerInterceptors.beforeSendResponseToQueue(response)
     if (isTraceEnabled) {
       val requestHeader = response.request.headerForLoggingOrThrottling()
       val message = response match {

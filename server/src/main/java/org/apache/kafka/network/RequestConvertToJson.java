@@ -44,6 +44,8 @@ import org.apache.kafka.common.message.AssignReplicasToDirsRequestDataJsonConver
 import org.apache.kafka.common.message.AssignReplicasToDirsResponseDataJsonConverter;
 import org.apache.kafka.common.message.BeginQuorumEpochRequestDataJsonConverter;
 import org.apache.kafka.common.message.BeginQuorumEpochResponseDataJsonConverter;
+import org.apache.kafka.common.message.BrokerExtensionRequestDataJsonConverter;
+import org.apache.kafka.common.message.BrokerExtensionResponseDataJsonConverter;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestDataJsonConverter;
 import org.apache.kafka.common.message.BrokerHeartbeatResponseDataJsonConverter;
 import org.apache.kafka.common.message.BrokerRegistrationRequestDataJsonConverter;
@@ -226,6 +228,8 @@ import org.apache.kafka.common.requests.AssignReplicasToDirsRequest;
 import org.apache.kafka.common.requests.AssignReplicasToDirsResponse;
 import org.apache.kafka.common.requests.BeginQuorumEpochRequest;
 import org.apache.kafka.common.requests.BeginQuorumEpochResponse;
+import org.apache.kafka.common.requests.BrokerExtensionRequest;
+import org.apache.kafka.common.requests.BrokerExtensionResponse;
 import org.apache.kafka.common.requests.BrokerHeartbeatRequest;
 import org.apache.kafka.common.requests.BrokerHeartbeatResponse;
 import org.apache.kafka.common.requests.BrokerRegistrationRequest;
@@ -423,6 +427,8 @@ public class RequestConvertToJson {
                 return BeginQuorumEpochRequestDataJsonConverter.write(((BeginQuorumEpochRequest) request).data(), request.version());
             case BROKER_HEARTBEAT:
                 return BrokerHeartbeatRequestDataJsonConverter.write(((BrokerHeartbeatRequest) request).data(), request.version());
+            case BROKER_EXTENSION:
+                return BrokerExtensionRequestDataJsonConverter.write(((BrokerExtensionRequest) request).data(), request.version());
             case BROKER_REGISTRATION:
                 return BrokerRegistrationRequestDataJsonConverter.write(((BrokerRegistrationRequest) request).data(), request.version());
             case CONSUMER_GROUP_DESCRIBE:
@@ -609,6 +615,8 @@ public class RequestConvertToJson {
                 return BeginQuorumEpochResponseDataJsonConverter.write(((BeginQuorumEpochResponse) response).data(), version);
             case BROKER_HEARTBEAT:
                 return BrokerHeartbeatResponseDataJsonConverter.write(((BrokerHeartbeatResponse) response).data(), version);
+            case BROKER_EXTENSION:
+                return BrokerExtensionResponseDataJsonConverter.write(((BrokerExtensionResponse) response).data(), version);
             case BROKER_REGISTRATION:
                 return BrokerRegistrationResponseDataJsonConverter.write(((BrokerRegistrationResponse) response).data(), version);
             case CONSUMER_GROUP_DESCRIBE:

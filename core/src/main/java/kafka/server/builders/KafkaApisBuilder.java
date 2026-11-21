@@ -18,6 +18,7 @@
 package kafka.server.builders;
 
 import kafka.coordinator.transaction.TransactionCoordinator;
+import kafka.interceptor.BrokerExtensionRegistry;
 import kafka.network.RequestChannel;
 import kafka.server.AutoTopicCreationManager;
 import kafka.server.FetchManager;
@@ -43,6 +44,7 @@ import org.apache.kafka.server.ApiVersionManager;
 import org.apache.kafka.server.ClientMetricsManager;
 import org.apache.kafka.server.DelegationTokenManager;
 import org.apache.kafka.server.authorizer.Authorizer;
+import org.apache.kafka.server.util.Scheduler;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import java.util.Map;
@@ -77,6 +79,8 @@ public class KafkaApisBuilder {
     private IndexRoutingManager indexRoutingManager = null;
     private GlobalSequenceFetchManager globalSequenceFetchManager = null;
     private GroupConfigManager groupConfigManager = null;
+    private BrokerExtensionRegistry brokerExtensionRegistry = null;
+    private Scheduler brokerExtensionScheduler = null;
 
     public KafkaApisBuilder setRequestChannel(RequestChannel requestChannel) {
         this.requestChannel = requestChannel;
@@ -208,6 +212,16 @@ public class KafkaApisBuilder {
         return this;
     }
 
+    public KafkaApisBuilder setBrokerExtensionRegistry(BrokerExtensionRegistry brokerExtensionRegistry) {
+        this.brokerExtensionRegistry = brokerExtensionRegistry;
+        return this;
+    }
+
+    public KafkaApisBuilder setBrokerExtensionScheduler(Scheduler brokerExtensionScheduler) {
+        this.brokerExtensionScheduler = brokerExtensionScheduler;
+        return this;
+    }
+
     @SuppressWarnings({"CyclomaticComplexity"})
     public KafkaApis build() {
         if (requestChannel == null) throw new RuntimeException("you must set requestChannel");
@@ -257,6 +271,8 @@ public class KafkaApisBuilder {
                              tokenManager,
                              apiVersionManager,
                              clientMetricsManager,
-                             groupConfigManager);
+                             groupConfigManager,
+                             brokerExtensionRegistry,
+                             brokerExtensionScheduler);
     }
 }

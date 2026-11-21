@@ -141,8 +141,9 @@ public enum ApiKeys {
     LOOKUP_GLOBAL_SEQUENCE(ApiMessageType.LOOKUP_GLOBAL_SEQUENCE),
     READ_GLOBAL_SEQUENCE_INDEX(ApiMessageType.READ_GLOBAL_SEQUENCE_INDEX, true),
     FETCH_GLOBAL_SEQUENCE(ApiMessageType.FETCH_GLOBAL_SEQUENCE),
-    READ_GLOBAL_SEQUENCE_DATA(ApiMessageType.READ_GLOBAL_SEQUENCE_DATA, true);
-    
+    READ_GLOBAL_SEQUENCE_DATA(ApiMessageType.READ_GLOBAL_SEQUENCE_DATA, true),
+    BROKER_EXTENSION(ApiMessageType.BROKER_EXTENSION);
+
 
     private static final Map<ApiMessageType.ListenerType, EnumSet<ApiKeys>> APIS_BY_LISTENER =
         new EnumMap<>(ApiMessageType.ListenerType.class);

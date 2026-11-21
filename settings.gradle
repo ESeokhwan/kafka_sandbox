@@ -63,6 +63,8 @@ buildCache {
     }
 }
 
+includeBuild('external/moniq')
+
 include 'clients',
     'clients:clients-integration-tests',
     'connect:api',
@@ -128,4 +130,3 @@ include 'clients',
 
 project(":storage:api").name = "storage-api"
 rootProject.name = 'kafka'
-

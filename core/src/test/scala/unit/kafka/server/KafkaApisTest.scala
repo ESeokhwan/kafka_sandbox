@@ -19,6 +19,7 @@ package kafka.server
 
 import kafka.cluster.Partition
 import kafka.coordinator.transaction.{InitProducerIdResult, TransactionCoordinator}
+import kafka.interceptor.{BrokerExtensionCommand, BrokerExtensionHandler, BrokerExtensionRegistry, BrokerExtensionResult}
 import kafka.network.RequestChannel
 import kafka.server.QuotaFactory.QuotaManagers
 import kafka.server.metadata.KRaftMetadataCache
@@ -89,7 +90,7 @@ import org.apache.kafka.security.authorizer.AclEntry
 import org.apache.kafka.server.{ClientMetricsManager, SimpleApiVersionManager}
 import org.apache.kafka.server.authorizer.{Action, AuthorizationResult, Authorizer}
 import org.apache.kafka.server.common.{FeatureVersion, FinalizedFeatures, GroupVersion, KRaftVersion, MetadataVersion, RequestLocal, ShareVersion, StreamsVersion, TransactionVersion}
-import org.apache.kafka.server.config.{KRaftConfigs, ReplicationConfigs, ServerConfigs, ServerLogConfigs}
+import org.apache.kafka.server.config.{BrokerExtensionConfigs, KRaftConfigs, ReplicationConfigs, ServerConfigs, ServerLogConfigs}
 import org.apache.kafka.server.logger.LoggingController
 import org.apache.kafka.server.metrics.ClientMetricsTestUtils
 import org.apache.kafka.server.share.{CachedSharePartition, ErroneousAndValidPartitionData, SharePartitionKey}
@@ -168,7 +169,8 @@ class KafkaApisTest extends Logging {
     authorizer: Option[Authorizer] = None,
     configRepository: ConfigRepository = new MockConfigRepository(),
     overrideProperties: Map[String, String] = Map.empty,
-    featureVersions: Seq[FeatureVersion] = Seq.empty
+    featureVersions: Seq[FeatureVersion] = Seq.empty,
+    brokerExtensionRegistry: BrokerExtensionRegistry = BrokerExtensionRegistry.empty
   ): KafkaApis = {
 
     val properties = TestUtils.createBrokerConfig(brokerId)
@@ -213,7 +215,8 @@ class KafkaApisTest extends Logging {
       tokenManager = null,
       apiVersionManager = apiVersionManager,
       clientMetricsManager = clientMetricsManager,
-      groupConfigManager = groupConfigManager)
+      groupConfigManager = groupConfigManager,
+      brokerExtensionRegistry = brokerExtensionRegistry)
   }
 
   private def setupFeatures(featureVersions: Seq[FeatureVersion]): Unit = {
@@ -9482,6 +9485,82 @@ class KafkaApisTest extends Logging {
     assertEquals(Errors.NONE.code, partitionData.errorCode)
     assertEquals(latestOffset, partitionData.offset)
     assertEquals(ListOffsetsResponse.UNKNOWN_TIMESTAMP, partitionData.timestamp)
+  }
+
+  @Test
+  def testBrokerExtensionRequestIsDisabledByDefault(): Unit = {
+    val extensionRequest = new BrokerExtensionRequest(new BrokerExtensionRequestData()
+      .setRequestId(Uuid.randomUuid())
+      .setTarget("moniq")
+      .setOperation("flush")
+      .setTimeoutMs(1000), 0)
+    val request = buildRequest(extensionRequest)
+    kafkaApis = createKafkaApis()
+
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    assertEquals(Errors.UNSUPPORTED_VERSION, verifyNoThrottling[BrokerExtensionResponse](request).error.error)
+  }
+
+  @Test
+  def testBrokerExtensionRequestDispatchesToRegisteredHandler(): Unit = {
+    var command: BrokerExtensionCommand = null
+    val handler: BrokerExtensionHandler = new BrokerExtensionHandler {
+      override def target: String = "moniq"
+
+      override def handle(value: BrokerExtensionCommand): CompletableFuture[BrokerExtensionResult] = {
+        command = value
+        CompletableFuture.completedFuture(BrokerExtensionResult(1, Array[Byte](1, 2)))
+      }
+    }
+    val extensionRequest = new BrokerExtensionRequest(new BrokerExtensionRequestData()
+      .setRequestId(Uuid.randomUuid())
+      .setTarget("moniq")
+      .setOperation("flush")
+      .setPayloadVersion(1)
+      .setTimeoutMs(1000)
+      .setPayload(ByteBuffer.wrap(Array[Byte](3, 4))), 0)
+    val request = buildRequest(extensionRequest)
+    kafkaApis = createKafkaApis(
+      overrideProperties = Map(
+        BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_ENABLED_CONFIG -> "true",
+        BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_ALLOWED_LISTENERS_CONFIG -> "PLAINTEXT"),
+      brokerExtensionRegistry = new BrokerExtensionRegistry(scala.collection.immutable.Seq(handler)))
+
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    val response = verifyNoThrottling[BrokerExtensionResponse](request)
+    assertEquals(Errors.NONE, response.error.error)
+    assertEquals(1, response.data.payloadVersion)
+    assertArrayEquals(Array[Byte](1, 2), response.data.payload)
+    assertEquals("flush", command.operation)
+    assertArrayEquals(Array[Byte](3, 4), command.payload)
+  }
+
+  @Test
+  def testBrokerExtensionRequestRejectsPayloadAboveConfiguredLimit(): Unit = {
+    val extensionRequest = new BrokerExtensionRequest(new BrokerExtensionRequestData()
+      .setRequestId(Uuid.randomUuid())
+      .setTarget("moniq")
+      .setOperation("flush")
+      .setTimeoutMs(1000)
+      .setPayload(ByteBuffer.wrap(Array[Byte](1, 2))), 0)
+    val request = buildRequest(extensionRequest)
+    val handler: BrokerExtensionHandler = new BrokerExtensionHandler {
+      override def target: String = "moniq"
+      override def handle(command: BrokerExtensionCommand): CompletableFuture[BrokerExtensionResult] =
+        CompletableFuture.completedFuture(BrokerExtensionResult())
+    }
+    kafkaApis = createKafkaApis(
+      overrideProperties = Map(
+        BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_ENABLED_CONFIG -> "true",
+        BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_ALLOWED_LISTENERS_CONFIG -> "PLAINTEXT",
+        BrokerExtensionConfigs.BROKER_EXTENSION_REQUEST_MAX_PAYLOAD_BYTES_CONFIG -> "1"),
+      brokerExtensionRegistry = new BrokerExtensionRegistry(scala.collection.immutable.Seq(handler)))
+
+    kafkaApis.handle(request, RequestLocal.noCaching)
+
+    assertEquals(Errors.INVALID_REQUEST, verifyNoThrottling[BrokerExtensionResponse](request).error.error)
   }
 
   private def createWriteTxnMarkersRequest(partitions: util.List[TopicPartition]) = {

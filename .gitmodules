@@ -1,0 +1,3 @@
+[submodule "external/moniq"]
+	path = external/moniq
+	url = https://github.com/ESeokhwan/moniq.git
