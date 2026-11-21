@@ -169,6 +169,7 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
         if (info.divergingEpoch.isPresent) throw new NotLeaderOrFollowerException("Source log diverged during global fetch")
         if (!info.fetchedData.firstEntryIncomplete) {
           val original = copy(info.fetchedData.records)
+          val sharedRange = Some(new SharedRange(original.sizeInBytes()))
           val batches = original.batches().iterator()
           var position = 0
           var finished = false
@@ -187,14 +188,8 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
             } else {
               val batch = batches.next()
               val size = batch.sizeInBytes()
-              val records = if (size == original.sizeInBytes()) original else {
-                val source = original.buffer()
-                source.position(position)
-                source.limit(position + size)
-                val target = ByteBuffer.allocate(size)
-                target.put(source).flip()
-                MemoryRecords.readableRecords(target)
-              }
+              val wholeRange = size == original.sizeInBytes()
+              val records = if (wholeRange) original else original.slice(position, size)
               validateBatch(expected, records)
               val iterator = batch.skipKeyValueIterator(buffers)
               var offset = expected.baseOffset()
@@ -211,7 +206,7 @@ class GlobalSequenceDataReader private[server](replicas: ReplicaManager, schedul
               val aborted = isolation == READ_COMMITTED && batch.isTransactional &&
                 log.isAborted(batch.producerId(), expected.baseOffset(), expected.lastOffset(), () => deadline())
               results += Data(if (aborted) MemoryRecords.EMPTY else records, leaderEpoch, snapshot.highWatermark,
-                stableOffset, if (aborted) Aborted else Visible)
+                stableOffset, if (aborted) Aborted else Visible, if (aborted || wholeRange) None else sharedRange)
               position += size
               checked += 1
             }

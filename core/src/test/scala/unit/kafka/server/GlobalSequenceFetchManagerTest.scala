@@ -33,6 +33,7 @@ import org.junit.jupiter.api.Test
 import org.mockito.ArgumentMatchers.{any, anyLong}
 import org.mockito.Mockito.{mock, verifyNoInteractions, when}
 
+import java.nio.ByteBuffer
 import java.util.concurrent.CompletableFuture
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
@@ -113,6 +114,44 @@ class GlobalSequenceFetchManagerTest {
       assertEquals(Vector(0L, 1L, 2L), c.response.data().batches().asScala.map(_.globalBaseOffset()).toVector)
       assertEquals(2, c.rangeWork.size)
     } finally c.close()
+  }
+
+  @Test
+  def testSharedRangeReservationAccountsForTheBackingBufferOfAPartialPage(): Unit = {
+    import kafka.network.RequestChannel.ResourceResponse
+    import org.apache.kafka.coordinator.globalsequence.GlobalSequenceResources.Scope.FETCH
+    val entries = (0L until 3L).map(i => new GlobalSequenceLookup.Mapping(i, new PhysicalBatch(new PartitionKey(topic, 0), i, i, 1)))
+    val batches = entries.map(entry => data(entry.batch()))
+    val batchSize = batches.head.records.sizeInBytes()
+    val backing = ByteBuffer.allocate(batches.map(_.records.sizeInBytes()).sum)
+    batches.foreach(batch => backing.put(batch.records.buffer()))
+    backing.flip()
+    val rangeRecords = MemoryRecords.readableRecords(backing)
+    val shared = Some(new SharedRange(rangeRecords.sizeInBytes()))
+    val sliced = batches.zipWithIndex.map { case (batch, i) =>
+      batch.copy(records = rangeRecords.slice(i * batchSize, batchSize), sharedRange = shared)
+    }.toVector
+    val extra = rangeRecords.sizeInBytes() - batchSize
+
+    for (extraFetchBytes <- Seq(0, extra)) {
+      val c = new Context(entries = entries, maxBytes = batchSize * 2, window = 3, bounded = true, extraFetchBytes = extraFetchBytes)
+      try {
+        c.loaded()
+        c.rangeWork.head._2.complete(RangeResult(sliced))
+        assertEquals(2L, c.response.data().nextGlobalOffset())
+        val sent = c.response.data().batches().asScala.map(_.records().asInstanceOf[MemoryRecords].buffer()).toVector
+        assertEquals(batches.take(2).map(_.records.buffer()).toVector, sent)
+        sent.foreach { buffer =>
+          if (extraFetchBytes == 0) {
+            assertNotSame(backing.array(), buffer.array())
+            assertEquals(batchSize, buffer.array().length)
+          } else assertSame(backing.array(), buffer.array())
+        }
+        assertEquals(GlobalSequenceResources.FETCH_BYTES + extraFetchBytes, c.limits.resources.bytes(FETCH))
+        c.response.asInstanceOf[ResourceResponse].release()
+        assertEquals(0L, c.limits.resources.bytes(FETCH))
+      } finally c.close()
+    }
   }
 
   @Test
