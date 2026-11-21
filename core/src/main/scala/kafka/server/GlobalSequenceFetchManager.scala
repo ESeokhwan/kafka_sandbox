@@ -91,7 +91,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
         if (lookup != null) lookup.cancel(false)
         val work = running.values.toList
         running = Map.empty
-        discardCompleted()
+        completed = Map.empty
         queuedRanges = Vector.empty
         work.foreach(_.cancel(false))
       }}
@@ -145,12 +145,6 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
       if (!result.complete(owned)) owned.release()
     }
 
-    private def discardCompleted(): Unit = {
-      val discarded = completed.valuesIterator.collect { case Right(data) => data.records.sizeInBytes().toLong }.sum
-      completed = Map.empty
-      Option(resources).foreach(_.recordFetchRead(0, 0, discarded))
-    }
-
     private def retainBatch(data: Data): Data = data.sharedRange match {
       case Some(range) =>
         val size = data.records.sizeInBytes()
@@ -187,14 +181,12 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
       }
       ranges ++= byPartition.values
       queuedRanges = ranges.result().sortBy(_.head)
-      Option(resources).foreach(_.recordFetchRead(1, 0, 0))
     }
 
     private def issueRange(positions: Vector[Int]): Unit = {
       val start = positions.head
       val budget = math.min(MaxRangeReadBytes, windowBytes * positions.size.toLong / windowCount).toInt
       val range = ReadRange(positions.map(i => mappings(i).batch()), budget, minOneBatch = start == windowStart)
-      Option(resources).foreach(_.recordFetchRead(0, 1, 0))
       try {
         val read = source.readRange(range, deadlineNs, request.isolation)
         running += start -> read
@@ -238,7 +230,6 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
               case Right(data) =>
                 val size = data.records.sizeInBytes()
                 if (bytes > 0 && (bytes.toLong + size > request.maxBytes || bytes.toLong + size > MaxPayloadBytes)) {
-                  Option(resources).foreach(_.recordFetchRead(0, 0, size))
                   finish(None)
                 }
                 else {
@@ -276,7 +267,7 @@ class GlobalSequenceFetchManager(index: IndexRoutingManager, source: GlobalSeque
             if (running.isEmpty && queuedRanges.isEmpty && !completed.contains(consumed)) {
               // A short read can leave results after a gap. Drop that suffix before opening
               // a new window so it cannot monopolize the next prefix's buffer budget.
-              discardCompleted()
+              completed = Map.empty
               selectWindow()
             }
             while (!result.isDone && queuedRanges.nonEmpty && running.size < ParallelReads) {

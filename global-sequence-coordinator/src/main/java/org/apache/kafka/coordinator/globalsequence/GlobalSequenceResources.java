@@ -24,7 +24,6 @@ import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.metrics.stats.CumulativeCount;
-import org.apache.kafka.common.metrics.stats.CumulativeSum;
 import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.utils.Time;
 
@@ -59,11 +58,6 @@ public final class GlobalSequenceResources implements AutoCloseable {
     private final Map<Scope, Budget> budgets = new EnumMap<>(Scope.class);
     private final Map<Event, Sensor> events = new EnumMap<>(Event.class);
     private final Map<Progress, AtomicLong> progress = new EnumMap<>(Progress.class);
-    private final Sensor fetchWindows;
-    private final Sensor fetchRanges;
-    private final Sensor fetchDiscardedBytes;
-    private final Sensor sourceRead;
-    private final Sensor sourceReadDuration;
     private final List<MetricName> names = new ArrayList<>();
     private final List<String> sensors = new ArrayList<>();
 
@@ -84,17 +78,6 @@ public final class GlobalSequenceResources implements AutoCloseable {
             progress.put(value, gauge);
             metrics.addMetric(name("physical-offsets", value.name()), (Gauge<Long>) (c, now) -> gauge.get());
         }
-        fetchWindows = sensor("fetch-read-windows");
-        fetchWindows.add(name("read-windows-total", Scope.FETCH.name()), new CumulativeSum());
-        fetchRanges = sensor("fetch-read-ranges");
-        fetchRanges.add(name("read-ranges-total", Scope.FETCH.name()), new CumulativeSum());
-        fetchDiscardedBytes = sensor("fetch-discarded-bytes");
-        fetchDiscardedBytes.add(name("discarded-read-bytes-total", Scope.FETCH.name()), new CumulativeSum());
-        sourceRead = sensor("source-read");
-        sourceRead.add(name("reads-total", "SOURCE_READ"), new CumulativeCount());
-        sourceRead.add(name("batches-total", "SOURCE_READ"), new CumulativeSum());
-        sourceReadDuration = sensor("source-read-duration");
-        sourceReadDuration.add(name("duration-ms-total", "SOURCE_READ"), new CumulativeSum());
     }
 
     public GlobalSequenceCoordinatorConfig config() {
@@ -123,16 +106,6 @@ public final class GlobalSequenceResources implements AutoCloseable {
     }
     public void progress(Progress kind, long delta) {
         progress.get(kind).addAndGet(delta);
-    }
-    public void recordFetchRead(int windows, int ranges, long discardedBytes) {
-        if (windows > 0) fetchWindows.record(windows);
-        if (ranges > 0) fetchRanges.record(ranges);
-        if (discardedBytes > 0) fetchDiscardedBytes.record(discardedBytes);
-    }
-
-    public void recordSourceRead(int batches, double durationMs) {
-        sourceRead.record(batches);
-        sourceReadDuration.record(durationMs);
     }
     public long used(Scope scope) {
         return budgets.get(scope).count();
