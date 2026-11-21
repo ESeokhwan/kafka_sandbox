@@ -68,6 +68,9 @@ class GlobalSequenceTransactionFetchIntegrationTest {
           Int.box(1), (Seq(ids(1), ids(0), ids(2))).asJava)).configs(util.Map.of(
           TopicConfig.GLOBAL_SEQUENCE_ENABLED_CONFIG, "true", TopicConfig.CLEANUP_POLICY_CONFIG, "delete"))))
           .all().get(30, TimeUnit.SECONDS)
+        TestUtils.waitUntilTrue(() => brokers.forall(broker =>
+          (0 until 2).forall(partition => broker.metadataCache.contains(new TopicPartition(topic, partition)))),
+          "Transactional source topic metadata was not published", 30000)
         val topicId = admin.describeTopics(util.List.of(topic)).allTopicNames().get(30, TimeUnit.SECONDS).get(topic).topicId()
         def producer(transactional: Boolean): KafkaProducer[Array[Byte], Array[Byte]] = {
           val props = cluster.clientProperties()
