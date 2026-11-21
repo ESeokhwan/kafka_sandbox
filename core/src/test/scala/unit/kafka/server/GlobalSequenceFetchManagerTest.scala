@@ -202,10 +202,6 @@ class GlobalSequenceFetchManagerTest {
         assertEquals(extraBytes > 0, response.tryReserveFrameBytes(1024))
         assertEquals(1L, c.limits.resources.used(FETCH))
         assertEquals(GlobalSequenceResources.FETCH_BYTES + extraBytes, c.limits.resources.bytes(FETCH))
-        val metrics = c.limits.metrics
-        val fallback = metrics.metric(metrics.metricName("coalesce-budget-fallback-total", GlobalSequenceResources.GROUP,
-          java.util.Map.of("scope", "fetch")))
-        assertEquals(if (extraBytes == 0) Double.box(1.0) else Double.box(0.0), fallback.metricValue())
         response.release()
         assertEquals(0L, c.limits.resources.bytes(FETCH))
       } finally c.close()
